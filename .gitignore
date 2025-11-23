@@ -1,0 +1,33 @@
+# Flutter/Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+ios/.generated/
+android/.gradle/
+android/local.properties
+*.iml
+.idea/
+.vscode/
+
+# Nix/direnv
+result
+.direnv/
+
+# Logs & dumps
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Keys/certs (never commit real secrets)
+*.pem
+*.key
+*.p12
+*.der
+
+# Platform artifacts
+*.apk
+*.aab
+*.ipa
