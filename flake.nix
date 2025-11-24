@@ -29,6 +29,11 @@
             pkgs.ninja
             pkgs.pkg-config
             pkgs.clang
+            pkgs.rustc
+            pkgs.cargo
+            pkgs.rustfmt
+            pkgs.clippy
+            pkgs.perl
             pkgs.protobuf
             pkgs.sysprof
             pkgs.alsa-lib
@@ -42,7 +47,7 @@
           shellHook = ''
             export FLUTTER_ROOT=${flutter}
             export PATH="$FLUTTER_ROOT/bin:$FLUTTER_ROOT/bin/cache/dart-sdk/bin:$PATH"
-            echo "CribCall dev shell ready (Flutter, Dart, Android tools)."
+            echo "CribCall dev shell ready (Flutter, Dart, Android tools, Rust/quiche deps)."
           '';
         };
       }

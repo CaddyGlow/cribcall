@@ -1,13 +1,12 @@
 import 'dart:async';
-import 'dart:typed_data';
+import 'dart:io';
 
-import 'package:flutter/foundation.dart';
-import 'package:flutter_quic/flutter_quic.dart';
-import 'package:cryptography/cryptography.dart';
+import 'package:cribcall_quic/cribcall_quic.dart';
+
 import '../identity/device_identity.dart';
-import '../identity/pkcs8.dart';
 import 'control_frame_codec.dart';
 import 'control_message.dart';
+import 'native/quiche_library.dart';
 
 class QuicEndpoint {
   QuicEndpoint({
@@ -21,9 +20,76 @@ class QuicEndpoint {
   final String expectedServerFingerprint;
 }
 
+/// QUIC control client backed by the Rust/quiche native plugin.
+class NativeQuicControlClient implements QuicControlClient {
+  NativeQuicControlClient({QuicheLibrary? quiche})
+    : _quiche = quiche ?? QuicheLibrary();
+
+  final QuicheLibrary _quiche;
+
+  @override
+  Future<QuicControlConnection> connect({
+    required QuicEndpoint endpoint,
+    required DeviceIdentity clientIdentity,
+  }) async {
+    final resources = await _quiche.startClient(
+      host: endpoint.host,
+      port: endpoint.port,
+      expectedServerFingerprint: endpoint.expectedServerFingerprint,
+      identity: clientIdentity,
+    );
+    return NativeQuicControlConnection(
+      remoteDescription: endpoint,
+      native: resources.native,
+      cleanupDir: resources.identityDir,
+    );
+  }
+}
+
+/// QUIC control server backed by the Rust/quiche native plugin.
+class NativeQuicControlServer implements QuicControlServer {
+  NativeQuicControlServer({QuicheLibrary? quiche, this.bindAddress = '0.0.0.0'})
+    : _quiche = quiche ?? QuicheLibrary();
+
+  final QuicheLibrary _quiche;
+  final String bindAddress;
+  List<String> trustedFingerprints = const [];
+
+  QuicNativeConnection? _nativeConnection;
+  Directory? _cleanupDir;
+
+  @override
+  Future<void> start({
+    required int port,
+    required DeviceIdentity serverIdentity,
+    List<String> trustedListenerFingerprints = const [],
+  }) async {
+    trustedFingerprints = trustedListenerFingerprints;
+    final resources = await _quiche.startServer(
+      port: port,
+      identity: serverIdentity,
+      bindAddress: bindAddress,
+      trustedFingerprints: trustedListenerFingerprints,
+    );
+    _nativeConnection = resources.native;
+    _cleanupDir = resources.identityDir;
+  }
+
+  @override
+  Future<void> stop() async {
+    _nativeConnection?.close();
+    _nativeConnection = null;
+    final dir = _cleanupDir;
+    _cleanupDir = null;
+    if (dir != null && await dir.exists()) {
+      await dir.delete(recursive: true);
+    }
+  }
+}
+
 /// Simple interface to represent a QUIC control connection.
-/// Real implementations should use platform-native stacks (quiche/Cronet/etc.)
-/// and enforce certificate pinning before sending any control traffic.
+/// Real implementations should use platform-native stacks and enforce
+/// certificate pinning before sending any control traffic.
 abstract class QuicControlClient {
   Future<QuicControlConnection> connect({
     required QuicEndpoint endpoint,
@@ -35,136 +101,133 @@ abstract class QuicControlServer {
   Future<void> start({
     required int port,
     required DeviceIdentity serverIdentity,
+    List<String> trustedListenerFingerprints = const [],
   });
 
   Future<void> stop();
 }
 
 class QuicControlConnection {
-  QuicControlConnection({
-    required this.connection,
-    required this.sendStream,
-    required this.recvStream,
-    required this.decoder,
-    required this.remoteDescription,
-  });
+  QuicControlConnection({required this.remoteDescription});
 
-  final QuicConnection connection;
-  QuicSendStream sendStream;
-  QuicRecvStream recvStream;
-  final ControlFrameDecoder decoder;
   final QuicEndpoint remoteDescription;
 
-  Stream<ControlMessage> receiveMessages() async* {
-    var stream = recvStream;
-    while (true) {
-      final (updatedStream, chunk) = await recvStreamRead(
-        stream: stream,
-        maxLength: BigInt.from(ControlFrameCodec.maxFrameLength + 4),
-      );
-      stream = updatedStream;
-      if (chunk == null) break;
-      final frames = decoder.addChunkAndDecodeJson(chunk);
-      for (final json in frames) {
-        try {
-          yield ControlMessageFactory.fromWireJson(json);
-        } catch (_) {
-          // Ignore malformed frames; production code should close with PROTOCOL_ERROR.
-        }
-      }
-    }
-    recvStream = stream;
-  }
+  Stream<ControlMessage> receiveMessages() =>
+      Stream.error(_unsupportedQuicError());
 
-  Future<void> sendMessage(ControlMessage message) async {
-    final frame = ControlFrameCodec.encodeJson(message.toWireJson());
-    sendStream = await sendStreamWriteAll(stream: sendStream, data: frame);
-  }
+  Future<void> sendMessage(ControlMessage message) =>
+      Future.error(_unsupportedQuicError());
 
-  Future<void> finish() async {
-    sendStream = await sendStreamFinish(stream: sendStream);
-  }
+  Future<void> finish() async {}
 
   Future<void> close() async {
     await finish();
   }
 }
 
-class FlutterQuicControlClient implements QuicControlClient {
-  FlutterQuicControlClient({this.serverNameOverride});
+class NativeQuicControlConnection extends QuicControlConnection {
+  NativeQuicControlConnection({
+    required super.remoteDescription,
+    required this.native,
+    required this.cleanupDir,
+  }) {
+    _subscription = native.events.listen(_handleEvent);
+  }
 
-  final String? serverNameOverride;
+  final QuicNativeConnection native;
+  final Directory cleanupDir;
+
+  final ControlFrameDecoder _decoder = ControlFrameDecoder();
+  final _messages = StreamController<ControlMessage>.broadcast();
+  StreamSubscription<QuicEvent>? _subscription;
+
+  @override
+  Stream<ControlMessage> receiveMessages() => _messages.stream;
+
+  void _handleEvent(QuicEvent event) {
+    if (event is QuicMessage) {
+      final frames = _decoder.addChunkAndDecodeJson(event.data);
+      for (final frame in frames) {
+        try {
+          _messages.add(ControlMessageFactory.fromWireJson(frame));
+        } on FormatException {
+          // Ignore malformed messages; protocol layer will enforce framing rules.
+        }
+      }
+    } else if (event is QuicClosed || event is QuicError) {
+      _messages.close();
+      _subscription?.cancel();
+      native.close();
+      _maybeCleanup();
+    }
+  }
+
+  @override
+  Future<void> sendMessage(ControlMessage message) async {
+    final frame = ControlFrameCodec.encodeJson(message.toWireJson());
+    native.send(frame);
+  }
+
+  @override
+  Future<void> finish() async {
+    native.close();
+    await _messages.close();
+    await _subscription?.cancel();
+    _maybeCleanup();
+  }
+
+  void _maybeCleanup() {
+    () async {
+      if (await cleanupDir.exists()) {
+        await cleanupDir.delete(recursive: true);
+      }
+    }();
+  }
+}
+
+class UnsupportedQuicControlClient implements QuicControlClient {
+  const UnsupportedQuicControlClient();
 
   @override
   Future<QuicControlConnection> connect({
     required QuicEndpoint endpoint,
     required DeviceIdentity clientIdentity,
-  }) async {
-    if (kIsWeb) {
-      throw UnsupportedError('flutter_quic is unavailable on web');
-    }
-    await _FlutterQuicRuntime.ensureInitialized();
-    // Client identity will be used for mTLS once flutter_quic exposes client auth.
+  }) {
     final _ = clientIdentity;
-    final clientEndpoint = await createClientEndpoint();
-    final addr = '${endpoint.host}:${endpoint.port}';
-    final (_, connection) = await endpointConnect(
-      endpoint: clientEndpoint,
-      addr: addr,
-      serverName: serverNameOverride ?? endpoint.host,
-    );
-    final (quicConnection, sendStream, recvStream) = await connectionOpenBi(
-      connection: connection,
-    );
-    return QuicControlConnection(
-      connection: quicConnection,
-      sendStream: sendStream,
-      recvStream: recvStream,
-      decoder: ControlFrameDecoder(),
-      remoteDescription: endpoint,
-    );
+    return Future.error(_unsupportedQuicError(endpoint: endpoint));
   }
 }
 
-class FlutterQuicControlServer implements QuicControlServer {
-  FlutterQuicControlServer({this.bindAddress = '0.0.0.0'});
-
-  final String bindAddress;
-  QuicEndpoint? _endpoint;
+class UnsupportedQuicControlServer implements QuicControlServer {
+  const UnsupportedQuicControlServer();
 
   @override
   Future<void> start({
     required int port,
     required DeviceIdentity serverIdentity,
-  }) async {
-    if (kIsWeb) {
-      throw UnsupportedError('flutter_quic is unavailable on web');
-    }
-    await _FlutterQuicRuntime.ensureInitialized();
-    final keyData = await serverIdentity.keyPair.extract() as SimpleKeyPairData;
-    final pkcs8 = ed25519PrivateKeyPkcs8(keyData.bytes);
-    final serverConfig = await serverConfigWithSingleCert(
-      certChain: [Uint8List.fromList(serverIdentity.certificateDer)],
-      key: pkcs8,
+    List<String> trustedListenerFingerprints = const [],
+  }) {
+    final _ = serverIdentity;
+    return Future.error(
+      _unsupportedQuicError(
+        endpoint: QuicEndpoint(
+          host: 'localhost',
+          port: port,
+          expectedServerFingerprint: '',
+        ),
+      ),
     );
-    _endpoint = await createServerEndpoint(
-      config: serverConfig,
-      addr: '$bindAddress:$port',
-    );
-    // flutter_quic does not currently expose an accept loop; connections
-    // must be handled once the plugin surfaces that API.
   }
 
   @override
-  Future<void> stop() async {
-    _endpoint = null;
-  }
+  Future<void> stop() async {}
 }
 
-class _FlutterQuicRuntime {
-  static Future<void>? _initialized;
-
-  static Future<void> ensureInitialized() {
-    return _initialized ??= RustLib.init();
-  }
+UnsupportedError _unsupportedQuicError({QuicEndpoint? endpoint}) {
+  final description = endpoint != null
+      ? '${endpoint.host}:${endpoint.port}'
+      : 'requested QUIC endpoint';
+  return UnsupportedError(
+    'QUIC control transport is unavailable for $description',
+  );
 }
