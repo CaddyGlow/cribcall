@@ -6,12 +6,19 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         pkgs = import nixpkgs { inherit system; };
         flutter = pkgs.flutter;
-      in {
+      in
+      {
         devShells.default = pkgs.mkShell {
           buildInputs = [
             flutter
@@ -28,6 +35,7 @@
             pkgs.pulseaudio
             pkgs.glib
             pkgs.gtk3
+            pkgs.libsecret
             pkgs.libGL
           ];
 
@@ -37,5 +45,6 @@
             echo "CribCall dev shell ready (Flutter, Dart, Android tools)."
           '';
         };
-      });
+      }
+    );
 }

@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../domain/models.dart';
+import '../../pairing/pin_pairing_controller.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
+import 'listener_pin_page.dart';
 import 'listener_scan_qr_page.dart';
 import 'widgets/pinned_badge.dart';
 
@@ -15,10 +17,43 @@ class ListenerDashboard extends ConsumerWidget {
     final advertisements = ref.watch(discoveredMonitorsProvider);
     final trustedMonitors = ref.watch(trustedMonitorsProvider);
     final identity = ref.watch(identityProvider);
+    final listenerSettingsAsync = ref.watch(listenerSettingsProvider);
+    final listenerSettings =
+        listenerSettingsAsync.asData?.value ?? ListenerSettings.defaults;
     final pinned = trustedMonitors.maybeWhen(
       data: (list) => list,
       orElse: () => <TrustedMonitor>[],
     );
+
+    Future<void> forgetMonitor(String monitorId, String monitorName) async {
+      final confirmed =
+          await showDialog<bool>(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: const Text('Forget monitor?'),
+              content: Text(
+                'Remove $monitorName from trusted list? You will need to re-pair.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(context).pop(true),
+                  child: const Text('Forget'),
+                ),
+              ],
+            ),
+          ) ??
+          false;
+      if (!confirmed) return;
+      await ref.read(trustedMonitorsProvider.notifier).removeMonitor(monitorId);
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Forgot $monitorName')));
+    }
 
     final monitors = [
       ...advertisements.map((ad) {
@@ -34,6 +69,10 @@ class ListenerDashboard extends ConsumerWidget {
           fingerprint: ad.monitorCertFingerprint,
           trusted: isTrusted,
           lastKnownIp: ad.ip ?? pinnedMonitor?.lastKnownIp,
+          onForget: isTrusted
+              ? () => forgetMonitor(ad.monitorId, ad.monitorName)
+              : null,
+          advertisement: ad,
         );
       }),
       for (final monitor in pinned)
@@ -45,6 +84,8 @@ class ListenerDashboard extends ConsumerWidget {
             fingerprint: monitor.certFingerprint,
             trusted: true,
             lastKnownIp: monitor.lastKnownIp,
+            onForget: () =>
+                forgetMonitor(monitor.monitorId, monitor.monitorName),
           ),
     ];
 
@@ -104,6 +145,71 @@ class ListenerDashboard extends ConsumerWidget {
                       context,
                     ).textTheme.bodySmall?.copyWith(color: Colors.red),
                   ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 14),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'Listener settings',
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    if (listenerSettingsAsync.isLoading)
+                      const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Noise notifications'),
+                  subtitle: const Text(
+                    'Local alerts on NOISE_EVENT even when app is backgrounded.',
+                  ),
+                  value: listenerSettings.notificationsEnabled,
+                  onChanged: (_) => ref
+                      .read(listenerSettingsProvider.notifier)
+                      .toggleNotifications(),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Default action',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 8,
+                  children: ListenerDefaultAction.values.map((action) {
+                    final selected = listenerSettings.defaultAction == action;
+                    return ChoiceChip(
+                      label: Text(
+                        action == ListenerDefaultAction.notify
+                            ? 'Notify only'
+                            : 'Auto-open stream',
+                      ),
+                      selected: selected,
+                      onSelected: (_) => ref
+                          .read(listenerSettingsProvider.notifier)
+                          .setDefaultAction(action),
+                    );
+                  }).toList(),
                 ),
               ],
             ),
@@ -237,6 +343,8 @@ class _MonitorCardData {
     required this.fingerprint,
     required this.trusted,
     this.lastKnownIp,
+    this.onForget,
+    this.advertisement,
   });
 
   final String name;
@@ -245,6 +353,8 @@ class _MonitorCardData {
   final String fingerprint;
   final bool trusted;
   final String? lastKnownIp;
+  final VoidCallback? onForget;
+  final MdnsAdvertisement? advertisement;
 }
 
 class _MonitorCard extends StatelessWidget {
@@ -367,8 +477,35 @@ class _MonitorCard extends StatelessWidget {
                   ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
                 ),
               ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            runSpacing: 4,
+            children: [
               TextButton(onPressed: () {}, child: const Text('Listen')),
               TextButton(onPressed: () {}, child: const Text('View video')),
+              if (!data.trusted && data.advertisement != null)
+                TextButton.icon(
+                  onPressed: () async {
+                    final ad = data.advertisement!;
+                    await showModalBottomSheet<void>(
+                      context: context,
+                      showDragHandle: true,
+                      builder: (context) => ListenerPinPage(advertisement: ad),
+                    );
+                  },
+                  icon: const Icon(Icons.pin),
+                  label: const Text('Pair with PIN'),
+                ),
+              if (data.trusted && data.onForget != null)
+                TextButton.icon(
+                  onPressed: data.onForget,
+                  icon: const Icon(Icons.delete_outline),
+                  label: const Text('Forget'),
+                  style: TextButton.styleFrom(foregroundColor: Colors.red),
+                ),
             ],
           ),
         ],

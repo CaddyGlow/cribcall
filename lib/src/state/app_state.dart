@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/foundation.dart';
+import 'dart:io';
 
 import '../domain/models.dart';
 import '../discovery/mdns_service.dart';
@@ -8,7 +10,10 @@ import '../identity/device_identity.dart';
 import '../identity/identity_repository.dart';
 import '../identity/identity_store.dart';
 import '../identity/service_identity.dart';
+import '../pairing/pake_engine.dart';
+import '../pairing/pin_pairing_controller.dart';
 import '../storage/settings_repository.dart';
+import '../storage/trusted_listeners_repository.dart';
 import '../storage/trusted_monitors_repository.dart';
 
 class RoleController extends Notifier<DeviceRole?> {
@@ -39,6 +44,29 @@ class MonitorSettingsController extends AsyncNotifier<MonitorSettings> {
 
   Future<void> setAutoStreamDuration(int seconds) => _updateAndPersist(
     (current) => current.copyWith(autoStreamDurationSec: seconds),
+  );
+
+  Future<void> setName(String name) =>
+      _updateAndPersist((current) => current.copyWith(name: name));
+
+  Future<void> setAutoStreamType(AutoStreamType type) =>
+      _updateAndPersist((current) => current.copyWith(autoStreamType: type));
+
+  Future<void> setThreshold(int threshold) => _updateAndPersist(
+    (current) =>
+        current.copyWith(noise: current.noise.copyWith(threshold: threshold)),
+  );
+
+  Future<void> setMinDurationMs(int durationMs) => _updateAndPersist(
+    (current) => current.copyWith(
+      noise: current.noise.copyWith(minDurationMs: durationMs),
+    ),
+  );
+
+  Future<void> setCooldownSeconds(int seconds) => _updateAndPersist(
+    (current) => current.copyWith(
+      noise: current.noise.copyWith(cooldownSeconds: seconds),
+    ),
   );
 
   Future<void> toggleAutoStreamType() {
@@ -132,7 +160,15 @@ final serviceIdentityProvider = Provider<ServiceIdentityBuilder>((ref) {
   );
 });
 final mdnsServiceProvider = Provider<MdnsService>((ref) {
+  if (!kIsWeb && Platform.isLinux) {
+    return DesktopMdnsService();
+  }
   return MethodChannelMdnsService();
+});
+final trustedListenersRepoProvider = Provider<TrustedListenersRepository>((
+  ref,
+) {
+  return TrustedListenersRepository();
 });
 final monitorSettingsRepoProvider = Provider<MonitorSettingsRepository>((ref) {
   return MonitorSettingsRepository();
@@ -145,6 +181,43 @@ final listenerSettingsRepoProvider = Provider<ListenerSettingsRepository>((
 final trustedMonitorsRepoProvider = Provider<TrustedMonitorsRepository>((ref) {
   return TrustedMonitorsRepository();
 });
+final pakeEngineProvider = Provider<PakeEngine>((ref) {
+  return X25519PakeEngine();
+});
+
+class TrustedListenersController extends AsyncNotifier<List<TrustedPeer>> {
+  @override
+  Future<List<TrustedPeer>> build() async {
+    final repo = ref.read(trustedListenersRepoProvider);
+    return repo.load();
+  }
+
+  Future<void> addListener(TrustedPeer peer) async {
+    final current = await _ensureValue();
+    if (current.any((p) => p.deviceId == peer.deviceId)) return;
+    final updated = [...current, peer];
+    state = AsyncData(updated);
+    await ref.read(trustedListenersRepoProvider).save(updated);
+  }
+
+  Future<void> revoke(String deviceId) async {
+    final current = await _ensureValue();
+    final updated = current
+        .where((listener) => listener.deviceId != deviceId)
+        .toList();
+    state = AsyncData(updated);
+    await ref.read(trustedListenersRepoProvider).save(updated);
+  }
+
+  Future<List<TrustedPeer>> _ensureValue() async {
+    final current = state.asData?.value;
+    if (current != null) return current;
+    final repo = ref.read(trustedListenersRepoProvider);
+    final loaded = await repo.load();
+    state = AsyncData(loaded);
+    return loaded;
+  }
+}
 
 class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
   @override
@@ -213,6 +286,10 @@ final trustedMonitorsProvider =
     AsyncNotifierProvider<TrustedMonitorsController, List<TrustedMonitor>>(
       TrustedMonitorsController.new,
     );
+final trustedListenersProvider =
+    AsyncNotifierProvider<TrustedListenersController, List<TrustedPeer>>(
+      TrustedListenersController.new,
+    );
 
 final mdnsBrowseProvider = StreamProvider.autoDispose<List<MdnsAdvertisement>>((
   ref,
@@ -233,23 +310,6 @@ final mdnsBrowseProvider = StreamProvider.autoDispose<List<MdnsAdvertisement>>((
   }
 });
 
-final trustedPeersProvider = Provider<List<TrustedPeer>>((ref) {
-  return const [
-    TrustedPeer(
-      deviceId: 'listener-1',
-      name: 'Dad’s Phone',
-      certFingerprint: 'c3:1a:04:fa:9d',
-      addedAtEpochSec: 1700000000,
-    ),
-    TrustedPeer(
-      deviceId: 'desktop-1',
-      name: 'Desktop',
-      certFingerprint: '77:de:aa:14:21',
-      addedAtEpochSec: 1705000000,
-    ),
-  ];
-});
-
 final discoveredMonitorsProvider = Provider<List<MdnsAdvertisement>>((ref) {
   final browse = ref
       .watch(mdnsBrowseProvider)
@@ -265,3 +325,8 @@ class IdentityController extends AsyncNotifier<DeviceIdentity> {
     return repo.loadOrCreate();
   }
 }
+
+final pinSessionProvider =
+    NotifierProvider<PinPairingController, PinSessionState?>(
+      PinPairingController.new,
+    );

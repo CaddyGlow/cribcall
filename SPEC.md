@@ -182,10 +182,10 @@
 - FR3.2: Listener scans LAN, lists discovered monitors, and pins `monitorCertFingerprint` before opening QUIC.
 - FR3.3: When pairing via discovery:
   - Listener initiates PIN pairing (`PIN_PAIRING_INIT` over QUIC). Server cert **must** match pinned `monitorCertFingerprint`; client cert may be unknown for this flow only.
-  - Monitor generates random PIN, shows it on screen, and sends `PIN_REQUIRED` with `pairingSessionId` + SPAKE2+ `pakeMsgA` (and expiry/attempt limit).
-  - User enters PIN on listener; listener runs SPAKE2+ with `pakeMsgA`, derives `pairingKey`, and sends `PIN_SUBMIT` containing `pakeMsgB` plus an auth tag over the transcript.
+  - Monitor generates random PIN, shows it on screen, and sends `PIN_REQUIRED` with `pairingSessionId` + PAKE `pakeMsgA` (and expiry/attempt limit).
+  - User enters PIN on listener; listener runs the PAKE with `pakeMsgA`, derives `pairingKey`, and sends `PIN_SUBMIT` containing `pakeMsgB` plus an auth tag over the transcript.
   - The PAKE transcript **includes the server cert fingerprint** observed in this QUIC session to bind the PIN to the specific server identity.
-  - Monitor completes SPAKE2+, verifies the auth tag, stores listener (including listener cert fingerprint), sends `PAIR_ACCEPTED`.
+  - Monitor completes the PAKE, verifies the auth tag, stores listener (including listener cert fingerprint), sends `PAIR_ACCEPTED`.
 
 - FR3.4: Pairing fails if PIN/auth fails, session expired, attempts exceeded, or server cert fingerprint in transcript does not equal the monitor’s own fingerprint.
 
@@ -402,7 +402,7 @@ Since QR gives the public key out-of-band, no PIN needed.
 
 - `pairingSessionId` (UUID)
 - `pin` (random 6-digit numeric, displayed later)
-- `pakeMsgA` (first message for SPAKE2+ over X25519 using the PIN as password)
+- `pakeMsgA` (first message for the PAKE over X25519 using the PIN as password)
 - `expiry` (e.g. 60s) and `maxAttempts` (e.g. 3)
 
 Stores mapping `{pairingSessionId → (PIN, pakeState, expiry, attemptsRemaining)}`.
@@ -425,7 +425,7 @@ And **displays PIN** on monitor UI.
 
 6. **Listener runs PAKE:**
 
-   - Uses the entered PIN and `pakeMsgA` to compute `pakeMsgB` and derive a shared `pairingKey` (SPAKE2+ session key).
+   - Uses the entered PIN and `pakeMsgA` to compute `pakeMsgB` and derive a shared `pairingKey` (X25519-derived session key).
    - Builds transcript:
 
 ```json
@@ -459,7 +459,7 @@ authTag = HMAC( pairingKey, serialize(transcript) )
 
 9. **Monitor verifies:**
 
-- Runs SPAKE2+ step with stored PIN and `pakeMsgB` to derive `pairingKey`.
+- Runs the PAKE step with stored PIN and `pakeMsgB` to derive `pairingKey`.
 - Verifies `authTag` over transcript.
 - Verifies the `monitorCertFingerprint` in the transcript equals its own certificate fingerprint (binding the PAKE to the QUIC server identity).
 - Decrements `attemptsRemaining`; rejects and expires after `maxAttempts` or timeout.
@@ -492,8 +492,8 @@ PAKE prevents offline brute-forcing of the PIN; sessions expire after `expiresIn
 
 #### 2.3.3 PAKE Implementation Choice
 
-- Algorithm: SPAKE2+ over X25519 with HKDF-SHA256, following RFC 9380 group/point definitions.
-- Library: `libspake2` (C) wrapped via platform channels/FFI for Android, iOS, and Linux; emits 32-byte shared keys.
+- Algorithm: X25519 ephemeral key agreement with HKDF-SHA256, binding the PIN into the HKDF info string.
+- Messages: `pakeMsgA`/`pakeMsgB` are base64-encoded X25519 public keys.
 - Authentication: `authTag = HMAC-SHA256(pairingKey, serialize(transcript))`.
 - PIN policy: 6 digits, 60s expiry, max 3 attempts per `pairingSessionId`; session state cleared on expiry or lockout.
 - Serialization: transcript JSON is canonicalized via RFC 8785 (JCS) to avoid key-order/whitespace mismatches between platforms.

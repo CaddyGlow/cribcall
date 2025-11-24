@@ -113,7 +113,7 @@ class _RoleSwitcher extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final List<Widget> chips = DeviceRole.values.map((role) {
+    final chips = DeviceRole.values.map<Widget>((role) {
       final isSelected = selectedRole == role;
       return ChoiceChip(
         label: Text(
