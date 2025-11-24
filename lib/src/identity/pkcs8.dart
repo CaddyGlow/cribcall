@@ -18,6 +18,13 @@ Uint8List ed25519PrivateKeyPkcs8(List<int> seedBytes) {
   final algId = ASN1Sequence()
     ..add(ASN1ObjectIdentifier.fromComponents(_ed25519Oid));
   seq.add(algId);
-  seq.add(ASN1OctetString(Uint8List.fromList(seedBytes)));
+  // RFC 8410: privateKey OCTET STRING wraps the raw seed with an inner octet
+  // string tag/length (0x04 <len> || seed).
+  final wrappedSeed = Uint8List(seedBytes.length + 2);
+  wrappedSeed
+    ..[0] = 0x04
+    ..[1] = seedBytes.length
+    ..setRange(2, wrappedSeed.length, seedBytes);
+  seq.add(ASN1OctetString(wrappedSeed));
   return Uint8List.fromList(seq.encodedBytes);
 }

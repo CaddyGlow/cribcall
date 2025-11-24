@@ -7,7 +7,13 @@ cmake_minimum_required(VERSION 3.10)
 set(PROJECT_NAME "cribcall_quic")
 project(${PROJECT_NAME} LANGUAGES CXX)
 
-include("../cargokit/cmake/cargokit.cmake")
+# Resolve through symlinks to find the repo root, then locate the shared
+# cargokit directory at the root of the project.
+get_filename_component(PLUGIN_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." REALPATH)
+get_filename_component(PROJECT_ROOT "${PLUGIN_ROOT}/../.." REALPATH)
+set(CARGOKIT_DIR "${PROJECT_ROOT}/cargokit")
+
+include("${CARGOKIT_DIR}/cmake/cargokit.cmake")
 apply_cargokit(${PROJECT_NAME} ../rust cribcall_quic "")
 
 # List of absolute paths to libraries that should be bundled with the plugin.

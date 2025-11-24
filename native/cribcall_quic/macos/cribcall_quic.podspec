@@ -25,7 +25,7 @@ A new Flutter FFI plugin project.
   s.platform = :osx, '10.11'
   s.script_phase = {
     :name => 'Build Rust library',
-    :script => 'sh "$PODS_TARGET_SRCROOT/../cargokit/build_pod.sh" ../rust cribcall_quic',
+    :script => 'sh "$PODS_TARGET_SRCROOT/../../../cargokit/build_pod.sh" ../rust cribcall_quic',
     :execution_position => :before_compile,
     :input_files => ['${BUILT_PRODUCTS_DIR}/cargokit_phony'],
     :output_files => ["${BUILT_PRODUCTS_DIR}/libcribcall_quic.a"],

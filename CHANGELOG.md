@@ -1,11 +1,14 @@
 # Changelog
 
 ## Unreleased
+- Task: plan-control-stream — Swapped the dev shell to fenix Rust with Android SDK/NDK tooling and Android rust-std targets to mirror the HandControl toolchains.
+ - Task: plan-control-stream — Fixed cribcall_quic loading on Darwin by preferring process/executable handles (static Cargokit outputs) with framework/dylib fallback and added Linux bundle-path fallback (`<exe>/lib/libcribcall_quic.so`) plus RFC8410-wrapped Ed25519 PKCS#8 keys to avoid cert_load_error during native QUIC startup across platforms.
 - Task: plan-control-stream — Implemented QUIC control connection events plus a ControlChannel wrapper with send queueing, connection state/error mapping, and tests to kick off the plan’s code work.
 - Task: plan-control-stream — Wired monitor QUIC server/controller startup with trusted listener allowlist and listener-side control client connect hook using the new ControlChannel scaffolding.
 - Task: plan-control-stream — Added a detailed control channel + WebRTC stream integration plan (QUIC wiring, pairing enforcement, heartbeat, and media handoff).
 - Task: plan-control-stream — Hydrate listener PIN sessions from `PIN_REQUIRED` so PIN submissions no longer return `NO_SESSION`, keep attempts alive for control-channel retries, and cover the flow with a PIN_REQUIRED test.
 - Task: presence-mdns — Auto-start monitor mDNS advertisements when monitoring is enabled and add a TTL-based heartbeat for discovered monitors so listener online/offline reflects current presence after pairing.
+- Task: plan-control-stream — Moved vendored Cargokit to the repo root and updated Android/iOS/macOS/Linux build glue plus analysis excludes to point at the new location.
 - Task: quic-cargokit (plan_quic) — Added Rust toolchain (rustc/cargo/rustfmt/clippy) and BoringSSL build deps to Nix dev shell to support quiche + Cargokit work.
 - Task: quic-cargokit (plan_quic) — Implemented Rust/quiche Cargokit FFI plugin with multi-connection server/client loops, client-cert verification, trusted-listener enforcement via fingerprint allowlist, per-connection IDs surfaced to Dart, updated send API, identity-to-PEM helpers, and native QUIC transport wiring stubs for control channel.
 - Task: remove-flutter-quic — Removed flutter_quic dependency and stubbed QUIC control transport pending a native implementation.

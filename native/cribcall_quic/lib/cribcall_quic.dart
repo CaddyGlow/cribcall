@@ -399,10 +399,42 @@ void _throwIfError(int status, String op) {
 
 DynamicLibrary _loadLibrary() {
   if (Platform.isMacOS || Platform.isIOS) {
-    return DynamicLibrary.open('$_libName.framework/$_libName');
+    // Cargokit builds a staticlib on Darwin and links it into the process, so
+    // prefer the process/executable handle; fall back to bundled frameworks for
+    // any dynamic builds.
+    try {
+      return DynamicLibrary.process();
+    } on ArgumentError {
+      try {
+        return DynamicLibrary.executable();
+      } on ArgumentError {
+        try {
+          return DynamicLibrary.open('$_libName.framework/$_libName');
+        } on ArgumentError {
+          return DynamicLibrary.open('lib$_libName.dylib');
+        }
+      }
+    }
   }
-  if (Platform.isAndroid || Platform.isLinux) {
+  if (Platform.isAndroid) {
     return DynamicLibrary.open('lib$_libName.so');
+  }
+  if (Platform.isLinux) {
+    final exeDir = File(Platform.resolvedExecutable).parent.path;
+    final candidates = <String>[
+      'lib$_libName.so',
+      '$exeDir/lib/lib$_libName.so',
+    ];
+    for (final path in candidates) {
+      try {
+        return DynamicLibrary.open(path);
+      } on ArgumentError {
+        // Try next path.
+      }
+    }
+    throw ArgumentError(
+      'Could not load lib$_libName.so (tried: ${candidates.join(', ')})',
+    );
   }
   if (Platform.isWindows) {
     return DynamicLibrary.open('$_libName.dll');

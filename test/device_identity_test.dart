@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:asn1lib/asn1lib.dart';
 import 'package:cribcall/src/identity/device_identity.dart';
+import 'package:cribcall/src/identity/pkcs8.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -37,5 +38,20 @@ void main() {
     final generalNames = sanParser.nextObject() as ASN1Sequence;
     final uriObj = generalNames.elements.first;
     expect(String.fromCharCodes(uriObj.valueBytes()), 'cribcall:test-device');
+  });
+
+  test('encodes Ed25519 private key as RFC8410-wrapped PKCS#8', () {
+    final seed = List<int>.generate(32, (i) => i);
+    final pkcs8 = ed25519PrivateKeyPkcs8(seed);
+
+    final parser = ASN1Parser(Uint8List.fromList(pkcs8));
+    final seq = parser.nextObject() as ASN1Sequence;
+    expect(seq.elements.length, 3);
+
+    final privateKeyOctetString = seq.elements[2] as ASN1OctetString;
+    final wrapped = privateKeyOctetString.octets;
+    expect(wrapped[0], 0x04);
+    expect(wrapped[1], seed.length);
+    expect(wrapped.sublist(2), seed);
   });
 }

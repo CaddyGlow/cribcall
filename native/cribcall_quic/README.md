@@ -5,7 +5,7 @@ Rust/quiche-powered QUIC bindings for CribCall built with Cargokit.
 ## Structure
 
 - `rust/`: Rust crate exposing a small C ABI (`cc_quic_*`) around quiche. Built as both `cdylib` and `staticlib`.
-- `cargokit/`: Build glue vendored from https://github.com/irondash/cargokit to drive cargo builds from Flutter toolchains.
+- `cargokit/` (repo root): Build glue vendored from https://github.com/irondash/cargokit to drive cargo builds from Flutter toolchains.
 - `lib/cribcall_quic.dart`: Minimal Dart FFI wrapper that loads the platform library, initializes logging, and allocates a default QUIC config handle.
 - Platform glue:
   - Android Gradle + Cargokit (`android/build.gradle`)
