@@ -77,26 +77,6 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
     _currentAdvertisement = null;
   }
 
-  Future<void> _refreshControlServer() async {
-    final monitoringEnabled = ref.read(monitoringStatusProvider);
-    final identity = ref.read(identityProvider);
-    final trusted = ref.read(trustedListenersProvider);
-    if (!monitoringEnabled || !identity.hasValue || !trusted.hasValue) {
-      await ref.read(controlServerProvider.notifier).stop();
-      return;
-    }
-    final builder = ref.read(serviceIdentityProvider);
-    await ref
-        .read(controlServerProvider.notifier)
-        .start(
-          identity: identity.requireValue,
-          port: builder.defaultPort,
-          trustedFingerprints: trusted.requireValue
-              .map((peer) => peer.certFingerprint)
-              .toList(),
-        );
-  }
-
   bool _adsEqual(MdnsAdvertisement a, MdnsAdvertisement b) {
     return a.monitorId == b.monitorId &&
         a.monitorName == b.monitorName &&
@@ -107,28 +87,26 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
 
   @override
   Widget build(BuildContext context) {
+    // Trigger control server auto-start based on monitoring + identity + trust.
+    ref.watch(controlServerAutoStartProvider);
+
     if (!_listenersAttached) {
       _listenersAttached = true;
       ref.listen<AsyncValue<DeviceIdentity>>(identityProvider, (_, __) {
         _refreshAdvertisement();
-        _refreshControlServer();
       });
       ref.listen<AsyncValue<MonitorSettings>>(monitorSettingsProvider, (_, __) {
         _refreshAdvertisement();
       });
       ref.listen<bool>(monitoringStatusProvider, (_, __) {
         _refreshAdvertisement();
-        _refreshControlServer();
       });
-      ref.listen<AsyncValue<List<TrustedPeer>>>(trustedListenersProvider, (
-        _,
-        __,
-      ) {
-        _refreshControlServer();
-      });
+      ref.listen<AsyncValue<List<TrustedPeer>>>(
+        trustedListenersProvider,
+        (_, __) {},
+      );
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _refreshAdvertisement();
-        _refreshControlServer();
       });
     }
     final monitoringEnabled = ref.watch(monitoringStatusProvider);

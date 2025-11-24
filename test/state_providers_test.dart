@@ -82,7 +82,7 @@ void main() {
 
     final completer = Completer<List<MdnsAdvertisement>>();
     container.listen(mdnsBrowseProvider, (prev, next) {
-      if (next.hasValue) {
+      if (next.hasValue && next.value!.isNotEmpty && !completer.isCompleted) {
         completer.complete(next.value!);
       }
     });
@@ -222,55 +222,50 @@ void main() {
     },
   );
 
-  test(
-    'listener can hydrate PIN session from PIN_REQUIRED message',
-    () async {
-      final tempDir = await Directory.systemTemp.createTemp('pin_required');
-      final container = ProviderContainer(
-        overrides: [
-          trustedMonitorsRepoProvider.overrideWithValue(
-            TrustedMonitorsRepository(overrideDirectoryPath: tempDir.path),
-          ),
-          pakeEngineProvider.overrideWithValue(_FakePakeEngine()),
-        ],
-      );
-      addTearDown(() async {
-        container.dispose();
-        await tempDir.delete(recursive: true);
-      });
+  test('listener can hydrate PIN session from PIN_REQUIRED message', () async {
+    final tempDir = await Directory.systemTemp.createTemp('pin_required');
+    final container = ProviderContainer(
+      overrides: [
+        trustedMonitorsRepoProvider.overrideWithValue(
+          TrustedMonitorsRepository(overrideDirectoryPath: tempDir.path),
+        ),
+        pakeEngineProvider.overrideWithValue(_FakePakeEngine()),
+      ],
+    );
+    addTearDown(() async {
+      container.dispose();
+      await tempDir.delete(recursive: true);
+    });
 
-      final listenerIdentity = await DeviceIdentity.generate();
-      final pinRequired = PinRequiredMessage(
-        pairingSessionId: 'session-1',
-        pakeMsgA: 'msgA',
-        expiresInSec: 60,
-        maxAttempts: 3,
-      );
-      container.read(pinSessionProvider.notifier).acceptPinRequired(
-            pinRequired,
-          );
-      final ad = MdnsAdvertisement(
-        monitorId: 'm1',
-        monitorName: 'Nursery',
-        monitorCertFingerprint: 'fp1',
-        servicePort: 48080,
-        version: 1,
-      );
+    final listenerIdentity = await DeviceIdentity.generate();
+    final pinRequired = PinRequiredMessage(
+      pairingSessionId: 'session-1',
+      pakeMsgA: 'msgA',
+      expiresInSec: 60,
+      maxAttempts: 3,
+    );
+    container.read(pinSessionProvider.notifier).acceptPinRequired(pinRequired);
+    final ad = MdnsAdvertisement(
+      monitorId: 'm1',
+      monitorName: 'Nursery',
+      monitorCertFingerprint: 'fp1',
+      servicePort: 48080,
+      version: 1,
+    );
 
-      final result = await container
-          .read(pinSessionProvider.notifier)
-          .submitPin(
-            pairingSessionId: pinRequired.pairingSessionId,
-            pin: '123456',
-            advertisement: ad,
-            listenerIdentity: listenerIdentity,
-            listenerName: 'Listener',
-          );
+    final result = await container
+        .read(pinSessionProvider.notifier)
+        .submitPin(
+          pairingSessionId: pinRequired.pairingSessionId,
+          pin: '123456',
+          advertisement: ad,
+          listenerIdentity: listenerIdentity,
+          listenerName: 'Listener',
+        );
 
-      expect(result.success, isTrue);
-      expect(container.read(pinSessionProvider), isNotNull);
-    },
-  );
+    expect(result.success, isTrue);
+    expect(container.read(pinSessionProvider), isNotNull);
+  });
 }
 
 class _FakeMdnsService implements MdnsService {

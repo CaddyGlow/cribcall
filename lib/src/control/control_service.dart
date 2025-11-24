@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../domain/models.dart';
 import '../identity/device_identity.dart';
 import 'control_channel.dart';
+import 'native/quiche_library.dart';
 import 'quic_transport.dart';
 
 class ControlTransports {
@@ -14,18 +15,11 @@ class ControlTransports {
   final QuicControlServer server;
 
   factory ControlTransports.create() {
-    try {
-      final quiche = QuicheLibrary();
-      return ControlTransports(
-        client: NativeQuicControlClient(quiche: quiche),
-        server: NativeQuicControlServer(quiche: quiche),
-      );
-    } catch (_) {
-      return const ControlTransports(
-        client: UnsupportedQuicControlClient(),
-        server: UnsupportedQuicControlServer(),
-      );
-    }
+    final quiche = QuicheLibrary();
+    return ControlTransports(
+      client: NativeQuicControlClient(quiche: quiche),
+      server: NativeQuicControlServer(quiche: quiche),
+    );
   }
 }
 
@@ -96,7 +90,17 @@ class ControlServerController extends Notifier<ControlServerState> {
 
   @override
   ControlServerState build() {
-    _server = (_transports ?? ControlTransports.create()).server;
+    try {
+      _server = (_transports ?? ControlTransports.create()).server;
+    } catch (e) {
+      _server = const UnsupportedQuicControlServer();
+      final errorState = ControlServerState.error(
+        error: 'Failed to load QUIC transport: $e',
+      );
+      state = errorState;
+      ref.onDispose(() => _shutdown());
+      return errorState;
+    }
     ref.onDispose(() => _shutdown());
     return const ControlServerState.stopped();
   }
@@ -107,6 +111,15 @@ class ControlServerController extends Notifier<ControlServerState> {
     required List<String> trustedFingerprints,
   }) async {
     if (_starting) return;
+    if (_server is UnsupportedQuicControlServer) {
+      state = ControlServerState.error(
+        error: 'QUIC transport not available on this platform/build',
+        port: port,
+        trustedFingerprints: trustedFingerprints,
+        fingerprint: identity.certFingerprint,
+      );
+      return;
+    }
     final config = _ServerConfig(port, trustedFingerprints);
     if (_activeConfig == config &&
         state.status == ControlServerStatus.running) {
@@ -226,7 +239,22 @@ class ControlClientController extends Notifier<ControlClientState> {
 
   @override
   ControlClientState build() {
-    _client = (_transports ?? ControlTransports.create()).client;
+    try {
+      _client = (_transports ?? ControlTransports.create()).client;
+    } catch (e) {
+      _client = const UnsupportedQuicControlClient();
+      final errorState = ControlClientState.error(
+        monitorId: '',
+        monitorName: '',
+        failure: ControlFailure(
+          ControlFailureType.transport,
+          'Failed to load QUIC transport: $e',
+        ),
+      );
+      state = errorState;
+      ref.onDispose(() => disconnect());
+      return errorState;
+    }
     ref.onDispose(() => disconnect());
     return const ControlClientState.idle();
   }
@@ -236,6 +264,18 @@ class ControlClientController extends Notifier<ControlClientState> {
     required TrustedMonitor monitor,
     required DeviceIdentity identity,
   }) async {
+    if (_client is UnsupportedQuicControlClient) {
+      final failure = ControlFailure(
+        ControlFailureType.transport,
+        'QUIC transport not available on this platform/build',
+      );
+      state = ControlClientState.error(
+        monitorId: monitor.monitorId,
+        monitorName: monitor.monitorName,
+        failure: failure,
+      );
+      return failure;
+    }
     await disconnect();
     final ip = advertisement.ip;
     if (ip == null) {

@@ -196,6 +196,30 @@ final controlClientProvider =
     NotifierProvider<ControlClientController, ControlClientState>(
       ControlClientController.new,
     );
+final controlServerAutoStartProvider = Provider<void>((ref) {
+  final monitoringEnabled = ref.watch(monitoringStatusProvider);
+  final identity = ref.watch(identityProvider);
+  final trustedListeners = ref.watch(trustedListenersProvider);
+  final builder = ref.watch(serviceIdentityProvider);
+
+  Future.microtask(() async {
+    if (!monitoringEnabled ||
+        !identity.hasValue ||
+        !trustedListeners.hasValue) {
+      await ref.read(controlServerProvider.notifier).stop();
+      return;
+    }
+
+    final trustedFingerprints = trustedListeners.requireValue
+        .map((p) => p.certFingerprint)
+        .toList();
+    await ref.read(controlServerProvider.notifier).start(
+          identity: identity.requireValue,
+          port: builder.defaultPort,
+          trustedFingerprints: trustedFingerprints,
+        );
+  });
+});
 
 class TrustedListenersController extends AsyncNotifier<List<TrustedPeer>> {
   @override

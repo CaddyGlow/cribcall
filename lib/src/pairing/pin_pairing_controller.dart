@@ -133,7 +133,9 @@ class PinPairingController extends Notifier<PinSessionState?> {
       ),
     );
     if (hasKnownPin) {
-      ref.read(trustedMonitorsProvider.notifier).addMonitor(
+      await ref
+          .read(trustedMonitorsProvider.notifier)
+          .addMonitor(
             MonitorQrPayload(
               monitorId: advertisement.monitorId,
               monitorName: advertisement.monitorName,
