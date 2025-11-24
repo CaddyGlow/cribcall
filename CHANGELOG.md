@@ -1,7 +1,6 @@
 # Changelog
 
 ## Unreleased
-- Task: plan-control-stream — Swapped the dev shell to fenix Rust with Android SDK/NDK tooling and Android rust-std targets to mirror the HandControl toolchains.
  - Task: plan-control-stream — Fixed cribcall_quic loading on Darwin by preferring process/executable handles (static Cargokit outputs) with framework/dylib fallback and added Linux bundle-path fallback (`<exe>/lib/libcribcall_quic.so`) plus RFC8410-wrapped Ed25519 PKCS#8 keys to avoid cert_load_error during native QUIC startup across platforms.
 - Task: plan-control-stream — Implemented QUIC control connection events plus a ControlChannel wrapper with send queueing, connection state/error mapping, and tests to kick off the plan’s code work.
 - Task: plan-control-stream — Wired monitor QUIC server/controller startup with trusted listener allowlist and listener-side control client connect hook using the new ControlChannel scaffolding.
