@@ -23,6 +23,7 @@
             pkgs.pkg-config
             pkgs.clang
             pkgs.protobuf
+            pkgs.sysprof
             pkgs.alsa-lib
             pkgs.pulseaudio
             pkgs.glib

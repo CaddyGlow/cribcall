@@ -10,6 +10,7 @@ Local-only baby monitor using QUIC for control and WebRTC for media. Android/Lin
 
 ## Getting Started
 - Dev env (Nix): `nix develop` (direnv: allow and it will load `.envrc`).
+  - If Linux builds complain about `sysprof-capture-4` via pkg-config, install `sysprof`/`libsysprof-capture-dev` (included in the Nix shell).
 - Flutter deps: `flutter pub get`
 - Lint: `flutter analyze`
 - Tests: `flutter test`
