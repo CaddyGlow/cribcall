@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../domain/models.dart';
@@ -9,13 +10,27 @@ class TrustedMonitorsRepository {
   TrustedMonitorsRepository({this.overrideDirectoryPath});
 
   final String? overrideDirectoryPath;
+  Future<Directory>? _cachedDirectory;
 
   Future<File> _file() async {
-    final dir = overrideDirectoryPath != null
-        ? Directory(overrideDirectoryPath!)
-        : await getApplicationSupportDirectory();
+    final dir = await _directory();
     await dir.create(recursive: true);
     return File('${dir.path}/trusted_monitors.json');
+  }
+
+  Future<Directory> _directory() {
+    return _cachedDirectory ??= _resolveDirectory();
+  }
+
+  Future<Directory> _resolveDirectory() async {
+    if (overrideDirectoryPath != null) {
+      return Directory(overrideDirectoryPath!);
+    }
+    try {
+      return await getApplicationSupportDirectory();
+    } on MissingPluginException {
+      return Directory.systemTemp.createTempSync('cribcall_support');
+    }
   }
 
   Future<List<TrustedMonitor>> load() async {

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../domain/models.dart';
@@ -6,6 +8,7 @@ import '../identity/device_identity.dart';
 import '../identity/identity_repository.dart';
 import '../identity/identity_store.dart';
 import '../identity/service_identity.dart';
+import '../storage/settings_repository.dart';
 import '../storage/trusted_monitors_repository.dart';
 
 class RoleController extends Notifier<DeviceRole?> {
@@ -24,42 +27,82 @@ class MonitoringStatusController extends Notifier<bool> {
   void toggle(bool value) => state = value;
 }
 
-class MonitorSettingsController extends Notifier<MonitorSettings> {
+class MonitorSettingsController extends AsyncNotifier<MonitorSettings> {
   @override
-  MonitorSettings build() => const MonitorSettings(
-    name: 'Nursery',
-    noise: NoiseSettings(threshold: 60, minDurationMs: 800, cooldownSeconds: 8),
-    autoStreamType: AutoStreamType.audio,
-    autoStreamDurationSec: 15,
+  Future<MonitorSettings> build() async {
+    final repo = ref.read(monitorSettingsRepoProvider);
+    return repo.load();
+  }
+
+  Future<void> setNoise(NoiseSettings noise) =>
+      _updateAndPersist((current) => current.copyWith(noise: noise));
+
+  Future<void> setAutoStreamDuration(int seconds) => _updateAndPersist(
+    (current) => current.copyWith(autoStreamDurationSec: seconds),
   );
 
-  void setNoise(NoiseSettings noise) => state = state.copyWith(noise: noise);
+  Future<void> toggleAutoStreamType() {
+    return _updateAndPersist((current) {
+      final next = switch (current.autoStreamType) {
+        AutoStreamType.none => AutoStreamType.audio,
+        AutoStreamType.audio => AutoStreamType.audioVideo,
+        AutoStreamType.audioVideo => AutoStreamType.none,
+      };
+      return current.copyWith(autoStreamType: next);
+    });
+  }
 
-  void setAutoStreamDuration(int seconds) =>
-      state = state.copyWith(autoStreamDurationSec: seconds);
+  Future<MonitorSettings> _ensureValue() async {
+    final current = state.asData?.value;
+    if (current != null) return current;
+    final repo = ref.read(monitorSettingsRepoProvider);
+    final loaded = await repo.load();
+    state = AsyncData(loaded);
+    return loaded;
+  }
 
-  void toggleAutoStreamType() {
-    final next = switch (state.autoStreamType) {
-      AutoStreamType.none => AutoStreamType.audio,
-      AutoStreamType.audio => AutoStreamType.audioVideo,
-      AutoStreamType.audioVideo => AutoStreamType.none,
-    };
-    state = state.copyWith(autoStreamType: next);
+  Future<void> _updateAndPersist(
+    MonitorSettings Function(MonitorSettings current) update,
+  ) async {
+    final current = await _ensureValue();
+    final updated = update(current);
+    state = AsyncData(updated);
+    await ref.read(monitorSettingsRepoProvider).save(updated);
   }
 }
 
-class ListenerSettingsController extends Notifier<ListenerSettings> {
+class ListenerSettingsController extends AsyncNotifier<ListenerSettings> {
   @override
-  ListenerSettings build() => const ListenerSettings(
-    notificationsEnabled: true,
-    defaultAction: ListenerDefaultAction.notify,
+  Future<ListenerSettings> build() async {
+    final repo = ref.read(listenerSettingsRepoProvider);
+    return repo.load();
+  }
+
+  Future<void> toggleNotifications() => _updateAndPersist(
+    (current) =>
+        current.copyWith(notificationsEnabled: !current.notificationsEnabled),
   );
 
-  void toggleNotifications() =>
-      state = state.copyWith(notificationsEnabled: !state.notificationsEnabled);
+  Future<void> setDefaultAction(ListenerDefaultAction action) =>
+      _updateAndPersist((current) => current.copyWith(defaultAction: action));
 
-  void setDefaultAction(ListenerDefaultAction action) =>
-      state = state.copyWith(defaultAction: action);
+  Future<ListenerSettings> _ensureValue() async {
+    final current = state.asData?.value;
+    if (current != null) return current;
+    final repo = ref.read(listenerSettingsRepoProvider);
+    final loaded = await repo.load();
+    state = AsyncData(loaded);
+    return loaded;
+  }
+
+  Future<void> _updateAndPersist(
+    ListenerSettings Function(ListenerSettings current) update,
+  ) async {
+    final current = await _ensureValue();
+    final updated = update(current);
+    state = AsyncData(updated);
+    await ref.read(listenerSettingsRepoProvider).save(updated);
+  }
 }
 
 final roleProvider = NotifierProvider<RoleController, DeviceRole?>(
@@ -70,11 +113,11 @@ final monitoringStatusProvider =
       MonitoringStatusController.new,
     );
 final monitorSettingsProvider =
-    NotifierProvider<MonitorSettingsController, MonitorSettings>(
+    AsyncNotifierProvider<MonitorSettingsController, MonitorSettings>(
       MonitorSettingsController.new,
     );
 final listenerSettingsProvider =
-    NotifierProvider<ListenerSettingsController, ListenerSettings>(
+    AsyncNotifierProvider<ListenerSettingsController, ListenerSettings>(
       ListenerSettingsController.new,
     );
 final identityProvider =
@@ -91,6 +134,14 @@ final serviceIdentityProvider = Provider<ServiceIdentityBuilder>((ref) {
 final mdnsServiceProvider = Provider<MdnsService>((ref) {
   return MethodChannelMdnsService();
 });
+final monitorSettingsRepoProvider = Provider<MonitorSettingsRepository>((ref) {
+  return MonitorSettingsRepository();
+});
+final listenerSettingsRepoProvider = Provider<ListenerSettingsRepository>((
+  ref,
+) {
+  return ListenerSettingsRepository();
+});
 final trustedMonitorsRepoProvider = Provider<TrustedMonitorsRepository>((ref) {
   return TrustedMonitorsRepository();
 });
@@ -103,7 +154,7 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
   }
 
   Future<void> addMonitor(MonitorQrPayload payload) async {
-    final current = state.value ?? [];
+    final current = await _ensureValue();
     if (current.any((m) => m.monitorId == payload.monitorId)) return;
     final updated = [
       ...current,
@@ -117,11 +168,70 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
     state = AsyncData(updated);
     await ref.read(trustedMonitorsRepoProvider).save(updated);
   }
+
+  Future<void> removeMonitor(String monitorId) async {
+    final current = await _ensureValue();
+    final updated = current
+        .where((monitor) => monitor.monitorId != monitorId)
+        .toList();
+    state = AsyncData(updated);
+    await ref.read(trustedMonitorsRepoProvider).save(updated);
+  }
+
+  Future<void> updateLastKnownIp(MdnsAdvertisement advertisement) async {
+    if (advertisement.ip == null) return;
+    final current = await _ensureValue();
+    final index = current.indexWhere(
+      (monitor) => monitor.monitorId == advertisement.monitorId,
+    );
+    if (index == -1) return;
+    final existing = current[index];
+    if (existing.lastKnownIp == advertisement.ip) return;
+    final updated = [...current];
+    updated[index] = TrustedMonitor(
+      monitorId: existing.monitorId,
+      monitorName: existing.monitorName,
+      certFingerprint: existing.certFingerprint,
+      lastKnownIp: advertisement.ip,
+      addedAtEpochSec: existing.addedAtEpochSec,
+    );
+    state = AsyncData(updated);
+    await ref.read(trustedMonitorsRepoProvider).save(updated);
+  }
+
+  Future<List<TrustedMonitor>> _ensureValue() async {
+    final current = state.asData?.value;
+    if (current != null) return current;
+    final repo = ref.read(trustedMonitorsRepoProvider);
+    final loaded = await repo.load();
+    state = AsyncData(loaded);
+    return loaded;
+  }
 }
 
 final trustedMonitorsProvider =
     AsyncNotifierProvider<TrustedMonitorsController, List<TrustedMonitor>>(
-        TrustedMonitorsController.new);
+      TrustedMonitorsController.new,
+    );
+
+final mdnsBrowseProvider = StreamProvider.autoDispose<List<MdnsAdvertisement>>((
+  ref,
+) async* {
+  final mdns = ref.watch(mdnsServiceProvider);
+  final seen = <String>{};
+  final accumulated = <MdnsAdvertisement>[];
+  await for (final event in mdns.browse()) {
+    if (event.ip != null) {
+      unawaited(
+        ref.read(trustedMonitorsProvider.notifier).updateLastKnownIp(event),
+      );
+    }
+    if (seen.add(event.monitorId)) {
+      accumulated.add(event);
+      yield List<MdnsAdvertisement>.from(accumulated);
+    }
+  }
+});
 
 final trustedPeersProvider = Provider<List<TrustedPeer>>((ref) {
   return const [
@@ -141,22 +251,10 @@ final trustedPeersProvider = Provider<List<TrustedPeer>>((ref) {
 });
 
 final discoveredMonitorsProvider = Provider<List<MdnsAdvertisement>>((ref) {
-  return const [
-    MdnsAdvertisement(
-      monitorId: 'monitor-1',
-      monitorName: 'Nursery',
-      monitorCertFingerprint: '7f:91:2c:...:de',
-      servicePort: 48080,
-      version: 1,
-    ),
-    MdnsAdvertisement(
-      monitorId: 'monitor-2',
-      monitorName: 'Guest room',
-      monitorCertFingerprint: 'bb:01:44:...:9a',
-      servicePort: 48080,
-      version: 1,
-    ),
-  ];
+  final browse = ref
+      .watch(mdnsBrowseProvider)
+      .maybeWhen(data: (list) => list, orElse: () => <MdnsAdvertisement>[]);
+  return browse;
 });
 
 class IdentityController extends AsyncNotifier<DeviceIdentity> {

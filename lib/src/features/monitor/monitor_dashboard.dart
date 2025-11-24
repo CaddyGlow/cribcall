@@ -14,7 +14,8 @@ class MonitorDashboard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final monitoringEnabled = ref.watch(monitoringStatusProvider);
-    final settings = ref.watch(monitorSettingsProvider);
+    final settingsAsync = ref.watch(monitorSettingsProvider);
+    final settings = settingsAsync.valueOrNull ?? MonitorSettings.defaults;
     final trustedPeers = ref.watch(trustedPeersProvider);
     final identity = ref.watch(identityProvider);
     final serviceBuilder = ref.watch(serviceIdentityProvider);

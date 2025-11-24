@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Task: settings-persistence — Added disk-backed monitor/listener settings with async controllers, trusted monitor revocation plus last-known-IP updates from mDNS browse, and UI/tests wiring to surface persisted data.
 - Task: SPEC-boot — Scaffolded Flutter app, added QUIC control/pairing data models with canonical transcript + framing helpers, and built monitor/listener shells matching SPEC v0.2 (tests cover canonical JSON, HMAC auth tags, and frame parsing).
 - Task: build-linux-sysprof — Added sysprof dev dependency to Nix shell and documented pkg-config fix for `sysprof-capture-4` when building Linux artifacts.
 - Task: build-fix-linux — Updated CardTheme to CardThemeData and pulled Riverpod legacy providers so Flutter 3.38 Linux builds succeed; reran tests.

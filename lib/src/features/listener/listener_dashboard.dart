@@ -13,28 +13,40 @@ class ListenerDashboard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final advertisements = ref.watch(discoveredMonitorsProvider);
-    final trustedPeers = ref.watch(trustedPeersProvider);
     final trustedMonitors = ref.watch(trustedMonitorsProvider);
     final identity = ref.watch(identityProvider);
+    final pinned = trustedMonitors.maybeWhen(
+      data: (list) => list,
+      orElse: () => <TrustedMonitor>[],
+    );
 
-    final monitors = advertisements
-        .map(
-          (ad) => _MonitorCardData(
-            name: ad.monitorName,
-            status: 'Online',
-            lastNoise:
-                trustedPeers.any(
-                  (peer) => peer.certFingerprint == ad.monitorCertFingerprint,
-                )
-                ? '3 min ago'
-                : '—',
-            fingerprint: ad.monitorCertFingerprint,
-            trusted: trustedPeers.any(
-              (peer) => peer.certFingerprint == ad.monitorCertFingerprint,
-            ),
+    final monitors = [
+      ...advertisements.map((ad) {
+        final pinnedMonitor = pinned.cast<TrustedMonitor?>().firstWhere(
+          (p) => p?.monitorId == ad.monitorId,
+          orElse: () => null,
+        );
+        final isTrusted = pinnedMonitor != null;
+        return _MonitorCardData(
+          name: ad.monitorName,
+          status: 'Online',
+          lastNoise: isTrusted ? '3 min ago' : '—',
+          fingerprint: ad.monitorCertFingerprint,
+          trusted: isTrusted,
+          lastKnownIp: ad.ip ?? pinnedMonitor?.lastKnownIp,
+        );
+      }),
+      for (final monitor in pinned)
+        if (!advertisements.any((ad) => ad.monitorId == monitor.monitorId))
+          _MonitorCardData(
+            name: monitor.monitorName,
+            status: 'Offline',
+            lastNoise: '—',
+            fingerprint: monitor.certFingerprint,
+            trusted: true,
+            lastKnownIp: monitor.lastKnownIp,
           ),
-        )
-        .toList();
+    ];
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -81,16 +93,16 @@ class ListenerDashboard extends ConsumerWidget {
                 trustedMonitors.when(
                   data: (list) => Text(
                     'Pinned monitors: ${list.length}',
-                    style: Theme.of(context)
-                        .textTheme
-                        .bodySmall
-                        ?.copyWith(color: AppColors.muted),
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
                   ),
                   loading: () => const Text('Loading pinned monitors...'),
                   error: (err, _) => Text(
                     'Could not load pinned monitors',
-                    style:
-                        Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.red),
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodySmall?.copyWith(color: Colors.red),
                   ),
                 ),
               ],
@@ -224,6 +236,7 @@ class _MonitorCardData {
     required this.lastNoise,
     required this.fingerprint,
     required this.trusted,
+    this.lastKnownIp,
   });
 
   final String name;
@@ -231,6 +244,7 @@ class _MonitorCardData {
   final String lastNoise;
   final String fingerprint;
   final bool trusted;
+  final String? lastKnownIp;
 }
 
 class _MonitorCard extends StatelessWidget {
@@ -283,6 +297,15 @@ class _MonitorCard extends StatelessWidget {
                         context,
                       ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
                     ),
+                    if (data.lastKnownIp != null) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        'Last known IP ${data.lastKnownIp}',
+                        style: Theme.of(
+                          context,
+                        ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+                      ),
+                    ],
                   ],
                 ),
               ),

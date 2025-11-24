@@ -5,6 +5,12 @@ enum AutoStreamType { none, audio, audioVideo }
 enum ListenerDefaultAction { notify, autoOpenStream }
 
 class NoiseSettings {
+  static const defaults = NoiseSettings(
+    threshold: 60,
+    minDurationMs: 800,
+    cooldownSeconds: 8,
+  );
+
   const NoiseSettings({
     required this.threshold,
     required this.minDurationMs,
@@ -43,6 +49,13 @@ class NoiseSettings {
 }
 
 class MonitorSettings {
+  static const defaults = MonitorSettings(
+    name: 'Nursery',
+    noise: NoiseSettings.defaults,
+    autoStreamType: AutoStreamType.audio,
+    autoStreamDurationSec: 15,
+  );
+
   const MonitorSettings({
     required this.name,
     required this.noise,
@@ -92,6 +105,11 @@ class MonitorSettings {
 }
 
 class ListenerSettings {
+  static const defaults = ListenerSettings(
+    notificationsEnabled: true,
+    defaultAction: ListenerDefaultAction.notify,
+  );
+
   const ListenerSettings({
     required this.notificationsEnabled,
     required this.defaultAction,
@@ -107,6 +125,20 @@ class ListenerSettings {
     return ListenerSettings(
       notificationsEnabled: notificationsEnabled ?? this.notificationsEnabled,
       defaultAction: defaultAction ?? this.defaultAction,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'notificationsEnabled': notificationsEnabled,
+    'defaultAction': defaultAction.name,
+  };
+
+  factory ListenerSettings.fromJson(Map<String, dynamic> json) {
+    return ListenerSettings(
+      notificationsEnabled: json['notificationsEnabled'] as bool,
+      defaultAction: ListenerDefaultAction.values.byName(
+        json['defaultAction'] as String,
+      ),
     );
   }
 }
@@ -125,11 +157,11 @@ class TrustedPeer {
   final int addedAtEpochSec;
 
   Map<String, dynamic> toJson() => {
-        'deviceId': deviceId,
-        'name': name,
-        'certFingerprint': certFingerprint,
-        'addedAtEpochSec': addedAtEpochSec,
-      };
+    'deviceId': deviceId,
+    'name': name,
+    'certFingerprint': certFingerprint,
+    'addedAtEpochSec': addedAtEpochSec,
+  };
 
   factory TrustedPeer.fromJson(Map<String, dynamic> json) {
     return TrustedPeer(
@@ -157,12 +189,12 @@ class TrustedMonitor {
   final int addedAtEpochSec;
 
   Map<String, dynamic> toJson() => {
-        'monitorId': monitorId,
-        'monitorName': monitorName,
-        'certFingerprint': certFingerprint,
-        if (lastKnownIp != null) 'lastKnownIp': lastKnownIp,
-        'addedAtEpochSec': addedAtEpochSec,
-      };
+    'monitorId': monitorId,
+    'monitorName': monitorName,
+    'certFingerprint': certFingerprint,
+    if (lastKnownIp != null) 'lastKnownIp': lastKnownIp,
+    'addedAtEpochSec': addedAtEpochSec,
+  };
 
   factory TrustedMonitor.fromJson(Map<String, dynamic> json) {
     return TrustedMonitor(
@@ -250,6 +282,7 @@ class MdnsAdvertisement {
     required this.monitorCertFingerprint,
     required this.servicePort,
     required this.version,
+    this.ip,
   });
 
   final String monitorId;
@@ -257,6 +290,7 @@ class MdnsAdvertisement {
   final String monitorCertFingerprint;
   final int servicePort;
   final int version;
+  final String? ip;
 
   Map<String, dynamic> toJson() => {
     'monitorId': monitorId,
@@ -264,6 +298,7 @@ class MdnsAdvertisement {
     'monitorCertFingerprint': monitorCertFingerprint,
     'servicePort': servicePort,
     'version': version,
+    if (ip != null) 'ip': ip,
   };
 
   factory MdnsAdvertisement.fromJson(Map<String, dynamic> json) {
@@ -273,6 +308,7 @@ class MdnsAdvertisement {
       monitorCertFingerprint: json['monitorCertFingerprint'] as String,
       servicePort: json['servicePort'] as int,
       version: json['version'] as int,
+      ip: json['ip'] as String?,
     );
   }
 }
