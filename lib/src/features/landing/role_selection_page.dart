@@ -91,12 +91,12 @@ class _HeroBanner extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 10),
-          const Row(
+          const Wrap(
+            spacing: 8,
+            runSpacing: 8,
             children: [
               _HeroPill(text: 'Pinned cert fingerprints'),
-              SizedBox(width: 8),
               _HeroPill(text: 'RFC 8785 transcripts'),
-              SizedBox(width: 8),
               _HeroPill(text: 'QUIC control • WebRTC media'),
             ],
           ),

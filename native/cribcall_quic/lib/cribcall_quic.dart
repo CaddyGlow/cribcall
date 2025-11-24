@@ -1,3 +1,5 @@
+// ignore_for_file: library_private_types_in_public_api
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
@@ -179,28 +181,63 @@ class CribcallQuic {
 class QuicNativeConnection {
   QuicNativeConnection({
     required this.handle,
-    required this.events,
+    required Stream<QuicEvent> events,
     required this.port,
     required this.bindings,
     required this.onDispose,
-  });
+  }) {
+    _subscription = events.listen((event) {
+      _trackEvent(event);
+      _controller.add(event);
+    });
+  }
 
   final int handle;
-  final Stream<QuicEvent> events;
   final ReceivePort port;
   final _NativeBindings bindings;
   final void Function() onDispose;
+  final _controller = StreamController<QuicEvent>.broadcast();
+  Stream<QuicEvent> get events => _controller.stream;
+  final Set<String> _connectionIds = {};
+  String? _lastConnectionId;
+  StreamSubscription<QuicEvent>? _subscription;
 
-  void send(Uint8List data) {
-    final ptr = calloc<Uint8>(data.length);
-    ptr.asTypedList(data.length).setAll(0, data);
-    bindings.send(handle, ptr, data.length);
-    calloc.free(ptr);
+  void _trackEvent(QuicEvent event) {
+    final id = event.connectionId;
+    if (id != null) {
+      _connectionIds.add(id);
+      _lastConnectionId ??= id;
+      if (event is QuicClosed) {
+        _connectionIds.remove(id);
+        if (_lastConnectionId == id) {
+          _lastConnectionId = _connectionIds.isNotEmpty
+              ? _connectionIds.first
+              : null;
+        }
+      }
+    }
+  }
+
+  void send(Uint8List data, {String? connectionId}) {
+    final targetId = connectionId ?? _lastConnectionId;
+    if (targetId == null) {
+      throw StateError('No connection available for send');
+    }
+    final connBytes = utf8.encode(targetId);
+    final connPtr = calloc<Uint8>(connBytes.length);
+    connPtr.asTypedList(connBytes.length).setAll(0, connBytes);
+    final dataPtr = calloc<Uint8>(data.length);
+    dataPtr.asTypedList(data.length).setAll(0, data);
+    bindings.send(handle, connPtr, connBytes.length, dataPtr, data.length);
+    calloc.free(connPtr);
+    calloc.free(dataPtr);
   }
 
   void close() {
     bindings.close(handle);
     port.close();
+    _subscription?.cancel();
+    _controller.close();
     onDispose();
   }
 }
@@ -230,30 +267,37 @@ class QuicConfigHandle {
 }
 
 abstract class QuicEvent {
-  const QuicEvent();
+  const QuicEvent({this.connectionId});
+
+  final String? connectionId;
 
   factory QuicEvent.fromJson(String raw) {
     final map = jsonDecode(raw) as Map<String, dynamic>;
+    final connId = map['connection_id'] as String?;
     switch (map['type'] as String) {
       case 'connected':
         return QuicConnected(
           handle: map['handle'] as int,
+          connectionId: connId,
           peerFingerprint: map['peer_fingerprint'] as String? ?? '',
         );
       case 'message':
         return QuicMessage(
           handle: map['handle'] as int,
+          connectionId: connId,
           data: base64Decode(map['data_base64'] as String),
         );
       case 'closed':
         return QuicClosed(
           handle: map['handle'] as int,
+          connectionId: connId,
           reason: map['reason'] as String?,
         );
       case 'error':
       default:
         return QuicError(
           handle: map['handle'] as int? ?? 0,
+          connectionId: connId,
           message: map['message'] as String? ?? 'unknown error',
         );
     }
@@ -261,28 +305,41 @@ abstract class QuicEvent {
 }
 
 class QuicConnected extends QuicEvent {
-  const QuicConnected({required this.handle, required this.peerFingerprint});
+  const QuicConnected({
+    required this.handle,
+    required this.peerFingerprint,
+    String? connectionId,
+  }) : super(connectionId: connectionId);
 
   final int handle;
   final String peerFingerprint;
 }
 
 class QuicMessage extends QuicEvent {
-  const QuicMessage({required this.handle, required this.data});
+  const QuicMessage({
+    required this.handle,
+    required this.data,
+    String? connectionId,
+  }) : super(connectionId: connectionId);
 
   final int handle;
   final Uint8List data;
 }
 
 class QuicClosed extends QuicEvent {
-  const QuicClosed({required this.handle, this.reason});
+  const QuicClosed({required this.handle, this.reason, String? connectionId})
+    : super(connectionId: connectionId);
 
   final int handle;
   final String? reason;
 }
 
 class QuicError extends QuicEvent {
-  const QuicError({required this.handle, required this.message});
+  const QuicError({
+    required this.handle,
+    required this.message,
+    String? connectionId,
+  }) : super(connectionId: connectionId);
 
   final int handle;
   final String message;
@@ -427,8 +484,14 @@ class _NativeBindings {
           >('cc_quic_server_start'),
       send = lib
           .lookupFunction<
-            Int32 Function(Uint64, Pointer<Uint8>, IntPtr),
-            int Function(int, Pointer<Uint8>, int)
+            Int32 Function(
+              Uint64,
+              Pointer<Uint8>,
+              IntPtr,
+              Pointer<Uint8>,
+              IntPtr,
+            ),
+            int Function(int, Pointer<Uint8>, int, Pointer<Uint8>, int)
           >('cc_quic_conn_send'),
       close = lib.lookupFunction<Int32 Function(Uint64), int Function(int)>(
         'cc_quic_conn_close',
@@ -457,12 +520,19 @@ class _NativeBindings {
     int,
     Pointer<Utf8>,
     Pointer<Utf8>,
+    Pointer<Utf8>,
     int,
     Pointer<Uint64>,
   )
   serverStart;
-  final int Function(int, Pointer<Uint8>, int) send;
+  final int Function(
+    int,
+    Pointer<Uint8>,
+    int,
+    Pointer<Uint8>,
+    int,
+  ) send;
   final int Function(int) close;
 }
 
-class CcQuicConfig extends Opaque {}
+final class CcQuicConfig extends Opaque {}

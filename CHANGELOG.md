@@ -1,8 +1,13 @@
 # Changelog
 
 ## Unreleased
+- Task: plan-control-stream — Implemented QUIC control connection events plus a ControlChannel wrapper with send queueing, connection state/error mapping, and tests to kick off the plan’s code work.
+- Task: plan-control-stream — Wired monitor QUIC server/controller startup with trusted listener allowlist and listener-side control client connect hook using the new ControlChannel scaffolding.
+- Task: plan-control-stream — Added a detailed control channel + WebRTC stream integration plan (QUIC wiring, pairing enforcement, heartbeat, and media handoff).
+- Task: plan-control-stream — Hydrate listener PIN sessions from `PIN_REQUIRED` so PIN submissions no longer return `NO_SESSION`, keep attempts alive for control-channel retries, and cover the flow with a PIN_REQUIRED test.
+- Task: presence-mdns — Auto-start monitor mDNS advertisements when monitoring is enabled and add a TTL-based heartbeat for discovered monitors so listener online/offline reflects current presence after pairing.
 - Task: quic-cargokit (plan_quic) — Added Rust toolchain (rustc/cargo/rustfmt/clippy) and BoringSSL build deps to Nix dev shell to support quiche + Cargokit work.
-- Task: quic-cargokit (plan_quic) — Implemented Rust/quiche Cargokit FFI plugin with multi-connection server/client loops, trusted-listener enforcement via fingerprint allowlist, Dart bindings (event stream + config), identity-to-PEM helpers, and native QUIC transport wiring stubs for control channel.
+- Task: quic-cargokit (plan_quic) — Implemented Rust/quiche Cargokit FFI plugin with multi-connection server/client loops, client-cert verification, trusted-listener enforcement via fingerprint allowlist, per-connection IDs surfaced to Dart, updated send API, identity-to-PEM helpers, and native QUIC transport wiring stubs for control channel.
 - Task: remove-flutter-quic — Removed flutter_quic dependency and stubbed QUIC control transport pending a native implementation.
 - Task: android-deploy-script — Added `bin/deploy_android.sh` to build Flutter APKs, install over ADB, and launch `com.cribcall.cribcall`.
 - Task: quic-flutter-quic — Integrated flutter_quic for control transport scaffolding (client connect + server config), added PKCS#8 export for Ed25519 identities, and guarded init via RustLib (initial experiment later removed; see remove-flutter-quic).

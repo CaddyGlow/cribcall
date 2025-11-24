@@ -16,7 +16,10 @@
 - PIN pairing flow scaffolded with Dart PAKE (X25519/HKDF) for PIN sessions: monitor can start PIN sessions with countdown; listener PIN entry sheet updates trusted monitors on success; pairing state tracks expiry/attempts and HMAC’d transcript keyed off the PAKE key.
 - Trusted listeners persist with revoke UI on monitor; listener forget flow now confirms before removal.
 - Tests cover control framing/messages, pairing transcripts, identities, service identity, sound detection, and state providers.
-- Rust/quiche Cargokit plugin scaffolded for QUIC control transport; Dart wiring added with native client/server handles, PKCS#8 export for Ed25519 identities, and server-side trusted-listener gating (full QUIC integration still in progress).
+- Rust/quiche Cargokit plugin scaffolded for QUIC control transport; Dart wiring added with native client/server handles, PKCS#8 export for Ed25519 identities, server-side trusted-listener gating, client cert verification, and per-connection IDs surfaced to Dart (full QUIC integration still in progress).
+
+### In progress
+- Control channel + stream plan: started implementation with Dart control connection events, ControlChannel wrapper, send queueing, and tests.
 
 ### Remaining to finish SPEC.md
 1) **Control channel & QUIC integration**

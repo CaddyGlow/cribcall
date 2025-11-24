@@ -47,5 +47,10 @@ FFI_PLUGIN_EXPORT int32_t cc_quic_server_start(
   const char* trusted_fingerprints_csv,
   int64_t dart_port,
   uint64_t* out_handle);
-FFI_PLUGIN_EXPORT int32_t cc_quic_conn_send(uint64_t handle, const uint8_t* data, uintptr_t data_len);
+FFI_PLUGIN_EXPORT int32_t cc_quic_conn_send(
+  uint64_t handle,
+  const uint8_t* conn_id,
+  uintptr_t conn_id_len,
+  const uint8_t* data,
+  uintptr_t data_len);
 FFI_PLUGIN_EXPORT int32_t cc_quic_conn_close(uint64_t handle);

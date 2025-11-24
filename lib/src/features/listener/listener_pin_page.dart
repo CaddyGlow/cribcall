@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../domain/models.dart';
-import '../../pairing/pin_pairing_controller.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
 
@@ -42,7 +41,7 @@ class _ListenerPinPageState extends ConsumerState<ListenerPinPage> {
           ),
           const SizedBox(height: 8),
           Text(
-            '${widget.advertisement.monitorName} • ${widget.advertisement.monitorCertFingerprint.substring(0, 12)}',
+            '${widget.advertisement.monitorName} • ${_shortFingerprint(widget.advertisement.monitorCertFingerprint)}',
             style: Theme.of(
               context,
             ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
@@ -123,5 +122,10 @@ class _ListenerPinPageState extends ConsumerState<ListenerPinPage> {
         ],
       ),
     );
+  }
+
+  String _shortFingerprint(String fingerprint) {
+    if (fingerprint.length <= 12) return fingerprint;
+    return fingerprint.substring(0, 12);
   }
 }

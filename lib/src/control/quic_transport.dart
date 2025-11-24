@@ -115,8 +115,11 @@ class QuicControlConnection {
   Stream<ControlMessage> receiveMessages() =>
       Stream.error(_unsupportedQuicError());
 
-  Future<void> sendMessage(ControlMessage message) =>
+  Future<void> sendMessage(ControlMessage message, {String? connectionId}) =>
       Future.error(_unsupportedQuicError());
+
+  Stream<ControlConnectionEvent> connectionEvents() =>
+      const Stream<ControlConnectionEvent>.empty();
 
   Future<void> finish() async {}
 
@@ -139,12 +142,19 @@ class NativeQuicControlConnection extends QuicControlConnection {
 
   final ControlFrameDecoder _decoder = ControlFrameDecoder();
   final _messages = StreamController<ControlMessage>.broadcast();
+  final _connectionEvents =
+      StreamController<ControlConnectionEvent>.broadcast();
+  bool _closed = false;
   StreamSubscription<QuicEvent>? _subscription;
 
   @override
   Stream<ControlMessage> receiveMessages() => _messages.stream;
 
+  @override
+  Stream<ControlConnectionEvent> connectionEvents() => _connectionEvents.stream;
+
   void _handleEvent(QuicEvent event) {
+    if (_closed) return;
     if (event is QuicMessage) {
       final frames = _decoder.addChunkAndDecodeJson(event.data);
       for (final frame in frames) {
@@ -154,26 +164,48 @@ class NativeQuicControlConnection extends QuicControlConnection {
           // Ignore malformed messages; protocol layer will enforce framing rules.
         }
       }
-    } else if (event is QuicClosed || event is QuicError) {
-      _messages.close();
-      _subscription?.cancel();
-      native.close();
-      _maybeCleanup();
+    } else if (event is QuicConnected) {
+      if (event.connectionId != null) {
+        _connectionEvents.add(
+          ControlConnected(
+            connectionId: event.connectionId!,
+            peerFingerprint: event.peerFingerprint,
+          ),
+        );
+      }
+    } else if (event is QuicClosed) {
+      if (event.connectionId != null) {
+        _connectionEvents.add(
+          ControlConnectionClosed(
+            connectionId: event.connectionId!,
+            reason: event.reason,
+          ),
+        );
+      }
+      _finishFromNative();
+    } else if (event is QuicError) {
+      _connectionEvents.add(
+        ControlConnectionError(
+          connectionId: event.connectionId,
+          message: event.message,
+        ),
+      );
+      _finishFromNative();
     }
   }
 
   @override
-  Future<void> sendMessage(ControlMessage message) async {
+  Future<void> sendMessage(
+    ControlMessage message, {
+    String? connectionId,
+  }) async {
     final frame = ControlFrameCodec.encodeJson(message.toWireJson());
-    native.send(frame);
+    native.send(frame, connectionId: connectionId);
   }
 
   @override
   Future<void> finish() async {
-    native.close();
-    await _messages.close();
-    await _subscription?.cancel();
-    _maybeCleanup();
+    await _teardown();
   }
 
   void _maybeCleanup() {
@@ -183,6 +215,47 @@ class NativeQuicControlConnection extends QuicControlConnection {
       }
     }();
   }
+
+  void _finishFromNative() {
+    unawaited(_teardown());
+  }
+
+  Future<void> _teardown() async {
+    if (_closed) return;
+    _closed = true;
+    native.close();
+    await _messages.close();
+    await _connectionEvents.close();
+    await _subscription?.cancel();
+    _maybeCleanup();
+  }
+}
+
+sealed class ControlConnectionEvent {
+  const ControlConnectionEvent({this.connectionId});
+
+  final String? connectionId;
+}
+
+class ControlConnected extends ControlConnectionEvent {
+  const ControlConnected({
+    required super.connectionId,
+    required this.peerFingerprint,
+  });
+
+  final String peerFingerprint;
+}
+
+class ControlConnectionClosed extends ControlConnectionEvent {
+  const ControlConnectionClosed({required super.connectionId, this.reason});
+
+  final String? reason;
+}
+
+class ControlConnectionError extends ControlConnectionEvent {
+  const ControlConnectionError({super.connectionId, required this.message});
+
+  final String message;
 }
 
 class UnsupportedQuicControlClient implements QuicControlClient {

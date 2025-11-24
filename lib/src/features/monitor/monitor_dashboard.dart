@@ -5,15 +5,132 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import '../../domain/models.dart';
+import '../../discovery/mdns_service.dart';
+import '../../identity/device_identity.dart';
 import '../../pairing/pin_pairing_controller.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
+import '../../control/control_service.dart';
 
-class MonitorDashboard extends ConsumerWidget {
+class MonitorDashboard extends ConsumerStatefulWidget {
   const MonitorDashboard({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<MonitorDashboard> createState() => _MonitorDashboardState();
+}
+
+class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
+  MdnsAdvertisement? _currentAdvertisement;
+  bool _advertising = false;
+  bool _listenersAttached = false;
+  late final MdnsService _mdnsService;
+
+  @override
+  void initState() {
+    super.initState();
+    _mdnsService = ref.read(mdnsServiceProvider);
+  }
+
+  @override
+  void dispose() {
+    _stopAdvertising();
+    super.dispose();
+  }
+
+  Future<void> _refreshAdvertisement() async {
+    if (!mounted) return;
+    final monitoringEnabled = ref.read(monitoringStatusProvider);
+    final identity = ref.read(identityProvider);
+    final settings = ref.read(monitorSettingsProvider);
+    if (!monitoringEnabled || !identity.hasValue || !settings.hasValue) {
+      await _stopAdvertising();
+      return;
+    }
+
+    final builder = ref.read(serviceIdentityProvider);
+    final nextAd = builder.buildMdnsAdvertisement(
+      identity: identity.requireValue,
+      monitorName: settings.requireValue.name,
+      servicePort: builder.defaultPort,
+    );
+
+    if (_advertising &&
+        _currentAdvertisement != null &&
+        _adsEqual(_currentAdvertisement!, nextAd)) {
+      return;
+    }
+
+    await _stopAdvertising();
+    try {
+      await _mdnsService.startAdvertise(nextAd);
+      _currentAdvertisement = nextAd;
+      _advertising = true;
+    } catch (_) {
+      // Ignore failures; listener will still show pinned monitors from storage.
+    }
+  }
+
+  Future<void> _stopAdvertising() async {
+    if (!_advertising) return;
+    await _mdnsService.stop();
+    _advertising = false;
+    _currentAdvertisement = null;
+  }
+
+  Future<void> _refreshControlServer() async {
+    final monitoringEnabled = ref.read(monitoringStatusProvider);
+    final identity = ref.read(identityProvider);
+    final trusted = ref.read(trustedListenersProvider);
+    if (!monitoringEnabled || !identity.hasValue || !trusted.hasValue) {
+      await ref.read(controlServerProvider.notifier).stop();
+      return;
+    }
+    final builder = ref.read(serviceIdentityProvider);
+    await ref
+        .read(controlServerProvider.notifier)
+        .start(
+          identity: identity.requireValue,
+          port: builder.defaultPort,
+          trustedFingerprints: trusted.requireValue
+              .map((peer) => peer.certFingerprint)
+              .toList(),
+        );
+  }
+
+  bool _adsEqual(MdnsAdvertisement a, MdnsAdvertisement b) {
+    return a.monitorId == b.monitorId &&
+        a.monitorName == b.monitorName &&
+        a.monitorCertFingerprint == b.monitorCertFingerprint &&
+        a.servicePort == b.servicePort &&
+        a.version == b.version;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_listenersAttached) {
+      _listenersAttached = true;
+      ref.listen<AsyncValue<DeviceIdentity>>(identityProvider, (_, __) {
+        _refreshAdvertisement();
+        _refreshControlServer();
+      });
+      ref.listen<AsyncValue<MonitorSettings>>(monitorSettingsProvider, (_, __) {
+        _refreshAdvertisement();
+      });
+      ref.listen<bool>(monitoringStatusProvider, (_, __) {
+        _refreshAdvertisement();
+        _refreshControlServer();
+      });
+      ref.listen<AsyncValue<List<TrustedPeer>>>(trustedListenersProvider, (
+        _,
+        __,
+      ) {
+        _refreshControlServer();
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _refreshAdvertisement();
+        _refreshControlServer();
+      });
+    }
     final monitoringEnabled = ref.watch(monitoringStatusProvider);
     final settingsAsync = ref.watch(monitorSettingsProvider);
     final settings = settingsAsync.asData?.value ?? MonitorSettings.defaults;
@@ -21,6 +138,7 @@ class MonitorDashboard extends ConsumerWidget {
     final identity = ref.watch(identityProvider);
     final serviceBuilder = ref.watch(serviceIdentityProvider);
     final pinSession = ref.watch(pinSessionProvider);
+    final controlServer = ref.watch(controlServerProvider);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -325,9 +443,17 @@ class MonitorDashboard extends ConsumerWidget {
               'QUIC server listens on UDP 48080, length-prefixed JSON on the control stream.',
           badge: 'QUIC server',
           badgeColor: AppColors.primary,
-          children: const [
-            _MetricRow(label: 'Role', value: 'Server with pinned certificate'),
+          children: [
             _MetricRow(
+              label: 'Status',
+              value: _serverStatusLabel(controlServer),
+            ),
+            _MetricRow(
+              label: 'Trusted listeners',
+              value:
+                  '${trustedPeers.maybeWhen(data: (list) => list.length, orElse: () => 0)} pinned',
+            ),
+            const _MetricRow(
               label: 'Streams',
               value: 'Control (bi-dir) • media via WebRTC',
             ),
@@ -346,6 +472,20 @@ String _autoStreamLabel(AutoStreamType type) {
       return 'Audio';
     case AutoStreamType.audioVideo:
       return 'Audio + video';
+  }
+}
+
+String _serverStatusLabel(ControlServerState state) {
+  switch (state.status) {
+    case ControlServerStatus.running:
+      return 'Running on UDP ${state.port ?? 48080}';
+    case ControlServerStatus.starting:
+      return 'Starting...';
+    case ControlServerStatus.error:
+      return 'Error: ${state.error ?? 'unknown'}';
+    case ControlServerStatus.stopped:
+    default:
+      return 'Stopped';
   }
 }
 
@@ -599,7 +739,7 @@ class _PinSessionBanner extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                session.pin,
+                session.pin ?? '------',
                 style: Theme.of(context).textTheme.headlineMedium?.copyWith(
                   letterSpacing: 2,
                   fontWeight: FontWeight.w900,

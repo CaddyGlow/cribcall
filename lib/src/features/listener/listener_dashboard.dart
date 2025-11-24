@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../domain/models.dart';
-import '../../pairing/pin_pairing_controller.dart';
+import '../../control/control_service.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
 import 'listener_pin_page.dart';
@@ -55,6 +55,72 @@ class ListenerDashboard extends ConsumerWidget {
       ).showSnackBar(SnackBar(content: Text('Forgot $monitorName')));
     }
 
+    Future<void> handleListen(_MonitorCardData data) async {
+      if (!context.mounted) return;
+      if (!data.trusted) {
+        if (data.advertisement != null) {
+          await showModalBottomSheet<void>(
+            context: context,
+            showDragHandle: true,
+            builder: (context) =>
+                ListenerPinPage(advertisement: data.advertisement!),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Pair this monitor (QR or PIN) before listening'),
+            ),
+          );
+        }
+        return;
+      }
+      if (data.trustedMonitor == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Trusted monitor details missing; re-pair and retry'),
+          ),
+        );
+        return;
+      }
+      if (data.advertisement == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Monitor is offline; waiting for mDNS presence'),
+          ),
+        );
+        return;
+      }
+      if (!identity.hasValue) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Loading device identity; try again in a moment'),
+          ),
+        );
+        return;
+      }
+      final failure = await ref
+          .read(controlClientProvider.notifier)
+          .connectToMonitor(
+            advertisement: data.advertisement!,
+            monitor: data.trustedMonitor!,
+            identity: identity.requireValue,
+          );
+      if (!context.mounted) return;
+      if (failure != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Control connect failed: ${failure.message}')),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Connecting to ${data.name} via QUIC control channel...',
+            ),
+          ),
+        );
+      }
+    }
+
     final monitors = [
       ...advertisements.map((ad) {
         final pinnedMonitor = pinned.cast<TrustedMonitor?>().firstWhere(
@@ -62,31 +128,42 @@ class ListenerDashboard extends ConsumerWidget {
           orElse: () => null,
         );
         final isTrusted = pinnedMonitor != null;
-        return _MonitorCardData(
+        late final _MonitorCardData data;
+        data = _MonitorCardData(
           name: ad.monitorName,
           status: 'Online',
           lastNoise: isTrusted ? '3 min ago' : '—',
           fingerprint: ad.monitorCertFingerprint,
           trusted: isTrusted,
+          trustedMonitor: pinnedMonitor,
           lastKnownIp: ad.ip ?? pinnedMonitor?.lastKnownIp,
           onForget: isTrusted
               ? () => forgetMonitor(ad.monitorId, ad.monitorName)
               : null,
           advertisement: ad,
+          onListen: () => handleListen(data),
         );
+        return data;
       }),
       for (final monitor in pinned)
         if (!advertisements.any((ad) => ad.monitorId == monitor.monitorId))
-          _MonitorCardData(
-            name: monitor.monitorName,
-            status: 'Offline',
-            lastNoise: '—',
-            fingerprint: monitor.certFingerprint,
-            trusted: true,
-            lastKnownIp: monitor.lastKnownIp,
-            onForget: () =>
-                forgetMonitor(monitor.monitorId, monitor.monitorName),
-          ),
+          (() {
+            late final _MonitorCardData data;
+            data = _MonitorCardData(
+              name: monitor.monitorName,
+              status: 'Offline',
+              lastNoise: '—',
+              fingerprint: monitor.certFingerprint,
+              trusted: true,
+              trustedMonitor: monitor,
+              lastKnownIp: monitor.lastKnownIp,
+              onForget: () =>
+                  forgetMonitor(monitor.monitorId, monitor.monitorName),
+              advertisement: null,
+              onListen: () => handleListen(data),
+            );
+            return data;
+          })(),
     ];
 
     return Column(
@@ -343,8 +420,10 @@ class _MonitorCardData {
     required this.fingerprint,
     required this.trusted,
     this.lastKnownIp,
+    this.trustedMonitor,
     this.onForget,
     this.advertisement,
+    this.onListen,
   });
 
   final String name;
@@ -353,8 +432,10 @@ class _MonitorCardData {
   final String fingerprint;
   final bool trusted;
   final String? lastKnownIp;
+  final TrustedMonitor? trustedMonitor;
   final VoidCallback? onForget;
   final MdnsAdvertisement? advertisement;
+  final VoidCallback? onListen;
 }
 
 class _MonitorCard extends StatelessWidget {
@@ -484,8 +565,17 @@ class _MonitorCard extends StatelessWidget {
             spacing: 6,
             runSpacing: 4,
             children: [
-              TextButton(onPressed: () {}, child: const Text('Listen')),
-              TextButton(onPressed: () {}, child: const Text('View video')),
+              TextButton(onPressed: data.onListen, child: const Text('Listen')),
+              TextButton(
+                onPressed: () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Video streaming not wired yet'),
+                    ),
+                  );
+                },
+                child: const Text('View video'),
+              ),
               if (!data.trusted && data.advertisement != null)
                 TextButton.icon(
                   onPressed: () async {

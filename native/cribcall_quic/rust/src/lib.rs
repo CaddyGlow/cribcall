@@ -75,7 +75,6 @@ enum QuicEvent {
 #[derive(Debug)]
 enum WorkerCommand {
     Send { conn_id: Vec<u8>, payload: Vec<u8> },
-    Broadcast(Vec<u8>),
     Close { conn_id: Option<Vec<u8>> },
 }
 
@@ -371,14 +370,28 @@ pub extern "C" fn cc_quic_server_start(
 #[no_mangle]
 pub extern "C" fn cc_quic_conn_send(
     handle: u64,
+    conn_id_ptr: *const u8,
+    conn_id_len: usize,
     data: *const u8,
     data_len: usize,
 ) -> i32 {
     if data.is_null() || data_len == 0 {
         return CcQuicStatus::NullPointer.code();
     }
+    if conn_id_ptr.is_null() || conn_id_len == 0 {
+        return CcQuicStatus::NullPointer.code();
+    }
     let slice = unsafe { std::slice::from_raw_parts(data, data_len) };
     let payload = slice.to_vec();
+    let conn_id_raw = unsafe { std::slice::from_raw_parts(conn_id_ptr, conn_id_len) }.to_vec();
+    let conn_id_str = match String::from_utf8(conn_id_raw) {
+        Ok(s) => s,
+        Err(_) => return CcQuicStatus::Internal.code(),
+    };
+    let conn_id = match hex::decode(conn_id_str.trim()) {
+        Ok(bytes) => bytes,
+        Err(_) => return CcQuicStatus::Internal.code(),
+    };
 
     let map = match CONNECTIONS.get() {
         Some(map) => map,
@@ -386,7 +399,14 @@ pub extern "C" fn cc_quic_conn_send(
     };
     match map.get(&handle) {
         Some(entry) => {
-            if entry.tx.send(WorkerCommand::Send(payload)).is_err() {
+            if entry
+                .tx
+                .send(WorkerCommand::Send {
+                    conn_id,
+                    payload,
+                })
+                .is_err()
+            {
                 return CcQuicStatus::Internal.code();
             }
         }
@@ -403,7 +423,7 @@ pub extern "C" fn cc_quic_conn_close(handle: u64) -> i32 {
         None => return CcQuicStatus::Internal.code(),
     };
     if let Some(entry) = map.get(&handle) {
-        let _ = entry.tx.send(WorkerCommand::Close);
+        let _ = entry.tx.send(WorkerCommand::Close { conn_id: None });
     }
     CcQuicStatus::Ok.code()
 }
@@ -425,6 +445,7 @@ fn run_client_worker(
                 dart_port,
                 QuicEvent::Error {
                     handle: handle_id,
+                    connection_id: None,
                     message: format!("socket addr error: {err}"),
                 },
             );
@@ -435,6 +456,7 @@ fn run_client_worker(
     let mut scid = [0u8; quiche::MAX_CONN_ID_LEN];
     OsRng.fill_bytes(&mut scid);
     let scid = quiche::ConnectionId::from_ref(&scid);
+    let conn_id_hex = hex_string(scid.as_ref());
 
     let mut conn = match quiche::connect(
         Some(&server_name),
@@ -449,6 +471,7 @@ fn run_client_worker(
                 dart_port,
                 QuicEvent::Error {
                     handle: handle_id,
+                    connection_id: Some(conn_id_hex.clone()),
                     message: format!("connect error: {err}"),
                 },
             );
@@ -463,8 +486,8 @@ fn run_client_worker(
     loop {
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
-                WorkerCommand::Send(payload) => {
-                    if conn.is_established() {
+                WorkerCommand::Send { conn_id, payload } => {
+                    if conn.is_established() && conn_id == scid.as_ref() {
                         if let Err(err) = conn.stream_send(CONTROL_STREAM_ID, &payload, false) {
                             if err != quiche::Error::Done {
                                 warn!("send error: {err:?}");
@@ -472,8 +495,10 @@ fn run_client_worker(
                         }
                     }
                 }
-                WorkerCommand::Close => {
-                    let _ = conn.close(false, 0x100, b"app close");
+                WorkerCommand::Close { conn_id } => {
+                    if conn_id.is_none() || conn_id.as_deref() == Some(scid.as_ref()) {
+                        let _ = conn.close(false, 0x100, b"app close");
+                    }
                 }
             }
         }
@@ -488,13 +513,14 @@ fn run_client_worker(
             Err(err) => {
                 post_event(
                     dart_port,
-                    QuicEvent::Error {
-                        handle: handle_id,
-                        message: format!("quic send error: {err}"),
-                    },
-                );
-                break;
-            }
+                QuicEvent::Error {
+                    handle: handle_id,
+                    connection_id: Some(conn_id_hex.clone()),
+                    message: format!("quic send error: {err}"),
+                },
+            );
+            break;
+        }
         }
 
         match socket.recv_from(&mut buf) {
@@ -525,6 +551,7 @@ fn run_client_worker(
                     dart_port,
                     QuicEvent::Error {
                         handle: handle_id,
+                        connection_id: Some(conn_id_hex.clone()),
                         message: "server fingerprint mismatch".to_string(),
                     },
                 );
@@ -534,6 +561,7 @@ fn run_client_worker(
                 dart_port,
                 QuicEvent::Connected {
                     handle: handle_id,
+                    connection_id: conn_id_hex.clone(),
                     peer_fingerprint: peer_fp,
                 },
             );
@@ -549,6 +577,7 @@ fn run_client_worker(
                             dart_port,
                             QuicEvent::Message {
                                 handle: handle_id,
+                                connection_id: conn_id_hex.clone(),
                                 data_base64: BASE64.encode(data),
                             },
                         );
@@ -568,6 +597,7 @@ fn run_client_worker(
                 dart_port,
                 QuicEvent::Closed {
                     handle: handle_id,
+                    connection_id: conn_id_hex.clone(),
                     reason,
                 },
             );
@@ -605,6 +635,7 @@ fn run_server_worker(
                 dart_port,
                 QuicEvent::Error {
                     handle: handle_id,
+                    connection_id: None,
                     message: format!("socket addr error: {err}"),
                 },
             );
@@ -620,8 +651,8 @@ fn run_server_worker(
     loop {
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
-                WorkerCommand::Send(payload) => {
-                    for connection in conns.values_mut() {
+                WorkerCommand::Send { conn_id, payload } => {
+                    if let Some(connection) = conns.get_mut(&conn_id) {
                         if connection.is_established() {
                             if let Err(err) =
                                 connection.stream_send(CONTROL_STREAM_ID, &payload, false)
@@ -633,9 +664,15 @@ fn run_server_worker(
                         }
                     }
                 }
-                WorkerCommand::Close => {
-                    for connection in conns.values_mut() {
-                        let _ = connection.close(false, 0x101, b"server close");
+                WorkerCommand::Close { conn_id } => {
+                    if let Some(id) = conn_id {
+                        if let Some(conn) = conns.get_mut(&id) {
+                            let _ = conn.close(false, 0x101, b"server close");
+                        }
+                    } else {
+                        for connection in conns.values_mut() {
+                            let _ = connection.close(false, 0x101, b"server close");
+                        }
                     }
                 }
             }
@@ -686,6 +723,7 @@ fn run_server_worker(
         let mut to_close: Vec<Vec<u8>> = Vec::new();
 
         for (id, connection) in conns.iter_mut() {
+            let id_hex = hex_string(id);
             match connection.send(&mut out) {
                 Ok((len, send_info)) => {
                     if let Err(err) = socket.send_to(&out[..len], send_info.to) {
@@ -698,6 +736,7 @@ fn run_server_worker(
                         dart_port,
                         QuicEvent::Error {
                             handle: handle_id,
+                            connection_id: Some(id_hex.clone()),
                             message: format!("server send error: {err}"),
                         },
                     );
@@ -724,6 +763,7 @@ fn run_server_worker(
                     dart_port,
                     QuicEvent::Connected {
                         handle: handle_id,
+                        connection_id: id_hex.clone(),
                         peer_fingerprint: peer_fp,
                     },
                 );
@@ -739,6 +779,7 @@ fn run_server_worker(
                                 dart_port,
                                 QuicEvent::Message {
                                     handle: handle_id,
+                                    connection_id: id_hex.clone(),
                                     data_base64: BASE64.encode(data),
                                 },
                             );
@@ -758,6 +799,7 @@ fn run_server_worker(
                     dart_port,
                     QuicEvent::Closed {
                         handle: handle_id,
+                        connection_id: id_hex.clone(),
                         reason,
                     },
                 );
@@ -819,6 +861,10 @@ fn sha256_hex(data: &[u8]) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>()
+}
+
+fn hex_string(data: &[u8]) -> String {
+    data.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn post_event(port: i64, event: QuicEvent) {

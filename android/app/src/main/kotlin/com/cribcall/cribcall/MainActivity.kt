@@ -7,6 +7,8 @@ import io.flutter.plugin.common.MethodChannel
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 
 class MainActivity : FlutterActivity() {
     private val mdnsChannel = "cribcall/mdns"
@@ -108,7 +110,9 @@ class MainActivity : FlutterActivity() {
                             "version" to versionValue,
                             "ip" to resolved.host?.hostAddress,
                         )
-                        mdnsEventSink?.success(payload)
+                        Handler(Looper.getMainLooper()).post {
+                            mdnsEventSink?.success(payload)
+                        }
                     }
                 })
             }

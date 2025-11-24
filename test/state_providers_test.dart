@@ -1,12 +1,12 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:cribcall/src/control/control_message.dart';
 import 'package:cribcall/src/domain/models.dart';
 import 'package:cribcall/src/discovery/mdns_service.dart';
 import 'package:cribcall/src/state/app_state.dart';
 import 'package:cribcall/src/storage/settings_repository.dart';
 import 'package:cribcall/src/storage/trusted_monitors_repository.dart';
-import 'package:cribcall/src/pairing/pin_pairing_controller.dart';
 import 'package:cribcall/src/identity/device_identity.dart';
 import 'package:cribcall/src/pairing/pake_engine.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -213,12 +213,62 @@ void main() {
           .read(pinSessionProvider.notifier)
           .submitPin(
             pairingSessionId: pinMessage.pairingSessionId,
-            pin: container.read(pinSessionProvider)!.pin,
+            pin: container.read(pinSessionProvider)!.pin!,
             advertisement: ad,
             listenerIdentity: listenerIdentity,
             listenerName: 'Listener',
           );
       expect(successResult.success, isTrue);
+    },
+  );
+
+  test(
+    'listener can hydrate PIN session from PIN_REQUIRED message',
+    () async {
+      final tempDir = await Directory.systemTemp.createTemp('pin_required');
+      final container = ProviderContainer(
+        overrides: [
+          trustedMonitorsRepoProvider.overrideWithValue(
+            TrustedMonitorsRepository(overrideDirectoryPath: tempDir.path),
+          ),
+          pakeEngineProvider.overrideWithValue(_FakePakeEngine()),
+        ],
+      );
+      addTearDown(() async {
+        container.dispose();
+        await tempDir.delete(recursive: true);
+      });
+
+      final listenerIdentity = await DeviceIdentity.generate();
+      final pinRequired = PinRequiredMessage(
+        pairingSessionId: 'session-1',
+        pakeMsgA: 'msgA',
+        expiresInSec: 60,
+        maxAttempts: 3,
+      );
+      container.read(pinSessionProvider.notifier).acceptPinRequired(
+            pinRequired,
+          );
+      final ad = MdnsAdvertisement(
+        monitorId: 'm1',
+        monitorName: 'Nursery',
+        monitorCertFingerprint: 'fp1',
+        servicePort: 48080,
+        version: 1,
+      );
+
+      final result = await container
+          .read(pinSessionProvider.notifier)
+          .submitPin(
+            pairingSessionId: pinRequired.pairingSessionId,
+            pin: '123456',
+            advertisement: ad,
+            listenerIdentity: listenerIdentity,
+            listenerName: 'Listener',
+          );
+
+      expect(result.success, isTrue);
+      expect(container.read(pinSessionProvider), isNotNull);
     },
   );
 }

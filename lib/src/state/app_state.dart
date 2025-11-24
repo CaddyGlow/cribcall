@@ -15,6 +15,7 @@ import '../pairing/pin_pairing_controller.dart';
 import '../storage/settings_repository.dart';
 import '../storage/trusted_listeners_repository.dart';
 import '../storage/trusted_monitors_repository.dart';
+import '../control/control_service.dart';
 
 class RoleController extends Notifier<DeviceRole?> {
   @override
@@ -184,6 +185,17 @@ final trustedMonitorsRepoProvider = Provider<TrustedMonitorsRepository>((ref) {
 final pakeEngineProvider = Provider<PakeEngine>((ref) {
   return X25519PakeEngine();
 });
+final controlTransportsProvider = Provider<ControlTransports>((ref) {
+  return ControlTransports.create();
+});
+final controlServerProvider =
+    NotifierProvider<ControlServerController, ControlServerState>(
+      ControlServerController.new,
+    );
+final controlClientProvider =
+    NotifierProvider<ControlClientController, ControlClientState>(
+      ControlClientController.new,
+    );
 
 class TrustedListenersController extends AsyncNotifier<List<TrustedPeer>> {
   @override
@@ -291,23 +303,65 @@ final trustedListenersProvider =
       TrustedListenersController.new,
     );
 
+class _SeenAdvertisement {
+  _SeenAdvertisement({required this.advertisement, required this.seenAt});
+
+  final MdnsAdvertisement advertisement;
+  final DateTime seenAt;
+}
+
 final mdnsBrowseProvider = StreamProvider.autoDispose<List<MdnsAdvertisement>>((
   ref,
-) async* {
+) {
   final mdns = ref.watch(mdnsServiceProvider);
-  final seen = <String>{};
-  final accumulated = <MdnsAdvertisement>[];
-  await for (final event in mdns.browse()) {
+  final controller = StreamController<List<MdnsAdvertisement>>();
+  final seen = <String, _SeenAdvertisement>{};
+  const ttl = Duration(seconds: 45);
+
+  void emit() {
+    controller.add(seen.values.map((e) => e.advertisement).toList());
+  }
+
+  void upsert(MdnsAdvertisement ad) {
+    seen[ad.monitorId] = _SeenAdvertisement(
+      advertisement: ad,
+      seenAt: DateTime.now(),
+    );
+    emit();
+  }
+
+  final subscription = mdns.browse().listen((event) {
     if (event.ip != null) {
       unawaited(
         ref.read(trustedMonitorsProvider.notifier).updateLastKnownIp(event),
       );
     }
-    if (seen.add(event.monitorId)) {
-      accumulated.add(event);
-      yield List<MdnsAdvertisement>.from(accumulated);
+    upsert(event);
+  }, onError: controller.addError);
+
+  final ticker = Timer.periodic(const Duration(seconds: 5), (_) {
+    final now = DateTime.now();
+    final staleKeys = seen.entries
+        .where((entry) => now.difference(entry.value.seenAt) > ttl)
+        .map((entry) => entry.key)
+        .toList();
+    if (staleKeys.isEmpty) return;
+    for (final key in staleKeys) {
+      seen.remove(key);
     }
-  }
+    emit();
+  });
+
+  // Emit initial empty state so listeners render quickly.
+  emit();
+
+  ref.onDispose(() {
+    ticker.cancel();
+    subscription.cancel();
+    controller.close();
+  });
+
+  return controller.stream;
 });
 
 final discoveredMonitorsProvider = Provider<List<MdnsAdvertisement>>((ref) {
