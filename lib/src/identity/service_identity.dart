@@ -9,11 +9,13 @@ class ServiceIdentityBuilder {
     required this.serviceProtocol,
     required this.serviceVersion,
     required this.defaultPort,
+    required this.transport,
   });
 
   final String serviceProtocol;
   final int serviceVersion;
   final int defaultPort;
+  final String transport;
 
   MonitorQrPayload buildQrPayload({
     required DeviceIdentity identity,
@@ -28,6 +30,7 @@ class ServiceIdentityBuilder {
         protocol: serviceProtocol,
         version: serviceVersion,
         defaultPort: defaultPort,
+        transport: transport,
       ),
     );
   }
@@ -54,6 +57,7 @@ class ServiceIdentityBuilder {
       monitorCertFingerprint: identity.certFingerprint,
       servicePort: servicePort,
       version: serviceVersion,
+      transport: transport,
     );
   }
 }

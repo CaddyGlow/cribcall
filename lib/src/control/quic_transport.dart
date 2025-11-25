@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:cribcall_quic/cribcall_quic.dart';
 
+import '../config/build_flags.dart';
 import '../identity/device_identity.dart';
 import 'control_frame_codec.dart';
 import 'control_message.dart';
@@ -14,11 +15,13 @@ class QuicEndpoint {
     required this.host,
     required this.port,
     required this.expectedServerFingerprint,
+    this.transport = kTransportQuic,
   });
 
   final String host;
   final int port;
   final String expectedServerFingerprint;
+  final String transport;
 }
 
 /// QUIC control client backed by the Rust/quiche native plugin.
@@ -335,7 +338,7 @@ class UnsupportedQuicControlServer implements QuicControlServer {
 
 UnsupportedError _unsupportedQuicError({QuicEndpoint? endpoint}) {
   final description = endpoint != null
-      ? '${endpoint.host}:${endpoint.port}'
+      ? '${endpoint.host}:${endpoint.port} (${endpoint.transport})'
       : 'requested QUIC endpoint';
   return UnsupportedError(
     'QUIC control transport is unavailable for $description',

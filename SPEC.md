@@ -28,6 +28,8 @@
 - Control/signaling over **QUIC**.
 - Media (audio/video) over **WebRTC** (UDP).
 
+Implementation note: current milestone ships the control channel over HTTP+WebSocket with pinned cert fingerprints, nonce+signature proof-of-possession, and a `/health` probe (no `lastSeenAt`). QUIC remains behind the `CRIBCALL_ENABLE_QUIC` build flag until native transport is fully wired.
+
 ---
 
 ### 1.2 Roles & Personas

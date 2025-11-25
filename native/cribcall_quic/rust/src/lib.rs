@@ -1,7 +1,7 @@
 use allo_isolate::Isolate;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use dashmap::DashMap;
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use once_cell::sync::OnceCell;
 use rand::{rngs::OsRng, RngCore};
 use serde::Serialize;
@@ -668,9 +668,10 @@ fn run_client_worker(
                 if wait >= timeout {
                     if !conn.is_established() {
                         warn!(
-                            "client {} handshake timeout fired after {:?}",
+                            "client {} handshake timeout fired after {:?} stats={}",
                             conn_id_hex,
-                            start.elapsed()
+                            start.elapsed(),
+                            format_stats(&conn.stats())
                         );
                     }
                     conn.on_timeout();
@@ -879,10 +880,11 @@ fn run_server_worker(
             if connection.is_closed() {
                 let reason = connection.peer_error().map(|err| format!("{err:?}"));
                 info!(
-                    "server connection {} closed established={} ({:?})",
+                    "server connection {} closed established={} ({:?}) stats={}",
                     id_hex,
                     connection.is_established(),
-                    reason
+                    reason,
+                    format_stats(&connection.stats())
                 );
                 post_event(
                     dart_port,
@@ -909,9 +911,10 @@ fn run_server_worker(
                                 .map(|s| s.elapsed())
                                 .unwrap_or_default();
                             warn!(
-                                "server conn {} handshake timeout fired after {:?}",
+                                "server conn {} handshake timeout fired after {:?} stats={}",
                                 id_hex,
-                                elapsed
+                                elapsed,
+                                format_stats(&connection.stats())
                             );
                         }
                         connection.on_timeout();
@@ -966,6 +969,13 @@ fn sha256_hex(data: &[u8]) -> String {
 
 fn hex_string(data: &[u8]) -> String {
     data.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn format_stats(stats: &quiche::Stats) -> String {
+    format!(
+        "tx {} pkts ({} retrans) rx {} pkts lost {} spurious {}",
+        stats.sent, stats.retrans, stats.recv, stats.lost, stats.spurious_lost
+    )
 }
 
 fn short_hex(hex: &str) -> String {

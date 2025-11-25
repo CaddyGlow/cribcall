@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:cribcall/src/config/build_flags.dart';
 import 'package:cribcall/src/domain/models.dart';
 
 void main() {
@@ -8,6 +9,7 @@ void main() {
       protocol: 'baby-monitor',
       version: 1,
       defaultPort: 48080,
+      transport: kTransportHttpWs,
     );
     const payload = MonitorQrPayload(
       monitorId: 'M1-UUID',
@@ -27,6 +29,7 @@ void main() {
       equals(payload.monitorCertFingerprint),
     );
     expect(decoded.service.defaultPort, equals(48080));
+    expect(decoded.service.transport, equals(kTransportHttpWs));
 
     expect(
       () => MonitorQrPayload.fromJson({...json, 'type': 'unexpected'}),
@@ -61,8 +64,11 @@ void main() {
       monitorCertFingerprint: 'fp',
       servicePort: 48080,
       version: 1,
+      transport: kTransportHttpWs,
     );
 
-    expect(MdnsAdvertisement.fromJson(ad.toJson()).monitorName, 'Nursery');
+    final parsed = MdnsAdvertisement.fromJson(ad.toJson());
+    expect(parsed.monitorName, 'Nursery');
+    expect(parsed.transport, kTransportHttpWs);
   });
 }

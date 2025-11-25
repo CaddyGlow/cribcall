@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
+import '../../config/build_flags.dart';
 import '../../domain/models.dart';
 import '../../discovery/mdns_service.dart';
 import '../../identity/device_identity.dart';
@@ -82,7 +83,8 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
         a.monitorName == b.monitorName &&
         a.monitorCertFingerprint == b.monitorCertFingerprint &&
         a.servicePort == b.servicePort &&
-        a.version == b.version;
+        a.version == b.version &&
+        a.transport == b.transport;
   }
 
   @override
@@ -258,7 +260,7 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
         _MonitorCard(
           title: 'Pairing & identity',
           subtitle:
-              'Share a QR or run PIN-based pairing. Listeners must pin this device fingerprint before QUIC traffic is accepted.',
+              'Share a QR or run PIN-based pairing. Listeners must pin this device fingerprint before any control traffic is accepted.',
           badge: 'Pinned cert',
           badgeColor: AppColors.primary,
           children: [
@@ -353,7 +355,8 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
         const SizedBox(height: 14),
         _MonitorCard(
           title: 'Trusted listeners',
-          subtitle: 'Pinned fingerprints are required on every QUIC session.',
+          subtitle:
+              'Pinned fingerprints are required on every control session.',
           badge: 'mTLS required',
           badgeColor: AppColors.primary,
           children: [
@@ -417,9 +420,12 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
         const SizedBox(height: 14),
         _MonitorCard(
           title: 'Control channel status',
-          subtitle:
-              'QUIC server listens on UDP 48080, length-prefixed JSON on the control stream.',
-          badge: 'QUIC server',
+          subtitle: serviceBuilder.transport == kTransportQuic
+              ? 'QUIC control (UDP ${serviceBuilder.defaultPort}), length-prefixed JSON frames.'
+              : 'HTTP+WebSocket control (TLS ${serviceBuilder.defaultPort}), nonce+signature handshake and pinned fingerprint.',
+          badge: serviceBuilder.transport == kTransportQuic
+              ? 'QUIC'
+              : 'HTTP+WS',
           badgeColor: AppColors.primary,
           children: [
             _MetricRow(

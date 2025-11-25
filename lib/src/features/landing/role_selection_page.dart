@@ -20,7 +20,7 @@ class RoleSelectionPage extends ConsumerWidget {
         actions: const [
           Padding(
             padding: EdgeInsets.only(right: 12),
-            child: Chip(label: Text('LAN only • QUIC + WebRTC')),
+            child: Chip(label: Text('LAN only • Control + WebRTC')),
           ),
         ],
       ),
@@ -97,7 +97,7 @@ class _HeroBanner extends StatelessWidget {
             children: [
               _HeroPill(text: 'Pinned cert fingerprints'),
               _HeroPill(text: 'RFC 8785 transcripts'),
-              _HeroPill(text: 'QUIC control • WebRTC media'),
+              _HeroPill(text: 'HTTP+WS control (QUIC optional)'),
             ],
           ),
         ],
@@ -156,7 +156,7 @@ class _RoleCards extends StatelessWidget {
                 'Lives in the nursery. Captures audio/video, detects noise, and advertises itself.',
             icon: Icons.sensors,
             highlights: const [
-              'Runs QUIC control server',
+              'Runs control server (HTTP+WS default, QUIC optional)',
               'Sound detection with cooldown',
               'Shows QR or PIN for pairing',
             ],

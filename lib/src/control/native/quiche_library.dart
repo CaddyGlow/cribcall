@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:developer' as developer;
 import 'dart:io';
 
@@ -6,6 +5,7 @@ import 'package:cryptography/cryptography.dart';
 import 'package:cribcall_quic/cribcall_quic.dart';
 
 import '../../identity/device_identity.dart';
+import '../../identity/pem.dart';
 import '../../identity/pkcs8.dart';
 
 class QuicheLibrary {
@@ -78,13 +78,13 @@ class QuicheLibrary {
 
   Future<_IdentityFiles> _writeIdentity(DeviceIdentity identity) async {
     final dir = await Directory.systemTemp.createTemp('cribcall-quic-');
-    final certPem = _pemEncode('CERTIFICATE', identity.certificateDer);
+    final certPem = encodePem('CERTIFICATE', identity.certificateDer);
     final certPath = '${dir.path}/identity.crt';
     await File(certPath).writeAsString(certPem, flush: true);
 
     final extracted = await identity.keyPair.extract() as SimpleKeyPairData;
     final pkcs8 = ed25519PrivateKeyPkcs8(extracted.bytes);
-    final keyPem = _pemEncode('PRIVATE KEY', pkcs8);
+    final keyPem = encodePem('PRIVATE KEY', pkcs8);
     final keyPath = '${dir.path}/identity.key';
     await File(keyPath).writeAsString(keyPem, flush: true);
 
@@ -109,19 +109,6 @@ class _IdentityFiles {
   final String certPath;
   final String keyPath;
   final Directory dir;
-}
-
-String _pemEncode(String label, List<int> derBytes) {
-  final b64 = base64.encode(derBytes);
-  final buffer = StringBuffer()..writeln('-----BEGIN $label-----');
-  for (var i = 0; i < b64.length; i += 64) {
-    final end = (i + 64 < b64.length) ? i + 64 : b64.length;
-    buffer.writeln(b64.substring(i, end));
-  }
-  buffer
-    ..writeln('-----END $label-----')
-    ..write('\n');
-  return buffer.toString();
 }
 
 void _logQuic(String message) {

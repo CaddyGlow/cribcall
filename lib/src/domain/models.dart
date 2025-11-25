@@ -1,3 +1,5 @@
+import '../config/build_flags.dart';
+
 enum DeviceRole { monitor, listener }
 
 enum AutoStreamType { none, audio, audioVideo }
@@ -212,16 +214,19 @@ class QrServiceInfo {
     required this.protocol,
     required this.version,
     required this.defaultPort,
+    this.transport = kTransportHttpWs,
   });
 
   final String protocol;
   final int version;
   final int defaultPort;
+  final String transport;
 
   Map<String, dynamic> toJson() => {
     'protocol': protocol,
     'version': version,
     'defaultPort': defaultPort,
+    'transport': transport,
   };
 
   factory QrServiceInfo.fromJson(Map<String, dynamic> json) {
@@ -229,6 +234,7 @@ class QrServiceInfo {
       protocol: json['protocol'] as String,
       version: json['version'] as int,
       defaultPort: json['defaultPort'] as int,
+      transport: json['transport'] as String? ?? kTransportHttpWs,
     );
   }
 }
@@ -282,6 +288,7 @@ class MdnsAdvertisement {
     required this.monitorCertFingerprint,
     required this.servicePort,
     required this.version,
+    this.transport = kTransportHttpWs,
     this.ip,
   });
 
@@ -290,6 +297,7 @@ class MdnsAdvertisement {
   final String monitorCertFingerprint;
   final int servicePort;
   final int version;
+  final String transport;
   final String? ip;
 
   Map<String, dynamic> toJson() => {
@@ -298,6 +306,7 @@ class MdnsAdvertisement {
     'monitorCertFingerprint': monitorCertFingerprint,
     'servicePort': servicePort,
     'version': version,
+    'transport': transport,
     if (ip != null) 'ip': ip,
   };
 
@@ -308,6 +317,7 @@ class MdnsAdvertisement {
       monitorCertFingerprint: json['monitorCertFingerprint'] as String,
       servicePort: json['servicePort'] as int,
       version: json['version'] as int,
+      transport: json['transport'] as String? ?? kTransportHttpWs,
       ip: json['ip'] as String?,
     );
   }

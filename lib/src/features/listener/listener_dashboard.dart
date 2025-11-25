@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../config/build_flags.dart';
 import '../../domain/models.dart';
 import '../../control/control_service.dart';
 import '../../state/app_state.dart';
@@ -111,10 +112,11 @@ class ListenerDashboard extends ConsumerWidget {
           SnackBar(content: Text('Control connect failed: ${failure.message}')),
         );
       } else {
+        final transport = data.advertisement?.transport ?? kTransportHttpWs;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Connecting to ${data.name} via QUIC control channel...',
+              'Connecting to ${data.name} via ${transport.toUpperCase()} control channel...',
             ),
           ),
         );
@@ -388,7 +390,7 @@ class ListenerDashboard extends ConsumerWidget {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'WebRTC uses host-only ICE by default. Audio starts sub-second once the QUIC control stream hands off SDP.',
+                  'WebRTC uses host-only ICE by default. Audio starts sub-second once the control stream hands off SDP.',
                   style: Theme.of(
                     context,
                   ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),

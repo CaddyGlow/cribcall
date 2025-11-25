@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Task: plan-control-stream — Defaulted control transport to HTTP+WebSocket with nonce+signature handshake and `/health` probe (no `lastSeenAt`), pushed QUIC behind `CRIBCALL_ENABLE_QUIC`, added transport hints to QR/mDNS, and covered the HTTP path with health/connect tests.
 - Task: rustup-toolchain — Exported ANDROID_SDK_ROOT/ANDROID_NDK_HOME defaults in the Nix dev shell so Cargokit Android builds can find the NDK.
 - Task: rustup-toolchain — Updated flake dev shell to read rust-toolchain.toml, surface rustup-managed toolchain paths, and add bindgen/clang env for native Rust builds.
 - Task: rustup-toolchain — Dropped the fenix Rust overlay from the dev shell so Rust installs are managed via rustup instead.

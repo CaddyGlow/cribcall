@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:multicast_dns/multicast_dns.dart';
 
+import '../config/build_flags.dart';
 import '../domain/models.dart';
 
 /// Abstraction for mDNS/UPnP discovery and advertisement.
@@ -104,12 +105,14 @@ class DesktopMdnsService implements MdnsService {
       final monitorId = attributes['monitorId'] ?? srv.target;
       final monitorName = attributes['monitorName'] ?? srv.target;
       final fingerprint = attributes['monitorCertFingerprint'] ?? '';
+      final transport = attributes['transport'] ?? kTransportHttpWs;
       yield MdnsAdvertisement(
         monitorId: monitorId,
         monitorName: monitorName,
         monitorCertFingerprint: fingerprint,
         servicePort: srv.port,
         version: int.tryParse(attributes['version'] ?? '1') ?? 1,
+        transport: transport,
         ip: addressRecord?.address.address,
       );
     }
@@ -127,6 +130,7 @@ class DesktopMdnsService implements MdnsService {
         'monitorName=${advertisement.monitorName}',
         'monitorCertFingerprint=${advertisement.monitorCertFingerprint}',
         'version=${advertisement.version}',
+        'transport=${advertisement.transport}',
       ]);
     } catch (_) {
       // Ignore if avahi is unavailable.

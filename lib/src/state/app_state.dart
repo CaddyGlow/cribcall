@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/foundation.dart';
 import 'dart:io';
 
+import '../config/build_flags.dart';
 import '../domain/models.dart';
 import '../discovery/mdns_service.dart';
 import '../identity/device_identity.dart';
@@ -158,6 +159,7 @@ final serviceIdentityProvider = Provider<ServiceIdentityBuilder>((ref) {
     serviceProtocol: 'baby-monitor',
     serviceVersion: 1,
     defaultPort: 48080,
+    transport: kDefaultControlTransport,
   );
 });
 final mdnsServiceProvider = Provider<MdnsService>((ref) {
@@ -213,7 +215,9 @@ final controlServerAutoStartProvider = Provider<void>((ref) {
     final trustedFingerprints = trustedListeners.requireValue
         .map((p) => p.certFingerprint)
         .toList();
-    await ref.read(controlServerProvider.notifier).start(
+    await ref
+        .read(controlServerProvider.notifier)
+        .start(
           identity: identity.requireValue,
           port: builder.defaultPort,
           trustedFingerprints: trustedFingerprints,

@@ -2,23 +2,53 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../config/build_flags.dart';
 import '../domain/models.dart';
 import '../identity/device_identity.dart';
 import 'control_channel.dart';
+import 'http_transport.dart';
 import 'native/quiche_library.dart';
 import 'quic_transport.dart';
 
 class ControlTransports {
-  const ControlTransports({required this.client, required this.server});
+  const ControlTransports({
+    required this.defaultTransport,
+    required this.httpClient,
+    required this.httpServer,
+    this.quicClient,
+    this.quicServer,
+  });
 
-  final QuicControlClient client;
-  final QuicControlServer server;
+  final String defaultTransport;
+  final QuicControlClient httpClient;
+  final QuicControlServer httpServer;
+  final QuicControlClient? quicClient;
+  final QuicControlServer? quicServer;
+
+  QuicControlClient? clientFor(String transport) {
+    if (transport == kTransportHttpWs) return httpClient;
+    if (transport == kTransportQuic) return quicClient;
+    return null;
+  }
+
+  QuicControlServer? serverFor(String transport) {
+    if (transport == kTransportHttpWs) return httpServer;
+    if (transport == kTransportQuic) return quicServer;
+    return null;
+  }
 
   factory ControlTransports.create() {
-    final quiche = QuicheLibrary();
+    final quiche = kEnableQuic ? QuicheLibrary() : null;
     return ControlTransports(
-      client: NativeQuicControlClient(quiche: quiche),
-      server: NativeQuicControlServer(quiche: quiche),
+      defaultTransport: kDefaultControlTransport,
+      httpClient: HttpControlClient(),
+      httpServer: HttpControlServer(),
+      quicClient: quiche != null
+          ? NativeQuicControlClient(quiche: quiche)
+          : null,
+      quicServer: quiche != null
+          ? NativeQuicControlServer(quiche: quiche)
+          : null,
     );
   }
 }
@@ -84,6 +114,7 @@ class ControlServerController extends Notifier<ControlServerState> {
     : _transports = transports;
 
   final ControlTransports? _transports;
+  ControlTransports? _resolvedTransports;
   QuicControlServer? _server;
   _ServerConfig? _activeConfig;
   bool _starting = false;
@@ -91,11 +122,11 @@ class ControlServerController extends Notifier<ControlServerState> {
   @override
   ControlServerState build() {
     try {
-      _server = (_transports ?? ControlTransports.create()).server;
+      _resolvedTransports = _transports ?? ControlTransports.create();
     } catch (e) {
       _server = const UnsupportedQuicControlServer();
       final errorState = ControlServerState.error(
-        error: 'Failed to load QUIC transport: $e',
+        error: 'Failed to load control transports: $e',
       );
       state = errorState;
       ref.onDispose(() => _shutdown());
@@ -111,16 +142,20 @@ class ControlServerController extends Notifier<ControlServerState> {
     required List<String> trustedFingerprints,
   }) async {
     if (_starting) return;
-    if (_server is UnsupportedQuicControlServer) {
+    _resolvedTransports ??= _transports ?? ControlTransports.create();
+    final transportKey = _resolvedTransports!.defaultTransport;
+    final server = _resolvedTransports!.serverFor(transportKey);
+    _server = server;
+    if (server == null || server is UnsupportedQuicControlServer) {
       state = ControlServerState.error(
-        error: 'QUIC transport not available on this platform/build',
+        error: 'Control transport ($transportKey) not available',
         port: port,
         trustedFingerprints: trustedFingerprints,
         fingerprint: identity.certFingerprint,
       );
       return;
     }
-    final config = _ServerConfig(port, trustedFingerprints);
+    final config = _ServerConfig(port, trustedFingerprints, transportKey);
     if (_activeConfig == config &&
         state.status == ControlServerStatus.running) {
       return;
@@ -165,6 +200,7 @@ class ControlServerController extends Notifier<ControlServerState> {
     } catch (_) {
       // Ignore stop errors; stopping should be best-effort.
     }
+    _server = null;
     if (state.status != ControlServerStatus.stopped) {
       state = const ControlServerState.stopped();
     }
@@ -233,22 +269,21 @@ class ControlClientController extends Notifier<ControlClientState> {
     : _transports = transports;
 
   final ControlTransports? _transports;
-  QuicControlClient? _client;
+  ControlTransports? _resolvedTransports;
   ControlChannel? _channel;
   StreamSubscription<ControlChannelState>? _channelSub;
 
   @override
   ControlClientState build() {
     try {
-      _client = (_transports ?? ControlTransports.create()).client;
+      _resolvedTransports = _transports ?? ControlTransports.create();
     } catch (e) {
-      _client = const UnsupportedQuicControlClient();
       final errorState = ControlClientState.error(
         monitorId: '',
         monitorName: '',
         failure: ControlFailure(
           ControlFailureType.transport,
-          'Failed to load QUIC transport: $e',
+          'Failed to load control transports: $e',
         ),
       );
       state = errorState;
@@ -264,10 +299,14 @@ class ControlClientController extends Notifier<ControlClientState> {
     required TrustedMonitor monitor,
     required DeviceIdentity identity,
   }) async {
-    if (_client is UnsupportedQuicControlClient) {
+    _resolvedTransports ??= _transports ?? ControlTransports.create();
+    await disconnect();
+    final transportKey = advertisement.transport;
+    final client = _resolvedTransports?.clientFor(transportKey);
+    if (client == null || client is UnsupportedQuicControlClient) {
       final failure = ControlFailure(
         ControlFailureType.transport,
-        'QUIC transport not available on this platform/build',
+        'Control transport ($transportKey) not available in this build',
       );
       state = ControlClientState.error(
         monitorId: monitor.monitorId,
@@ -276,7 +315,6 @@ class ControlClientController extends Notifier<ControlClientState> {
       );
       return failure;
     }
-    await disconnect();
     final ip = advertisement.ip;
     if (ip == null) {
       final failure = ControlFailure(
@@ -300,8 +338,9 @@ class ControlClientController extends Notifier<ControlClientState> {
         host: ip,
         port: advertisement.servicePort,
         expectedServerFingerprint: monitor.certFingerprint,
+        transport: transportKey,
       );
-      final connection = await _client?.connect(
+      final connection = await client.connect(
         endpoint: endpoint,
         clientIdentity: identity,
       );
@@ -373,21 +412,24 @@ class ControlClientController extends Notifier<ControlClientState> {
 }
 
 class _ServerConfig {
-  _ServerConfig(this.port, List<String> trusted)
+  _ServerConfig(this.port, List<String> trusted, this.transport)
     : trustedFingerprints = List.of(trusted)..sort();
 
   final int port;
   final List<String> trustedFingerprints;
+  final String transport;
 
   @override
   bool operator ==(Object other) {
     return other is _ServerConfig &&
         other.port == port &&
+        other.transport == transport &&
         _listsEqual(other.trustedFingerprints, trustedFingerprints);
   }
 
   @override
-  int get hashCode => Object.hash(port, Object.hashAll(trustedFingerprints));
+  int get hashCode =>
+      Object.hash(port, transport, Object.hashAll(trustedFingerprints));
 }
 
 bool _listsEqual(List<String> a, List<String> b) {
