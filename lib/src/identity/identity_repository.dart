@@ -1,4 +1,6 @@
 import 'dart:convert';
+import '../foundation/foundation_stub.dart'
+    if (dart.library.ui) 'package:flutter/foundation.dart';
 
 import 'package:crypto/crypto.dart';
 import 'package:cryptography/cryptography.dart';
@@ -17,22 +19,40 @@ class IdentityRepository {
   Future<DeviceIdentity> loadOrCreate() async {
     final data = await _store.read();
     if (data != null) {
-      return _deserialize(data);
+      try {
+        return await _deserialize(data);
+      } catch (_) {
+        // Fall through and rebuild a fresh identity if old data is incompatible.
+        debugPrint(
+          '[identity_repository] Stored identity invalid, regenerating',
+        );
+      }
     }
+    debugPrint('[identity_repository] Generating new device identity');
     final identity = await DeviceIdentity.generate();
-    await _store.write(await _serialize(identity));
+    try {
+      await _store.write(await _serialize(identity));
+      debugPrint('[identity_repository] Identity persisted');
+    } catch (e) {
+      debugPrint('[identity_repository] Failed to persist identity: $e');
+      rethrow;
+    }
     return identity;
   }
 
   Future<DeviceIdentity> _deserialize(Map<String, dynamic> data) async {
     final deviceId = data['deviceId'] as String;
-    final privateKeySeed = base64Decode(data['privateKeySeed'] as String);
+    final privateKeyBytes = base64Decode(data['privateKey'] as String);
+    final publicKeyBytes = base64Decode(data['publicKey'] as String);
     final certificateDer = base64Decode(data['certificateDer'] as String);
     final storedFingerprint = data['certFingerprint'] as String;
 
-    final algorithm = Ed25519();
-    final keyPair = await algorithm.newKeyPairFromSeed(privateKeySeed);
-    final publicKey = await keyPair.extractPublicKey();
+    final publicKey = SimplePublicKey(publicKeyBytes, type: KeyPairType.p256);
+    final keyPair = SimpleKeyPairData(
+      privateKeyBytes,
+      publicKey: publicKey,
+      type: KeyPairType.p256,
+    );
     final fingerprint = _fingerprintHex(certificateDer);
 
     if (fingerprint != storedFingerprint) {
@@ -53,7 +73,8 @@ class IdentityRepository {
     final privateKey = keyData.bytes;
     return <String, dynamic>{
       'deviceId': identity.deviceId,
-      'privateKeySeed': base64Encode(privateKey),
+      'privateKey': base64Encode(privateKey),
+      'publicKey': base64Encode(identity.publicKeyUncompressed),
       'certificateDer': base64Encode(identity.certificateDer),
       'certFingerprint': identity.certFingerprint,
     };

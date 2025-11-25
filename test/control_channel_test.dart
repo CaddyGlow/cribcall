@@ -3,14 +3,14 @@ import 'dart:collection';
 
 import 'package:cribcall/src/control/control_channel.dart';
 import 'package:cribcall/src/control/control_message.dart';
-import 'package:cribcall/src/control/quic_transport.dart';
+import 'package:cribcall/src/control/control_transport.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test(
     'ControlChannel transitions to connected and forwards messages',
     () async {
-      final connection = FakeQuicControlConnection();
+      final connection = FakeControlConnection();
       final channel = ControlChannel(connection: connection);
 
       final states = <ControlChannelState>[];
@@ -34,7 +34,7 @@ void main() {
   );
 
   test('ControlChannel queues outbound sends', () async {
-    final connection = FakeQuicControlConnection();
+    final connection = FakeControlConnection();
     final channel = ControlChannel(connection: connection);
 
     final first = channel.send(PingMessage(timestamp: 1));
@@ -52,7 +52,7 @@ void main() {
   });
 
   test('ControlChannel maps failures from connection events', () async {
-    final connection = FakeQuicControlConnection();
+    final connection = FakeControlConnection();
     final channel = ControlChannel(connection: connection);
 
     final states = <ControlChannelState>[];
@@ -77,10 +77,10 @@ void main() {
   });
 }
 
-class FakeQuicControlConnection extends QuicControlConnection {
-  FakeQuicControlConnection()
+class FakeControlConnection extends ControlConnection {
+  FakeControlConnection()
     : super(
-        remoteDescription: QuicEndpoint(
+        remoteDescription: ControlEndpoint(
           host: 'localhost',
           port: 1234,
           expectedServerFingerprint: 'abc',

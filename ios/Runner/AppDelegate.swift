@@ -1,5 +1,6 @@
 import Flutter
 import UIKit
+import os.log
 
 @main
 @objc class AppDelegate: FlutterAppDelegate {
@@ -8,6 +9,7 @@ import UIKit
   private var advertiser: NetService?
   private var browser: NetServiceBrowser?
   private var discovered: [NetService] = []
+  private let log = OSLog(subsystem: "com.cribcall.cribcall", category: "mdns")
 
   override func application(
     _ application: UIApplication,
@@ -42,6 +44,14 @@ import UIKit
     stopMdns()
     let port = args["servicePort"] as? Int ?? 48080
     let name = "\(args["monitorName"] as? String ?? "monitor")-\(args["monitorId"] as? String ?? "id")"
+    os_log(
+      "Starting mDNS advertise name=%{public}@ port=%{public}d monitorId=%{public}@",
+      log: log,
+      type: .info,
+      name,
+      port,
+      args["monitorId"] as? String ?? ""
+    )
     advertiser = NetService(domain: "local.", type: serviceType, name: name, port: Int32(port))
     let txt: [String: Data] = [
       "monitorId": (args["monitorId"] as? String ?? "").data(using: .utf8) ?? Data(),
@@ -57,10 +67,12 @@ import UIKit
     browser = NetServiceBrowser()
     browser?.delegate = self
     mdnsEventSink = eventSink
+    os_log("Starting mDNS browse", log: log, type: .info)
     browser?.searchForServices(ofType: serviceType, inDomain: "local.")
   }
 
   private func stopMdns() {
+    os_log("Stopping mDNS advertise/browse", log: log, type: .info)
     advertiser?.stop()
     advertiser = nil
     browser?.stop()
@@ -92,6 +104,13 @@ extension AppDelegate: NetServiceBrowserDelegate, NetServiceDelegate {
   func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
     discovered.append(service)
     service.delegate = self
+    os_log(
+      "Found service %{public}@ host=%{public}@",
+      log: log,
+      type: .info,
+      service.name,
+      service.hostName ?? "unknown"
+    )
     service.resolve(withTimeout: 5.0)
   }
 
@@ -129,5 +148,13 @@ extension AppDelegate: NetServiceBrowserDelegate, NetServiceDelegate {
       "ip": ipString,
     ]
     mdnsEventSink?(payload)
+    os_log(
+      "Resolved service monitorId=%{public}@ ip=%{public}@ port=%{public}d",
+      log: log,
+      type: .info,
+      decode("monitorId"),
+      ipString ?? "unknown",
+      sender.port
+    )
   }
 }

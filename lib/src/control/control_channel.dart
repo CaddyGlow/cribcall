@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:developer' as developer;
+import '../foundation/foundation_stub.dart'
+    if (dart.library.ui) 'package:flutter/foundation.dart';
 
 import 'control_message.dart';
-import 'quic_transport.dart';
+import 'control_transport.dart';
 
 enum ControlChannelStatus { connecting, connected, closed, error }
 
@@ -81,17 +84,34 @@ class ControlChannelClosedException implements Exception {
   }
 }
 
-/// Wraps a [QuicControlConnection] with connection state, send queueing,
+/// Wraps a [ControlConnection] with connection state, send queueing,
 /// and error mapping for the control channel.
 class ControlChannel {
-  ControlChannel({required QuicControlConnection connection})
+  ControlChannel({required ControlConnection connection})
     : _connection = connection {
     _state = const ControlChannelState.connecting();
     _stateController.add(_state);
+    _log(
+      'Initializing control channel to '
+      '${connection.remoteDescription.host}:${connection.remoteDescription.port} '
+      'transport=${connection.remoteDescription.transport}',
+    );
     _messageSub = connection.receiveMessages().listen(
-      _messages.add,
+      (message) {
+        _log(
+          'Received control message ${message.type.name} '
+          'connId=${_state.connectionId ?? 'unknown'}',
+        );
+        _messages.add(message);
+      },
       onError: (error, stack) {
         final failure = _classifyFailure(message: '$error');
+        _log(
+          'Control message stream error '
+          'connId=${_state.connectionId ?? 'unknown'} '
+          'failure=${failure?.type.name ?? 'unknown'} '
+          'detail=$error',
+        );
         _fail(
           failure ?? ControlFailure(ControlFailureType.transport, '$error'),
         );
@@ -101,7 +121,7 @@ class ControlChannel {
     _eventSub = connection.connectionEvents().listen(_handleConnectionEvent);
   }
 
-  final QuicControlConnection _connection;
+  final ControlConnection _connection;
   final _messages = StreamController<ControlMessage>.broadcast();
   final _stateController = StreamController<ControlChannelState>.broadcast();
   final Queue<_OutboundRequest> _outbound = Queue();
@@ -133,6 +153,10 @@ class ControlChannel {
     _sending = true;
     final request = _outbound.removeFirst();
     _inFlight = request;
+    _log(
+      'Sending control message ${request.message.type.name} '
+      'connId=${request.connectionId ?? _state.connectionId ?? 'unknown'}',
+    );
     _connection
         .sendMessage(request.message, connectionId: request.connectionId)
         .then((_) {
@@ -159,6 +183,11 @@ class ControlChannel {
   void _handleConnectionEvent(ControlConnectionEvent event) {
     if (_closed) return;
     if (event is ControlConnected) {
+      _log(
+        'Control connection established '
+        'connId=${event.connectionId} '
+        'peerFp=${_shortFingerprint(event.peerFingerprint)}',
+      );
       _emitState(
         ControlChannelState.connected(
           connectionId: event.connectionId!,
@@ -167,6 +196,10 @@ class ControlChannel {
       );
     } else if (event is ControlConnectionClosed) {
       final failure = _classifyFailure(reason: event.reason);
+      _log(
+        'Control connection closed connId=${event.connectionId ?? _state.connectionId} '
+        'reason=${event.reason ?? 'none'}',
+      );
       if (failure != null) {
         _fail(failure, connectionId: event.connectionId ?? _state.connectionId);
       } else {
@@ -182,6 +215,10 @@ class ControlChannel {
       final failure =
           _classifyFailure(message: event.message) ??
           ControlFailure(ControlFailureType.transport, event.message);
+      _log(
+        'Control connection error connId=${event.connectionId ?? _state.connectionId} '
+        'error=${failure.type.name}: ${failure.message}',
+      );
       _fail(failure, connectionId: event.connectionId ?? _state.connectionId);
     }
   }
@@ -239,6 +276,10 @@ class ControlChannel {
 
   Future<void> _fail(ControlFailure failure, {String? connectionId}) async {
     if (_closed) return;
+    _log(
+      'Failing control channel connId=${connectionId ?? _state.connectionId} '
+      'reason=${failure.type.name}: ${failure.message}',
+    );
     _emitState(
       ControlChannelState.error(
         connectionId: connectionId ?? _state.connectionId,
@@ -252,6 +293,10 @@ class ControlChannel {
   Future<void> _shutdown({ControlFailure? failure}) async {
     if (_closed) return;
     _closed = true;
+    _log(
+      'Shutting down control channel connId=${_state.connectionId ?? 'unknown'} '
+      'failure=${failure?.type.name ?? 'none'}',
+    );
     final closedFailure = ControlChannelClosedException(failure);
     final inFlight = _inFlight;
     _inFlight = null;
@@ -289,4 +334,18 @@ class _OutboundRequest {
   final ControlMessage message;
   final String? connectionId;
   final Completer<void> completer = Completer<void>();
+}
+
+void _log(String message) {
+  developer.log(message, name: 'control_channel');
+  debugPrint('[control_channel] $message');
+}
+
+String _shortFingerprint(String fingerprint) {
+  if (fingerprint.length <= 12) {
+    return fingerprint;
+  }
+  final prefix = fingerprint.substring(0, 6);
+  final suffix = fingerprint.substring(fingerprint.length - 4);
+  return '$prefix...$suffix';
 }

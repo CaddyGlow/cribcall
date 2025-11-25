@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- Task: mtls-http-control — Switched HTTP control transport to mandatory mTLS, removed the custom nonce header handshake, pinned fingerprints via TLS, and removed the insecure HTTP fallback for pairing/health.
+- Task: listener-qr-fallback — Handle missing/unsupported cameras in the listener QR flow with a friendly fallback plus manual QR JSON entry (validated parser + tests) so pairing works without mobile_scanner.
+- Task: diag-logging — Added diagnostic info logging across control server/client handshakes, control channel message flow, PIN pairing, and mDNS advertise/browse (Dart + Android/iOS/Linux) to trace connection issues.
+- Task: remove-wired-quic — Dropped the QUIC control transport wiring in favor of HTTP+WebSocket only, removed the native QUIC plugin dependency, renamed control transport types, and refreshed UI/docs to match.
+- Task: cli-control-tools — Added P-256 identity/mTLS helpers plus a `tool/control_cli.dart` harness to run monitor/listener from the CLI with pairing/ping smoke tests.
 - Task: plan-control-stream — Defaulted control transport to HTTP+WebSocket with nonce+signature handshake and `/health` probe (no `lastSeenAt`), pushed QUIC behind `CRIBCALL_ENABLE_QUIC`, added transport hints to QR/mDNS, and covered the HTTP path with health/connect tests.
 - Task: rustup-toolchain — Exported ANDROID_SDK_ROOT/ANDROID_NDK_HOME defaults in the Nix dev shell so Cargokit Android builds can find the NDK.
 - Task: rustup-toolchain — Updated flake dev shell to read rust-toolchain.toml, surface rustup-managed toolchain paths, and add bindgen/clang env for native Rust builds.

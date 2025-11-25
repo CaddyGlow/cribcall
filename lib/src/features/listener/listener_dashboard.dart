@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../config/build_flags.dart';
 import '../../domain/models.dart';
 import '../../control/control_service.dart';
 import '../../state/app_state.dart';
@@ -56,18 +55,34 @@ class ListenerDashboard extends ConsumerWidget {
       ).showSnackBar(SnackBar(content: Text('Forgot $monitorName')));
     }
 
-    Future<void> handleListen(_MonitorCardData data) async {
-      if (!context.mounted) return;
+    MdnsAdvertisement? _fallbackAdvertisement(TrustedMonitor monitor) {
+      if (monitor.lastKnownIp == null) return null;
+      return MdnsAdvertisement(
+        monitorId: monitor.monitorId,
+        monitorName: monitor.monitorName,
+        monitorCertFingerprint: monitor.certFingerprint,
+        servicePort: monitor.servicePort,
+        version: monitor.serviceVersion,
+        transport: monitor.transport,
+        ip: monitor.lastKnownIp,
+      );
+    }
+
+    Future<void> handleListen(
+      BuildContext uiContext,
+      _MonitorCardData data,
+    ) async {
+      if (!uiContext.mounted) return;
       if (!data.trusted) {
         if (data.advertisement != null) {
           await showModalBottomSheet<void>(
-            context: context,
+            context: uiContext,
             showDragHandle: true,
             builder: (context) =>
                 ListenerPinPage(advertisement: data.advertisement!),
           );
         } else {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(uiContext).showSnackBar(
             const SnackBar(
               content: Text('Pair this monitor (QR or PIN) before listening'),
             ),
@@ -76,15 +91,16 @@ class ListenerDashboard extends ConsumerWidget {
         return;
       }
       if (data.trustedMonitor == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(uiContext).showSnackBar(
           const SnackBar(
             content: Text('Trusted monitor details missing; re-pair and retry'),
           ),
         );
         return;
       }
-      if (data.advertisement == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
+      final endpoint = data.connectTarget;
+      if (endpoint == null) {
+        ScaffoldMessenger.of(uiContext).showSnackBar(
           const SnackBar(
             content: Text('Monitor is offline; waiting for mDNS presence'),
           ),
@@ -92,7 +108,7 @@ class ListenerDashboard extends ConsumerWidget {
         return;
       }
       if (!identity.hasValue) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(uiContext).showSnackBar(
           const SnackBar(
             content: Text('Loading device identity; try again in a moment'),
           ),
@@ -102,21 +118,20 @@ class ListenerDashboard extends ConsumerWidget {
       final failure = await ref
           .read(controlClientProvider.notifier)
           .connectToMonitor(
-            advertisement: data.advertisement!,
+            advertisement: endpoint,
             monitor: data.trustedMonitor!,
             identity: identity.requireValue,
           );
-      if (!context.mounted) return;
+      if (!uiContext.mounted) return;
       if (failure != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(uiContext).showSnackBar(
           SnackBar(content: Text('Control connect failed: ${failure.message}')),
         );
       } else {
-        final transport = data.advertisement?.transport ?? kTransportHttpWs;
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(uiContext).showSnackBar(
           SnackBar(
             content: Text(
-              'Connecting to ${data.name} via ${transport.toUpperCase()} control channel...',
+              'Connecting to ${data.name} via HTTP+WS control channel...',
             ),
           ),
         );
@@ -134,7 +149,7 @@ class ListenerDashboard extends ConsumerWidget {
         data = _MonitorCardData(
           name: ad.monitorName,
           status: 'Online',
-          lastNoise: isTrusted ? '3 min ago' : '—',
+          lastNoiseEpochMs: pinnedMonitor?.lastNoiseEpochMs,
           fingerprint: ad.monitorCertFingerprint,
           trusted: isTrusted,
           trustedMonitor: pinnedMonitor,
@@ -143,7 +158,8 @@ class ListenerDashboard extends ConsumerWidget {
               ? () => forgetMonitor(ad.monitorId, ad.monitorName)
               : null,
           advertisement: ad,
-          onListen: () => handleListen(data),
+          connectTarget: ad,
+          onListen: () => handleListen(context, data),
         );
         return data;
       }),
@@ -151,10 +167,11 @@ class ListenerDashboard extends ConsumerWidget {
         if (!advertisements.any((ad) => ad.monitorId == monitor.monitorId))
           (() {
             late final _MonitorCardData data;
+            final fallback = _fallbackAdvertisement(monitor);
             data = _MonitorCardData(
               name: monitor.monitorName,
-              status: 'Offline',
-              lastNoise: '—',
+              status: fallback == null ? 'Offline' : 'Last seen',
+              lastNoiseEpochMs: monitor.lastNoiseEpochMs,
               fingerprint: monitor.certFingerprint,
               trusted: true,
               trustedMonitor: monitor,
@@ -162,7 +179,8 @@ class ListenerDashboard extends ConsumerWidget {
               onForget: () =>
                   forgetMonitor(monitor.monitorId, monitor.monitorName),
               advertisement: null,
-              onListen: () => handleListen(data),
+              connectTarget: fallback,
+              onListen: () => handleListen(context, data),
             );
             return data;
           })(),
@@ -344,12 +362,15 @@ class ListenerDashboard extends ConsumerWidget {
                     Expanded(
                       child: OutlinedButton.icon(
                         onPressed: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text(
-                                'mDNS scan is pending platform channel implementation.',
-                              ),
-                            ),
+                          showModalBottomSheet<void>(
+                            context: context,
+                            showDragHandle: true,
+                            builder: (sheetContext) {
+                              final discovered = monitors
+                                  .where((m) => m.advertisement != null)
+                                  .toList();
+                              return _NetworkScanSheet(monitors: discovered);
+                            },
                           );
                         },
                         icon: const Icon(Icons.wifi_tethering),
@@ -375,40 +396,6 @@ class ListenerDashboard extends ConsumerWidget {
             ),
           ),
         ),
-        const SizedBox(height: 14),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Live stream prep',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'WebRTC uses host-only ICE by default. Audio starts sub-second once the control stream hands off SDP.',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
-                ),
-                const SizedBox(height: 12),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: const [
-                    _Tag(text: 'Opus @ 48 kHz mono'),
-                    _Tag(text: 'DTLS-SRTP, UDP only'),
-                    _Tag(text: 'Auto-stop unless pinned'),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
       ],
     );
   }
@@ -418,25 +405,27 @@ class _MonitorCardData {
   _MonitorCardData({
     required this.name,
     required this.status,
-    required this.lastNoise,
+    required this.lastNoiseEpochMs,
     required this.fingerprint,
     required this.trusted,
     this.lastKnownIp,
     this.trustedMonitor,
     this.onForget,
     this.advertisement,
+    this.connectTarget,
     this.onListen,
   });
 
   final String name;
   final String status;
-  final String lastNoise;
+  final int? lastNoiseEpochMs;
   final String fingerprint;
   final bool trusted;
   final String? lastKnownIp;
   final TrustedMonitor? trustedMonitor;
   final VoidCallback? onForget;
   final MdnsAdvertisement? advertisement;
+  final MdnsAdvertisement? connectTarget;
   final VoidCallback? onListen;
 }
 
@@ -448,6 +437,7 @@ class _MonitorCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final online = data.status.toLowerCase() == 'online';
+    final lastNoiseText = _formatLastNoise(data.lastNoiseEpochMs);
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(14),
@@ -554,7 +544,7 @@ class _MonitorCard extends StatelessWidget {
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
-                  'Last noise: ${data.lastNoise}',
+                  'Last noise: $lastNoiseText',
                   style: Theme.of(
                     context,
                   ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
@@ -568,16 +558,6 @@ class _MonitorCard extends StatelessWidget {
             runSpacing: 4,
             children: [
               TextButton(onPressed: data.onListen, child: const Text('Listen')),
-              TextButton(
-                onPressed: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Video streaming not wired yet'),
-                    ),
-                  );
-                },
-                child: const Text('View video'),
-              ),
               if (!data.trusted && data.advertisement != null)
                 TextButton.icon(
                   onPressed: () async {
@@ -606,26 +586,117 @@ class _MonitorCard extends StatelessWidget {
   }
 }
 
-class _Tag extends StatelessWidget {
-  const _Tag({required this.text});
+class _NetworkScanSheet extends StatelessWidget {
+  const _NetworkScanSheet({required this.monitors});
 
-  final String text;
+  final List<_MonitorCardData> monitors;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: AppColors.primary.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Text(
-        text,
-        style: const TextStyle(
-          color: AppColors.primary,
-          fontWeight: FontWeight.w700,
-        ),
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            'Network scan',
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Listening for CribCall monitors via mDNS.',
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+          ),
+          const SizedBox(height: 12),
+          if (monitors.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: Text('No monitors discovered yet.'),
+            )
+          else
+            ...monitors.map((m) {
+              final online = m.status.toLowerCase() == 'online';
+              return Container(
+                margin: const EdgeInsets.only(bottom: 10),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppColors.surface,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.grey.shade200),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            m.name,
+                            style: Theme.of(context).textTheme.titleSmall
+                                ?.copyWith(fontWeight: FontWeight.w800),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Fingerprint ${m.fingerprint}',
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(color: AppColors.muted),
+                          ),
+                          if (m.advertisement?.ip != null)
+                            Text(
+                              'IP ${m.advertisement!.ip}',
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(color: AppColors.muted),
+                            ),
+                        ],
+                      ),
+                    ),
+                    if (m.trusted)
+                      FilledButton(
+                        onPressed: m.onListen,
+                        child: Text(online ? 'Listen' : 'Try reconnect'),
+                      )
+                    else
+                      OutlinedButton(
+                        onPressed: () async {
+                          if (m.advertisement == null) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Monitor offline; cannot pair.'),
+                              ),
+                            );
+                            return;
+                          }
+                          await showModalBottomSheet<void>(
+                            context: context,
+                            showDragHandle: true,
+                            builder: (_) => ListenerPinPage(
+                              advertisement: m.advertisement!,
+                            ),
+                          );
+                        },
+                        child: const Text('Pair with PIN'),
+                      ),
+                  ],
+                ),
+              );
+            }),
+        ],
       ),
     );
   }
+}
+
+String _formatLastNoise(int? epochMs) {
+  if (epochMs == null) return 'No events yet';
+  final ts = DateTime.fromMillisecondsSinceEpoch(epochMs);
+  final diff = DateTime.now().difference(ts);
+  if (diff.inSeconds < 60) return 'Just now';
+  if (diff.inMinutes < 60) return '${diff.inMinutes} min ago';
+  if (diff.inHours < 24) return '${diff.inHours} hr ago';
+  return '${diff.inDays} d ago';
 }

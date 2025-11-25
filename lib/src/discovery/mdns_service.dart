@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -41,8 +42,13 @@ class MethodChannelMdnsService implements MdnsService {
 
   @override
   Stream<MdnsAdvertisement> browse() {
+    developer.log('Starting platform mDNS browse stream', name: 'mdns');
     return _events
         .receiveBroadcastStream()
+        .handleError(
+          (Object error, _) =>
+              developer.log('mDNS browse error: $error', name: 'mdns'),
+        )
         .where((event) => event is Map)
         .map(
           (event) =>
@@ -52,11 +58,19 @@ class MethodChannelMdnsService implements MdnsService {
 
   @override
   Future<void> startAdvertise(MdnsAdvertisement advertisement) async {
+    developer.log(
+      'Starting platform mDNS advertise '
+      'monitorId=${advertisement.monitorId} '
+      'port=${advertisement.servicePort} '
+      'fp=${_shortFingerprint(advertisement.monitorCertFingerprint)}',
+      name: 'mdns',
+    );
     await _method.invokeMethod('startAdvertise', advertisement.toJson());
   }
 
   @override
   Future<void> stop() async {
+    developer.log('Stopping platform mDNS advertise/browse', name: 'mdns');
     await _method.invokeMethod('stop');
   }
 }
@@ -72,6 +86,7 @@ class DesktopMdnsService implements MdnsService {
 
   @override
   Stream<MdnsAdvertisement> browse() async* {
+    developer.log('Starting desktop mDNS browse', name: 'mdns');
     await _client.start();
     await for (final PtrResourceRecord ptr in _client.lookup<PtrResourceRecord>(
       ResourceRecordQuery.serverPointer(_serviceType),
@@ -106,6 +121,12 @@ class DesktopMdnsService implements MdnsService {
       final monitorName = attributes['monitorName'] ?? srv.target;
       final fingerprint = attributes['monitorCertFingerprint'] ?? '';
       final transport = attributes['transport'] ?? kTransportHttpWs;
+      developer.log(
+        'mDNS found monitor=$monitorId ip=${addressRecord?.address.address ?? 'unknown'} '
+        'port=${srv.port} transport=$transport '
+        'fp=${_shortFingerprint(fingerprint)}',
+        name: 'mdns',
+      );
       yield MdnsAdvertisement(
         monitorId: monitorId,
         monitorName: monitorName,
@@ -122,6 +143,12 @@ class DesktopMdnsService implements MdnsService {
   Future<void> startAdvertise(MdnsAdvertisement advertisement) async {
     // Use avahi-publish-service if available.
     try {
+      developer.log(
+        'Publishing desktop mDNS monitorId=${advertisement.monitorId} '
+        'port=${advertisement.servicePort} '
+        'fp=${_shortFingerprint(advertisement.monitorCertFingerprint)}',
+        name: 'mdns',
+      );
       _advertiseProcess = await Process.start('avahi-publish-service', [
         '${advertisement.monitorName}-${advertisement.monitorId}',
         '_baby-monitor._tcp',
@@ -132,15 +159,27 @@ class DesktopMdnsService implements MdnsService {
         'version=${advertisement.version}',
         'transport=${advertisement.transport}',
       ]);
-    } catch (_) {
+    } catch (e) {
+      developer.log(
+        'avahi-publish-service unavailable or failed: $e',
+        name: 'mdns',
+      );
       // Ignore if avahi is unavailable.
     }
   }
 
   @override
   Future<void> stop() async {
+    developer.log('Stopping desktop mDNS advertise/browse', name: 'mdns');
     _client.stop();
     _advertiseProcess?.kill(ProcessSignal.sigterm);
     _advertiseProcess = null;
   }
+}
+
+String _shortFingerprint(String fingerprint) {
+  if (fingerprint.length <= 12) return fingerprint;
+  final prefix = fingerprint.substring(0, 6);
+  final suffix = fingerprint.substring(fingerprint.length - 4);
+  return '$prefix...$suffix';
 }

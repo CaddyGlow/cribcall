@@ -1,7 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
+import '../foundation/foundation_stub.dart'
+    if (dart.library.ui) 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -13,7 +14,11 @@ abstract class IdentityStore {
     if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
       return SecureIdentityStore();
     }
-    return FileIdentityStore(overrideDirectoryPath: overrideDirectoryPath);
+    final baseDir =
+        overrideDirectoryPath ??
+        Platform.environment['CRIBCALL_DATA_DIR'] ??
+        '${Platform.environment['HOME'] ?? '.'}/.local/share/com.cribcall.cribcall';
+    return FileIdentityStore(overrideDirectoryPath: baseDir);
   }
 }
 
@@ -23,11 +28,11 @@ class FileIdentityStore implements IdentityStore {
   final String? overrideDirectoryPath;
 
   Future<File> _file() async {
-    final dir = overrideDirectoryPath != null
-        ? Directory(overrideDirectoryPath!)
-        : await getApplicationSupportDirectory();
+    final dir = Directory(overrideDirectoryPath!);
     await dir.create(recursive: true);
-    return File('${dir.path}/identity.json');
+    final file = File('${dir.path}/identity.json');
+    debugPrint('[identity_store] using path ${file.path}');
+    return file;
   }
 
   @override
@@ -42,6 +47,7 @@ class FileIdentityStore implements IdentityStore {
   Future<void> write(Map<String, dynamic> data) async {
     final file = await _file();
     await file.writeAsString(jsonEncode(data));
+    debugPrint('[identity_store] wrote identity to ${file.path}');
   }
 }
 

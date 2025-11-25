@@ -2,12 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
 import 'dart:io';
-import 'dart:math';
 import 'dart:typed_data';
 
-import 'package:asn1lib/asn1lib.dart';
 import 'package:crypto/crypto.dart';
 import 'package:cryptography/cryptography.dart';
+import '../foundation/foundation_stub.dart'
+    if (dart.library.ui) 'package:flutter/foundation.dart';
 
 import '../config/build_flags.dart';
 import '../identity/device_identity.dart';
@@ -15,26 +15,51 @@ import '../identity/pem.dart';
 import '../identity/pkcs8.dart';
 import 'control_frame_codec.dart';
 import 'control_message.dart';
-import 'quic_transport.dart';
+import 'control_transport.dart';
 
-class HttpControlServer implements QuicControlServer {
-  HttpControlServer({this.bindAddress = '0.0.0.0', this.useTls = true});
+/// Callback type for handling incoming pairing messages on the server.
+/// The callback receives the message and connection, and can send responses.
+typedef PairingMessageHandler =
+    Future<void> Function(
+      ControlMessage message,
+      HttpControlConnection connection,
+    );
+
+class HttpControlServer implements ControlServer {
+  HttpControlServer({
+    this.bindAddress = '0.0.0.0',
+    this.useTls = true,
+    this.allowUntrustedClients = false,
+  });
 
   final String bindAddress;
   final bool useTls;
+  final bool allowUntrustedClients;
   HttpServer? _server;
+  int? _boundPort;
   final Set<HttpControlConnection> _connections = {};
-  final _nonceStore = _NonceStore();
   late DateTime _startedAt;
   String? _fingerprint;
   List<String> _trustedFingerprints = [];
+  PairingMessageHandler? _pairingMessageHandler;
+
+  /// Sets a handler for incoming pairing messages (PIN_PAIRING_INIT, etc.).
+  void setPairingMessageHandler(PairingMessageHandler? handler) {
+    _pairingMessageHandler = handler;
+  }
 
   @override
   Future<void> start({
     required int port,
     required DeviceIdentity serverIdentity,
     List<String> trustedListenerFingerprints = const [],
+    List<List<int>> trustedClientCertificates = const [],
   }) async {
+    if (!useTls) {
+      _logHttp(
+        'Starting HTTP control server without TLS (allowUntrustedClients=$allowUntrustedClients)',
+      );
+    }
     await stop();
     _trustedFingerprints = trustedListenerFingerprints;
     _fingerprint = serverIdentity.certFingerprint;
@@ -42,16 +67,39 @@ class HttpControlServer implements QuicControlServer {
     HttpServer server;
     if (useTls) {
       final context = await _buildSecurityContext(serverIdentity);
+      for (final certDer in trustedClientCertificates) {
+        try {
+          final pem = encodePem('CERTIFICATE', certDer);
+          context.setTrustedCertificatesBytes(utf8.encode(pem));
+          context.setClientAuthoritiesBytes(utf8.encode(pem));
+        } catch (e) {
+          _logHttp('Failed to add trusted client certificate: $e');
+        }
+      }
+      _logHttp(
+        'Binding HTTPS control server on $bindAddress:$port '
+        'fingerprint=${_shortFingerprint(_fingerprint ?? '')} '
+        'trusted=${_trustedFingerprints.length}',
+      );
       server = await HttpServer.bindSecure(
         bindAddress,
         port,
         context,
-        requestClientCertificate: false,
+        requestClientCertificate: !allowUntrustedClients,
       );
     } else {
+      _logHttp(
+        'Binding HTTP (insecure) control server on $bindAddress:$port '
+        'trusted=${_trustedFingerprints.length}',
+      );
       server = await HttpServer.bind(bindAddress, port);
     }
     _server = server;
+    _boundPort = server.port;
+    _logHttp(
+      'HTTP control server bound at ${server.address.address}:${server.port} '
+      'tls=${useTls ? 'enabled' : 'disabled'}',
+    );
     server.listen(
       _handleRequest,
       onError: (error, stack) {
@@ -68,26 +116,27 @@ class HttpControlServer implements QuicControlServer {
 
   @override
   Future<void> stop() async {
+    _logHttp(
+      'Stopping HTTP control server; activeConnections=${_connections.length}',
+    );
     for (final connection in List.of(_connections)) {
       await connection.close();
     }
     _connections.clear();
     await _server?.close(force: true);
     _server = null;
-    _nonceStore.clear();
+    _boundPort = null;
+    _logHttp('HTTP control server stopped');
   }
 
-  Future<SecurityContext> _buildSecurityContext(DeviceIdentity identity) async {
-    final ctx = SecurityContext();
-    final certPem = encodePem('CERTIFICATE', identity.certificateDer);
-    final extracted = await identity.keyPair.extract();
-    final pkcs8 = ed25519PrivateKeyPkcs8(
-      (extracted as SimpleKeyPairData).bytes,
+  int? get boundPort => _boundPort;
+  void addTrustedFingerprint(String fingerprint) {
+    if (_trustedFingerprints.contains(fingerprint)) return;
+    _trustedFingerprints = [..._trustedFingerprints, fingerprint];
+    _logHttp(
+      'Trusted fingerprint added ${_shortFingerprint(fingerprint)} '
+      'total=${_trustedFingerprints.length}',
     );
-    final keyPem = encodePem('PRIVATE KEY', pkcs8);
-    ctx.useCertificateChainBytes(utf8.encode(certPem));
-    ctx.usePrivateKeyBytes(utf8.encode(keyPem));
-    return ctx;
   }
 
   Future<void> _handleRequest(HttpRequest request) async {
@@ -95,9 +144,6 @@ class HttpControlServer implements QuicControlServer {
       switch (request.uri.path) {
         case '/health':
           await _handleHealth(request);
-          return;
-        case '/control/challenge':
-          await _handleChallenge(request);
           return;
         case '/control/ws':
           if (WebSocketTransformer.isUpgradeRequest(request)) {
@@ -121,6 +167,18 @@ class HttpControlServer implements QuicControlServer {
   }
 
   Future<void> _handleHealth(HttpRequest request) async {
+    final peerCert = request.certificate;
+    if (peerCert == null && !allowUntrustedClients) {
+      _logHttp('Health probe missing client certificate');
+      request.response
+        ..statusCode = HttpStatus.unauthorized
+        ..write('client certificate required');
+      await request.response.close();
+      return;
+    }
+    final remoteIp = request.connectionInfo?.remoteAddress.address ?? 'unknown';
+    final remotePort = request.connectionInfo?.remotePort ?? 0;
+    _logHttp('Health probe from $remoteIp:$remotePort');
     final body = jsonEncode({
       'status': 'ok',
       'role': 'monitor',
@@ -139,71 +197,43 @@ class HttpControlServer implements QuicControlServer {
     await request.response.close();
   }
 
-  Future<void> _handleChallenge(HttpRequest request) async {
-    if (request.method != 'GET') {
-      request.response
-        ..statusCode = HttpStatus.methodNotAllowed
-        ..write('method not allowed');
-      await request.response.close();
-      return;
-    }
-    final nonce = _nonceStore.issue();
-    final body = jsonEncode({
-      'nonce': nonce,
-      'expiresInSec': _NonceStore.ttl.inSeconds,
-    });
-    request.response.headers.contentType = ContentType.json;
-    request.response.headers.set('Cache-Control', 'no-store');
-    request.response
-      ..statusCode = HttpStatus.ok
-      ..write(body);
-    await request.response.close();
-  }
-
   Future<void> _handleWebSocket(HttpRequest request) async {
-    final nonce = request.headers.value('x-cribcall-nonce');
-    final clientCertB64 = request.headers.value('x-cribcall-cert');
-    final claimedFingerprint = request.headers.value('x-cribcall-fingerprint');
-    final deviceId = request.headers.value('x-cribcall-device-id');
-    final signatureB64 = request.headers.value('x-cribcall-signature');
-    if (nonce == null ||
-        clientCertB64 == null ||
-        claimedFingerprint == null ||
-        deviceId == null ||
-        signatureB64 == null) {
-      return _rejectUpgrade(request, 'missing handshake headers');
-    }
-    if (!_nonceStore.consume(nonce)) {
-      return _rejectUpgrade(request, 'nonce expired or unknown');
-    }
-    List<int> clientCertDer;
-    try {
-      clientCertDer = base64.decode(clientCertB64);
-    } catch (_) {
-      return _rejectUpgrade(request, 'invalid client certificate encoding');
-    }
-    final computedFingerprint = _fingerprintHex(clientCertDer);
-    if (computedFingerprint != claimedFingerprint) {
-      return _rejectUpgrade(request, 'fingerprint mismatch');
-    }
-    final publicKey = _extractEd25519PublicKey(clientCertDer);
-    if (publicKey == null) {
-      return _rejectUpgrade(request, 'unsupported client certificate');
-    }
-    final verified = await _verifyClientSignature(
-      nonce: nonce,
-      deviceId: deviceId,
-      signatureB64: signatureB64,
-      publicKey: publicKey,
+    final remoteIp = request.connectionInfo?.remoteAddress.address ?? 'unknown';
+    final remotePort = request.connectionInfo?.remotePort ?? 0;
+    _logHttp(
+      'Incoming WS control request from $remoteIp:$remotePort '
+      'tls=${request.certificate != null}',
     );
-    if (!verified) {
-      return _rejectUpgrade(request, 'signature verification failed');
+    final clientCert = request.certificate;
+    if (clientCert == null && !allowUntrustedClients) {
+      return _rejectUpgrade(request, 'client certificate required');
+    }
+    String computedFingerprint = '';
+    if (clientCert != null) {
+      final clientCertDer = clientCert.der;
+      computedFingerprint = _fingerprintHex(clientCertDer);
     }
     final trusted = _trustedFingerprints.contains(computedFingerprint);
+    _logHttp(
+      'Accepted WS control handshake from $remoteIp:$remotePort '
+      'fingerprint=${_shortFingerprint(computedFingerprint)} '
+      'trusted=$trusted pairingOnly=${!trusted}',
+    );
+    if (clientCert != null) {
+      _logHttp(
+        'Client certificate subject=${clientCert.subject} '
+        'sha256=${_shortFingerprint(computedFingerprint)} '
+        'issuer=${clientCert.issuer} '
+        'validFrom=${clientCert.startValidity} '
+        'validTo=${clientCert.endValidity}',
+      );
+    } else {
+      _logHttp('No client certificate presented (allowUntrustedClients=true)');
+    }
     final socket = await WebSocketTransformer.upgrade(request);
     final connectionId = 'ws-${DateTime.now().microsecondsSinceEpoch}';
     final connection = HttpControlConnection(
-      remoteDescription: QuicEndpoint(
+      remoteDescription: ControlEndpoint(
         host: request.connectionInfo?.remoteAddress.address ?? 'unknown',
         port: request.connectionInfo?.remotePort ?? 0,
         expectedServerFingerprint: computedFingerprint,
@@ -218,11 +248,51 @@ class HttpControlServer implements QuicControlServer {
     connection.connectionEvents().listen((event) {
       if (event is ControlConnectionClosed || event is ControlConnectionError) {
         _connections.remove(connection);
+        final reason = event is ControlConnectionClosed
+            ? event.reason ?? 'closed'
+            : (event as ControlConnectionError).message;
+        _logHttp(
+          'Control connection $connectionId closed '
+          'peerFp=${_shortFingerprint(computedFingerprint)} '
+          'reason=$reason trusted=$trusted pairingOnly=${!trusted}',
+        );
+      }
+    });
+
+    // Listen for incoming messages and route pairing messages to handler
+    connection.receiveMessages().listen((message) async {
+      final isPairing =
+          message.type == ControlMessageType.pinPairingInit ||
+          message.type == ControlMessageType.pinSubmit ||
+          message.type == ControlMessageType.pairRequest;
+      if (isPairing) {
+        final handler = _pairingMessageHandler;
+        if (handler != null) {
+          _logHttp(
+            'Routing pairing message ${message.type.name} to handler '
+            'connId=$connectionId',
+          );
+          try {
+            await handler(message, connection);
+          } catch (e) {
+            _logHttp(
+              'Pairing message handler error for ${message.type.name}: $e',
+            );
+          }
+        } else {
+          _logHttp(
+            'No pairing handler registered for ${message.type.name} '
+            'connId=$connectionId - message dropped',
+          );
+        }
       }
     });
   }
 
   Future<void> _rejectUpgrade(HttpRequest request, String reason) async {
+    final remoteIp = request.connectionInfo?.remoteAddress.address ?? 'unknown';
+    final remotePort = request.connectionInfo?.remotePort ?? 0;
+    _logHttp('Rejecting WS upgrade from $remoteIp:$remotePort reason=$reason');
     request.response
       ..statusCode = HttpStatus.unauthorized
       ..write(reason);
@@ -230,45 +300,86 @@ class HttpControlServer implements QuicControlServer {
   }
 }
 
-class HttpControlClient implements QuicControlClient {
+class HttpControlClient implements ControlClient {
   HttpControlClient({this.useTls = true});
 
   final bool useTls;
+
+  /// Connects to a control endpoint.
+  /// Set [allowUnpinned] to true for pairing mode where the server fingerprint
+  /// isn't known yet. The PAKE exchange will verify trust cryptographically.
   @override
-  Future<QuicControlConnection> connect({
-    required QuicEndpoint endpoint,
+  Future<ControlConnection> connect({
+    required ControlEndpoint endpoint,
     required DeviceIdentity clientIdentity,
+    bool allowUnpinned = false,
   }) async {
+    if (!useTls) {
+      throw UnsupportedError('TLS is required for HTTP control client');
+    }
     if (endpoint.transport != kTransportHttpWs) {
       return Future.error(
         UnsupportedError('HTTP control transport not selected for endpoint'),
       );
     }
-    final client = _httpClient(endpoint.expectedServerFingerprint);
-    await _fetchHealth(client, endpoint);
-    final nonce = await _fetchNonce(client, endpoint);
-    final message = utf8.encode('$nonce:${clientIdentity.deviceId}');
-    final signature = await Ed25519().sign(
-      message,
-      keyPair: clientIdentity.keyPair,
+    _logHttp(
+      'Connecting to control ${endpoint.host}:${endpoint.port} '
+      'tls=${useTls ? 'on' : 'off'} '
+      'expectedFp=${_shortFingerprint(endpoint.expectedServerFingerprint)} '
+      'allowUnpinned=$allowUnpinned',
+    );
+    final client = await _httpClient(
+      endpoint.expectedServerFingerprint,
+      clientIdentity,
+      allowUnpinned: allowUnpinned,
+    );
+    try {
+      await _fetchHealth(client, endpoint);
+    } on HandshakeException catch (e) {
+      _logHttp(
+        'Health TLS handshake failed: $e '
+        'peer=${endpoint.host}:${endpoint.port} '
+        'expectedFp=${_shortFingerprint(endpoint.expectedServerFingerprint)}',
+      );
+      rethrow;
+    }
+    _logHttp(
+      'Health check succeeded for ${endpoint.host}:${endpoint.port} '
+      'transport=${endpoint.transport}',
     );
     final uri = Uri(
-      scheme: useTls ? 'wss' : 'ws',
+      scheme: 'wss',
       host: endpoint.host,
       port: endpoint.port,
       path: '/control/ws',
     );
-    final socket = await WebSocket.connect(
-      uri.toString(),
-      customClient: client,
-      headers: {
-        'x-cribcall-nonce': nonce,
-        'x-cribcall-cert': base64.encode(clientIdentity.certificateDer),
-        'x-cribcall-fingerprint': clientIdentity.certFingerprint,
-        'x-cribcall-device-id': clientIdentity.deviceId,
-        'x-cribcall-signature': base64.encode(signature.bytes),
-      },
-    );
+    _logHttp('Upgrading to WebSocket ${uri.toString()}');
+    WebSocket socket;
+    try {
+      socket = await WebSocket.connect(uri.toString(), customClient: client)
+          .timeout(
+            const Duration(seconds: 10),
+            onTimeout: () {
+              _logHttp(
+                'WebSocket upgrade timed out to ${endpoint.host}:${endpoint.port}',
+              );
+              throw const HttpException('WebSocket upgrade timed out');
+            },
+          );
+    } on HandshakeException catch (e) {
+      _logHttp(
+        'WebSocket handshake failed: $e '
+        'endpoint=${endpoint.host}:${endpoint.port} '
+        'expectedFp=${_shortFingerprint(endpoint.expectedServerFingerprint)}',
+      );
+      rethrow;
+    } catch (e) {
+      _logHttp(
+        'WebSocket connect failed: $e '
+        'endpoint=${endpoint.host}:${endpoint.port}',
+      );
+      rethrow;
+    }
     return HttpControlConnection(
       remoteDescription: endpoint,
       socket: socket,
@@ -277,69 +388,92 @@ class HttpControlClient implements QuicControlClient {
     );
   }
 
-  Future<void> _fetchHealth(HttpClient client, QuicEndpoint endpoint) async {
+  Future<void> _fetchHealth(HttpClient client, ControlEndpoint endpoint) async {
     final uri = Uri(
-      scheme: useTls ? 'https' : 'http',
+      scheme: 'https',
       host: endpoint.host,
       port: endpoint.port,
       path: '/health',
     );
     final request = await client.getUrl(uri);
+    _logHttp('Health request ${uri.toString()}');
     final response = await request.close();
     if (response.statusCode != HttpStatus.ok) {
+      _logHttp(
+        'Health check failed (${response.statusCode}) '
+        'certSubject=${response.certificate?.subject ?? 'none'}',
+      );
       throw HttpException(
         'Health check failed (${response.statusCode})',
         uri: uri,
       );
     }
     final cert = response.certificate;
-    if (useTls && cert != null) {
+    if (useTls) {
+      if (cert == null) {
+        _logHttp('Health response missing certificate');
+        throw HttpException('Health missing certificate', uri: uri);
+      }
       final fp = _fingerprintHex(cert.der);
       if (fp != endpoint.expectedServerFingerprint) {
+        _logHttp(
+          'Health fingerprint mismatch '
+          'expected=${_shortFingerprint(endpoint.expectedServerFingerprint)} '
+          'got=${_shortFingerprint(fp)}',
+        );
         throw HttpException('Health fingerprint mismatch', uri: uri);
       }
-    }
-    final body = await utf8.decodeStream(response);
-    final decoded = jsonDecode(body);
-    if (decoded is! Map || decoded['status'] != 'ok') {
-      throw HttpException('Health check returned error', uri: uri);
-    }
-    final protocol = decoded['protocol'];
-    if (protocol != null && protocol != kTransportHttpWs) {
-      throw HttpException('Health protocol mismatch: $protocol', uri: uri);
-    }
-  }
-
-  Future<String> _fetchNonce(HttpClient client, QuicEndpoint endpoint) async {
-    final uri = Uri(
-      scheme: useTls ? 'https' : 'http',
-      host: endpoint.host,
-      port: endpoint.port,
-      path: '/control/challenge',
-    );
-    final request = await client.getUrl(uri);
-    final response = await request.close();
-    if (response.statusCode != HttpStatus.ok) {
-      throw HttpException(
-        'Nonce request failed (${response.statusCode})',
-        uri: uri,
+      _logHttp(
+        'Health TLS peer cert subject=${cert.subject} '
+        'fp=${_shortFingerprint(fp)}',
       );
     }
     final body = await utf8.decodeStream(response);
     final decoded = jsonDecode(body);
-    if (decoded is! Map || decoded['nonce'] == null) {
-      throw HttpException('Nonce missing from server response', uri: uri);
+    if (decoded is! Map || decoded['status'] != 'ok') {
+      _logHttp('Health returned non-ok payload: $decoded');
+      throw HttpException('Health check returned error', uri: uri);
     }
-    return decoded['nonce'] as String;
+    final protocol = decoded['protocol'];
+    if (protocol != null && protocol != kTransportHttpWs) {
+      _logHttp('Health protocol mismatch: $protocol');
+      throw HttpException('Health protocol mismatch: $protocol', uri: uri);
+    }
   }
 
-  HttpClient _httpClient(String expectedFingerprint) {
-    if (!useTls) return HttpClient();
-    final client = HttpClient(
-      context: SecurityContext(withTrustedRoots: false),
+  Future<HttpClient> _httpClient(
+    String expectedFingerprint,
+    DeviceIdentity identity, {
+    bool allowUnpinned = false,
+  }) async {
+    if (!useTls) {
+      throw UnsupportedError('TLS is required for HTTP control client');
+    }
+    final context = await _buildSecurityContext(
+      identity,
+      withTrustedRoots: false,
     );
+    final client = HttpClient(context: context);
     client.badCertificateCallback = (cert, host, port) {
       final fp = _fingerprintHex(cert.der);
+      // If expectedFingerprint is empty and allowUnpinned is true, accept any cert
+      // This is used for PIN pairing where fingerprint isn't known yet
+      if (expectedFingerprint.isEmpty) {
+        if (allowUnpinned) {
+          _logHttp(
+            'TLS accepting unpinned cert for $host:$port '
+            'gotFp=${_shortFingerprint(fp)} (pairing mode)',
+          );
+          _lastSeenFingerprint = fp;
+          return true;
+        } else {
+          _logHttp(
+            'TLS rejecting cert for $host:$port - no expected fingerprint '
+            'gotFp=${_shortFingerprint(fp)} (set allowUnpinned=true for pairing)',
+          );
+          return false;
+        }
+      }
       final ok = fp == expectedFingerprint;
       if (!ok) {
         _logHttp(
@@ -347,21 +481,38 @@ class HttpControlClient implements QuicControlClient {
           'expected=${_shortFingerprint(expectedFingerprint)} '
           'got=${_shortFingerprint(fp)}',
         );
+      } else {
+        _lastSeenFingerprint = fp;
       }
       return ok;
     };
     return client;
   }
+
+  /// The fingerprint seen during the last connection (for pairing mode).
+  String? _lastSeenFingerprint;
+
+  /// Gets the fingerprint of the server certificate from the last connection.
+  /// Useful for pairing mode where the fingerprint wasn't known beforehand.
+  String? get lastSeenFingerprint => _lastSeenFingerprint;
 }
 
-class HttpControlConnection extends QuicControlConnection {
+class HttpControlConnection extends ControlConnection {
   HttpControlConnection({
     required super.remoteDescription,
     required this.socket,
     required this.peerFingerprint,
     required this.connectionId,
-    this.restrictToPairing = false,
+    bool restrictToPairing = false,
   }) {
+    _logHttp(
+      'HTTP control connection established '
+      'connId=$connectionId '
+      'peerFp=${_shortFingerprint(peerFingerprint)} '
+      'restrictToPairing=$restrictToPairing '
+      'remote=${remoteDescription.host}:${remoteDescription.port}',
+    );
+    _restrictToPairing = restrictToPairing;
     Future.microtask(() {
       if (_closed) return;
       _connectionEvents.add(
@@ -386,7 +537,7 @@ class HttpControlConnection extends QuicControlConnection {
   final WebSocket socket;
   final String peerFingerprint;
   final String connectionId;
-  final bool restrictToPairing;
+  bool _restrictToPairing = false;
 
   final ControlFrameDecoder _decoder = ControlFrameDecoder();
   final _messages = StreamController<ControlMessage>.broadcast();
@@ -413,7 +564,11 @@ class HttpControlConnection extends QuicControlConnection {
       final frames = _decoder.addChunkAndDecodeJson(bytes);
       for (final frame in frames) {
         final message = ControlMessageFactory.fromWireJson(frame);
-        if (restrictToPairing && !_isPairingMessage(message)) {
+        if (_restrictToPairing && !_isPairingMessage(message)) {
+          _logHttp(
+            'Rejecting non-pairing message ${message.type.name} '
+            'on connId=$connectionId (pairing-only)',
+          );
           _connectionEvents.add(
             ControlConnectionError(
               connectionId: connectionId,
@@ -423,9 +578,13 @@ class HttpControlConnection extends QuicControlConnection {
           unawaited(close());
           return;
         }
+        _logHttp(
+          'Received control message ${message.type.name} on connId=$connectionId',
+        );
         _messages.add(message);
       }
-    } catch (e, stack) {
+    } catch (e, _) {
+      _logHttp('Control frame decode failed on connId=$connectionId error=$e');
       _connectionEvents.add(
         ControlConnectionError(connectionId: connectionId, message: '$e'),
       );
@@ -435,11 +594,39 @@ class HttpControlConnection extends QuicControlConnection {
 
   bool _isPairingMessage(ControlMessage message) {
     final type = message.type;
-    return type == ControlMessageType.pairRequest ||
+    final isPairing =
+        type == ControlMessageType.pairRequest ||
         type == ControlMessageType.pinPairingInit ||
         type == ControlMessageType.pinSubmit ||
         type == ControlMessageType.ping ||
         type == ControlMessageType.pong;
+    if (type == ControlMessageType.pinPairingInit) {
+      final initMsg = message as PinPairingInitMessage;
+      _logHttp(
+        'Received PIN_PAIRING_INIT on connId=$connectionId:\n'
+        '  listenerId=${initMsg.listenerId}\n'
+        '  listenerName=${initMsg.listenerName}\n'
+        '  listenerCertFingerprint=${_shortFingerprint(initMsg.listenerCertFingerprint)}\n'
+        '  NOTE: Monitor should respond with PIN_REQUIRED containing session details',
+      );
+    } else if (type == ControlMessageType.pinSubmit) {
+      final submitMsg = message as PinSubmitMessage;
+      _logHttp(
+        'Received PIN_SUBMIT on connId=$connectionId:\n'
+        '  pairingSessionId=${submitMsg.pairingSessionId}\n'
+        '  NOTE: Monitor should validate PAKE response and send PAIR_ACCEPTED/REJECTED',
+      );
+    } else if (type == ControlMessageType.pinRequired) {
+      final requiredMsg = message as PinRequiredMessage;
+      _logHttp(
+        'Received PIN_REQUIRED on connId=$connectionId:\n'
+        '  pairingSessionId=${requiredMsg.pairingSessionId}\n'
+        '  expiresInSec=${requiredMsg.expiresInSec}\n'
+        '  maxAttempts=${requiredMsg.maxAttempts}\n'
+        '  NOTE: Listener should call acceptPinRequired() to hydrate session',
+      );
+    }
+    return isPairing;
   }
 
   @override
@@ -475,70 +662,35 @@ class HttpControlConnection extends QuicControlConnection {
   void _finish() {
     unawaited(close());
   }
-}
 
-class _NonceStore {
-  static const ttl = Duration(seconds: 60);
-  final Map<String, DateTime> _issued = {};
-  final _random = Random.secure();
-
-  String issue() {
-    _cleanup();
-    final bytes = List<int>.generate(32, (_) => _random.nextInt(256));
-    final nonce = base64.encode(bytes);
-    _issued[nonce] = DateTime.now().add(ttl);
-    return nonce;
-  }
-
-  bool consume(String nonce) {
-    _cleanup();
-    final expiresAt = _issued.remove(nonce);
-    return expiresAt != null && DateTime.now().isBefore(expiresAt);
-  }
-
-  void clear() {
-    _issued.clear();
-  }
-
-  void _cleanup() {
-    final now = DateTime.now();
-    _issued.removeWhere((_, expires) => expires.isBefore(now));
+  void elevateToTrusted() {
+    if (_restrictToPairing) {
+      _restrictToPairing = false;
+      _logHttp('Connection $connectionId elevated to trusted');
+    }
   }
 }
 
-SimplePublicKey? _extractEd25519PublicKey(List<int> certificateDer) {
-  try {
-    final parser = ASN1Parser(Uint8List.fromList(certificateDer));
-    final certSeq = parser.nextObject() as ASN1Sequence;
-    final tbs = certSeq.elements.first as ASN1Sequence;
-    final spki = tbs.elements[6] as ASN1Sequence;
-    final bitString = spki.elements[1] as ASN1BitString;
-    return SimplePublicKey(bitString.contentBytes(), type: KeyPairType.ed25519);
-  } catch (_) {
-    return null;
-  }
-}
-
-Future<bool> _verifyClientSignature({
-  required String nonce,
-  required String deviceId,
-  required String signatureB64,
-  required SimplePublicKey publicKey,
+Future<SecurityContext> _buildSecurityContext(
+  DeviceIdentity identity, {
+  bool withTrustedRoots = false,
 }) async {
-  try {
-    final message = utf8.encode('$nonce:$deviceId');
-    final signature = Signature(
-      base64.decode(signatureB64),
-      publicKey: publicKey,
-    );
-    return Ed25519().verify(message, signature: signature);
-  } catch (_) {
-    return false;
-  }
+  final ctx = SecurityContext(withTrustedRoots: withTrustedRoots);
+  final certPem = encodePem('CERTIFICATE', identity.certificateDer);
+  final extracted = await identity.keyPair.extract();
+  final pkcs8 = p256PrivateKeyPkcs8(
+    privateKeyBytes: (extracted as SimpleKeyPairData).bytes,
+    publicKeyBytes: identity.publicKeyUncompressed,
+  );
+  final keyPem = encodePem('PRIVATE KEY', pkcs8);
+  ctx.useCertificateChainBytes(utf8.encode(certPem));
+  ctx.usePrivateKeyBytes(utf8.encode(keyPem));
+  return ctx;
 }
 
 void _logHttp(String message) {
   developer.log(message, name: 'http_control');
+  debugPrint('[http_control] $message');
 }
 
 String _fingerprintHex(List<int> bytes) {

@@ -8,7 +8,7 @@ void main() {
     const service = QrServiceInfo(
       protocol: 'baby-monitor',
       version: 1,
-      defaultPort: 48080,
+      defaultPort: kControlDefaultPort,
       transport: kTransportHttpWs,
     );
     const payload = MonitorQrPayload(
@@ -28,7 +28,7 @@ void main() {
       decoded.monitorCertFingerprint,
       equals(payload.monitorCertFingerprint),
     );
-    expect(decoded.service.defaultPort, equals(48080));
+    expect(decoded.service.defaultPort, equals(kControlDefaultPort));
     expect(decoded.service.transport, equals(kTransportHttpWs));
 
     expect(
@@ -62,7 +62,7 @@ void main() {
       monitorId: 'monitor-1',
       monitorName: 'Nursery',
       monitorCertFingerprint: 'fp',
-      servicePort: 48080,
+      servicePort: kControlDefaultPort,
       version: 1,
       transport: kTransportHttpWs,
     );

@@ -9,6 +9,7 @@ import android.net.nsd.NsdServiceInfo
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 
 class MainActivity : FlutterActivity() {
     private val mdnsChannel = "cribcall/mdns"
@@ -18,6 +19,7 @@ class MainActivity : FlutterActivity() {
     private var nsdManager: NsdManager? = null
     private var registrationListener: NsdManager.RegistrationListener? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
+    private val logTag = "cribcall_mdns"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -71,14 +73,34 @@ class MainActivity : FlutterActivity() {
             )
             setAttribute("version", (args["version"] ?: "1").toString())
         }
+        Log.i(
+            logTag,
+            "Starting NSD advertise name=${info.serviceName} port=${info.port} monitorId=${args["monitorId"]}",
+        )
         val listener = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(serviceInfo: NsdServiceInfo?) {
                 registrationListener = this
+                Log.i(
+                    logTag,
+                    "Advertise registered ${serviceInfo?.serviceName ?: "unknown"}",
+                )
             }
 
-            override fun onRegistrationFailed(serviceInfo: NsdServiceInfo?, errorCode: Int) {}
-            override fun onServiceUnregistered(serviceInfo: NsdServiceInfo?) {}
-            override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo?, errorCode: Int) {}
+            override fun onRegistrationFailed(
+                serviceInfo: NsdServiceInfo?,
+                errorCode: Int,
+            ) {
+                Log.w(logTag, "Advertise failed $errorCode for ${serviceInfo?.serviceName}")
+            }
+            override fun onServiceUnregistered(serviceInfo: NsdServiceInfo?) {
+                Log.i(logTag, "Advertise unregistered ${serviceInfo?.serviceName}")
+            }
+            override fun onUnregistrationFailed(
+                serviceInfo: NsdServiceInfo?,
+                errorCode: Int,
+            ) {
+                Log.w(logTag, "Advertise unregistration failed $errorCode")
+            }
         }
         registrationListener = listener
         manager.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
@@ -87,15 +109,36 @@ class MainActivity : FlutterActivity() {
     private fun startDiscovery() {
         val manager = nsdManager ?: return
         if (discoveryListener != null) return
+        Log.i(logTag, "Starting NSD discovery")
         val listener = object : NsdManager.DiscoveryListener {
-            override fun onStartDiscoveryFailed(serviceType: String?, errorCode: Int) {}
-            override fun onStopDiscoveryFailed(serviceType: String?, errorCode: Int) {}
-            override fun onDiscoveryStarted(regType: String?) {}
-            override fun onDiscoveryStopped(serviceType: String?) {}
+            override fun onStartDiscoveryFailed(serviceType: String?, errorCode: Int) {
+                Log.w(logTag, "Discovery start failed $errorCode for $serviceType")
+            }
+            override fun onStopDiscoveryFailed(serviceType: String?, errorCode: Int) {
+                Log.w(logTag, "Discovery stop failed $errorCode for $serviceType")
+            }
+            override fun onDiscoveryStarted(regType: String?) {
+                Log.i(logTag, "Discovery started for $regType")
+            }
+            override fun onDiscoveryStopped(serviceType: String?) {
+                Log.i(logTag, "Discovery stopped for $serviceType")
+            }
 
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
+                Log.i(
+                    logTag,
+                    "Service found ${serviceInfo.serviceName} ${serviceInfo.host?.hostAddress}",
+                )
                 manager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
-                    override fun onResolveFailed(serviceInfo: NsdServiceInfo?, errorCode: Int) {}
+                    override fun onResolveFailed(
+                        serviceInfo: NsdServiceInfo?,
+                        errorCode: Int,
+                    ) {
+                        Log.w(
+                            logTag,
+                            "Resolve failed $errorCode for ${serviceInfo?.serviceName}",
+                        )
+                    }
 
                     override fun onServiceResolved(resolved: NsdServiceInfo) {
                         val txt = resolved.attributes.mapValues { entry ->
@@ -113,6 +156,10 @@ class MainActivity : FlutterActivity() {
                         Handler(Looper.getMainLooper()).post {
                             mdnsEventSink?.success(payload)
                         }
+                        Log.i(
+                            logTag,
+                            "Service resolved ${payload["monitorId"]} ip=${payload["ip"]} port=${payload["servicePort"]}",
+                        )
                     }
                 })
             }
@@ -125,22 +172,26 @@ class MainActivity : FlutterActivity() {
 
     private fun stopDiscovery() {
         val manager = nsdManager ?: return
+        Log.i(logTag, "Stopping NSD discovery")
         discoveryListener?.let {
             try {
                 manager.stopServiceDiscovery(it)
             } catch (e: Exception) {
+                Log.w(logTag, "Failed to stop discovery: ${e.message}")
             }
         }
         discoveryListener = null
     }
 
     private fun stopMdns() {
+        Log.i(logTag, "Stopping NSD advertise/discovery")
         stopDiscovery()
         nsdManager?.let { mgr ->
             registrationListener?.let {
                 try {
                     mgr.unregisterService(it)
                 } catch (e: Exception) {
+                    Log.w(logTag, "Failed to unregister service: ${e.message}")
                 }
             }
         }

@@ -180,21 +180,33 @@ class TrustedMonitor {
     required this.monitorId,
     required this.monitorName,
     required this.certFingerprint,
+    this.servicePort = kControlDefaultPort,
+    this.serviceVersion = 1,
+    this.transport = kTransportHttpWs,
     this.lastKnownIp,
+    this.lastNoiseEpochMs,
     required this.addedAtEpochSec,
   });
 
   final String monitorId;
   final String monitorName;
   final String certFingerprint;
+  final int servicePort;
+  final int serviceVersion;
+  final String transport;
   final String? lastKnownIp;
+  final int? lastNoiseEpochMs;
   final int addedAtEpochSec;
 
   Map<String, dynamic> toJson() => {
     'monitorId': monitorId,
     'monitorName': monitorName,
     'certFingerprint': certFingerprint,
+    'servicePort': servicePort,
+    'serviceVersion': serviceVersion,
+    'transport': transport,
     if (lastKnownIp != null) 'lastKnownIp': lastKnownIp,
+    if (lastNoiseEpochMs != null) 'lastNoiseEpochMs': lastNoiseEpochMs,
     'addedAtEpochSec': addedAtEpochSec,
   };
 
@@ -203,7 +215,11 @@ class TrustedMonitor {
       monitorId: json['monitorId'] as String,
       monitorName: json['monitorName'] as String,
       certFingerprint: json['certFingerprint'] as String,
+      servicePort: json['servicePort'] as int? ?? kControlDefaultPort,
+      serviceVersion: json['serviceVersion'] as int? ?? 1,
+      transport: json['transport'] as String? ?? kTransportHttpWs,
       lastKnownIp: json['lastKnownIp'] as String?,
+      lastNoiseEpochMs: json['lastNoiseEpochMs'] as int?,
       addedAtEpochSec: json['addedAtEpochSec'] as int,
     );
   }

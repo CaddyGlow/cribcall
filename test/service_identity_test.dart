@@ -9,7 +9,7 @@ void main() {
     const builder = ServiceIdentityBuilder(
       serviceProtocol: 'baby-monitor',
       serviceVersion: 1,
-      defaultPort: 48080,
+      defaultPort: kControlDefaultPort,
       transport: kTransportHttpWs,
     );
 
@@ -19,16 +19,16 @@ void main() {
     );
     expect(qr.monitorId, 'device-123');
     expect(qr.monitorCertFingerprint, identity.certFingerprint);
-    expect(qr.service.defaultPort, 48080);
+    expect(qr.service.defaultPort, kControlDefaultPort);
     expect(qr.service.transport, kTransportHttpWs);
 
     final mdns = builder.buildMdnsAdvertisement(
       identity: identity,
       monitorName: 'Nursery',
-      servicePort: 48080,
+      servicePort: kControlDefaultPort,
     );
     expect(mdns.monitorCertFingerprint, identity.certFingerprint);
-    expect(mdns.servicePort, 48080);
+    expect(mdns.servicePort, kControlDefaultPort);
     expect(mdns.transport, kTransportHttpWs);
   });
 
@@ -37,7 +37,7 @@ void main() {
     const builder = ServiceIdentityBuilder(
       serviceProtocol: 'baby-monitor',
       serviceVersion: 1,
-      defaultPort: 48080,
+      defaultPort: kControlDefaultPort,
       transport: kTransportHttpWs,
     );
 

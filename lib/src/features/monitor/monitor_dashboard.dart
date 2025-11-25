@@ -1,5 +1,7 @@
 import 'dart:convert';
+import 'dart:developer' as developer;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -12,6 +14,11 @@ import '../../pairing/pin_pairing_controller.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
 import '../../control/control_service.dart';
+
+void _logMonitorDashboard(String message) {
+  developer.log(message, name: 'monitor_dashboard');
+  debugPrint('[monitor_dashboard] $message');
+}
 
 class MonitorDashboard extends ConsumerStatefulWidget {
   const MonitorDashboard({super.key});
@@ -49,10 +56,12 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
     }
 
     final builder = ref.read(serviceIdentityProvider);
+    final controlState = ref.read(controlServerProvider);
+    final servicePort = controlState.port ?? builder.defaultPort;
     final nextAd = builder.buildMdnsAdvertisement(
       identity: identity.requireValue,
       monitorName: settings.requireValue.name,
-      servicePort: builder.defaultPort,
+      servicePort: servicePort,
     );
 
     if (_advertising &&
@@ -66,7 +75,7 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
       await _mdnsService.startAdvertise(nextAd);
       _currentAdvertisement = nextAd;
       _advertising = true;
-    } catch (_) {
+    } catch (_){ 
       // Ignore failures; listener will still show pinned monitors from storage.
     }
   }
@@ -311,7 +320,9 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
                 Expanded(
                   child: OutlinedButton.icon(
                     onPressed: () async {
+                      _logMonitorDashboard('Start PIN session button pressed');
                       if (!identity.hasValue) {
+                        _logMonitorDashboard('Identity not ready');
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(
                             content: Text('Identity still loading'),
@@ -320,9 +331,19 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
                         return;
                       }
                       try {
+                        _logMonitorDashboard(
+                          'Starting PIN session for identity=${identity.requireValue.deviceId}',
+                        );
                         final msg = await ref
                             .read(pinSessionProvider.notifier)
                             .startSession(identity.requireValue);
+                        _logMonitorDashboard(
+                          'PIN session created:\n'
+                          '  sessionId=${msg.pairingSessionId}\n'
+                          '  expiresInSec=${msg.expiresInSec}\n'
+                          '  maxAttempts=${msg.maxAttempts}\n'
+                          '  NOTE: Listener must send PIN_PAIRING_INIT to receive this PIN_REQUIRED message',
+                        );
                         if (!context.mounted) return;
                         ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(
@@ -331,7 +352,8 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
                             ),
                           ),
                         );
-                      } catch (_) {
+                      } catch (e, stack) {
+                        _logMonitorDashboard('PIN session start failed: $e\n$stack');
                         if (!context.mounted) return;
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(
@@ -420,12 +442,9 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
         const SizedBox(height: 14),
         _MonitorCard(
           title: 'Control channel status',
-          subtitle: serviceBuilder.transport == kTransportQuic
-              ? 'QUIC control (UDP ${serviceBuilder.defaultPort}), length-prefixed JSON frames.'
-              : 'HTTP+WebSocket control (TLS ${serviceBuilder.defaultPort}), nonce+signature handshake and pinned fingerprint.',
-          badge: serviceBuilder.transport == kTransportQuic
-              ? 'QUIC'
-              : 'HTTP+WS',
+          subtitle:
+              'HTTP+WebSocket control (TLS ${serviceBuilder.defaultPort}), nonce+signature handshake and pinned fingerprint.',
+          badge: 'HTTP+WS',
           badgeColor: AppColors.primary,
           children: [
             _MetricRow(
@@ -462,7 +481,7 @@ String _autoStreamLabel(AutoStreamType type) {
 String _serverStatusLabel(ControlServerState state) {
   switch (state.status) {
     case ControlServerStatus.running:
-      return 'Running on UDP ${state.port ?? 48080}';
+      return 'Running on ${state.port ?? kControlDefaultPort} (HTTP+WS)';
     case ControlServerStatus.starting:
       return 'Starting...';
     case ControlServerStatus.error:

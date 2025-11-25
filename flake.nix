@@ -6,28 +6,35 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, flake-utils, ... }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+      ...
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         pkgs = import nixpkgs { inherit system; };
         flutter = pkgs.flutter;
         rustToolchain = builtins.fromTOML (builtins.readFile (self + "/rust-toolchain.toml"));
         rustcChannel = rustToolchain.toolchain.channel;
-        libPath =
-          pkgs.lib.makeLibraryPath [
-            pkgs.alsa-lib
-            pkgs.pulseaudio
-            pkgs.glib
-            pkgs.gtk3
-            pkgs.libsecret
-            pkgs.libGL
-          ];
+        libPath = pkgs.lib.makeLibraryPath [
+          pkgs.alsa-lib
+          pkgs.pulseaudio
+          pkgs.glib
+          pkgs.gtk3
+          pkgs.libsecret
+          pkgs.libGL
+        ];
         bindgenIncludePath = [
           ''-I"${pkgs.llvmPackages_latest.libclang.lib}/lib/clang/${pkgs.llvmPackages_latest.libclang.version}/include"''
           ''-I"${pkgs.glib.dev}/include/glib-2.0"''
           ''-I${pkgs.glib.out}/lib/glib-2.0/include/''
         ];
-      in {
+      in
+      {
         devShells.default = pkgs.mkShell rec {
           nativeBuildInputs = [
             pkgs.pkg-config
@@ -36,6 +43,7 @@
           ];
 
           buildInputs = [
+            pkgs.openssl
             flutter
             pkgs.dart
             pkgs.android-tools # adb/fastboot
@@ -63,10 +71,9 @@
             ])
             ++ bindgenIncludePath;
 
-          RUSTFLAGS =
-            builtins.map (a: ''-L ${a}/lib'') [
-              # add libraries here (e.g. pkgs.libvmi)
-            ];
+          RUSTFLAGS = builtins.map (a: ''-L ${a}/lib'') [
+            # add libraries here (e.g. pkgs.libvmi)
+          ];
 
           LD_LIBRARY_PATH = libPath;
 
@@ -91,5 +98,6 @@
         };
 
         formatter = pkgs.alejandra;
-      });
+      }
+    );
 }

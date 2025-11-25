@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:cribcall/src/control/control_message.dart';
+import 'package:cribcall/src/config/build_flags.dart';
 import 'package:cribcall/src/domain/models.dart';
 import 'package:cribcall/src/discovery/mdns_service.dart';
 import 'package:cribcall/src/state/app_state.dart';
@@ -92,7 +93,7 @@ void main() {
         monitorId: 'm1',
         monitorName: 'Nursery',
         monitorCertFingerprint: 'fp1',
-        servicePort: 48080,
+        servicePort: kControlDefaultPort,
         version: 1,
       ),
     );
@@ -101,7 +102,7 @@ void main() {
         monitorId: 'm1',
         monitorName: 'Nursery',
         monitorCertFingerprint: 'fp1',
-        servicePort: 48080,
+        servicePort: kControlDefaultPort,
         version: 1,
       ),
     );
@@ -136,7 +137,7 @@ void main() {
         service: QrServiceInfo(
           protocol: 'baby-monitor',
           version: 1,
-          defaultPort: 48080,
+          defaultPort: kControlDefaultPort,
         ),
       );
       await container
@@ -150,7 +151,7 @@ void main() {
               monitorId: 'm1',
               monitorName: 'Nursery',
               monitorCertFingerprint: 'fp1',
-              servicePort: 48080,
+              servicePort: kControlDefaultPort,
               version: 1,
               ip: '192.168.1.10',
             ),
@@ -194,7 +195,7 @@ void main() {
         monitorId: monitorIdentity.deviceId,
         monitorName: 'Nursery',
         monitorCertFingerprint: monitorIdentity.certFingerprint,
-        servicePort: 48080,
+        servicePort: kControlDefaultPort,
         version: 1,
       );
 
@@ -249,7 +250,7 @@ void main() {
       monitorId: 'm1',
       monitorName: 'Nursery',
       monitorCertFingerprint: 'fp1',
-      servicePort: 48080,
+      servicePort: kControlDefaultPort,
       version: 1,
     );
 

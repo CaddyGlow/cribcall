@@ -6,7 +6,7 @@ import 'package:cribcall/src/identity/pkcs8.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('generates Ed25519 self-signed certificate with fingerprint', () async {
+  test('generates P-256 self-signed certificate with fingerprint', () async {
     final identity = await DeviceIdentity.generate(deviceId: 'test-device');
 
     expect(identity.certFingerprint.length, 64);
@@ -17,10 +17,16 @@ void main() {
 
     final tbs = certElements[0] as ASN1Sequence;
     final tbsElements = tbs.elements;
+    final sigAlg = tbsElements[2] as ASN1Sequence;
+    final sigOid = sigAlg.elements[0] as ASN1ObjectIdentifier;
+    expect(sigOid.identifier, '1.2.840.10045.4.3.2'); // ecdsa-with-SHA256
+
     final spki = tbsElements[6] as ASN1Sequence;
     final algId = spki.elements[0] as ASN1Sequence;
     final oid = algId.elements[0] as ASN1ObjectIdentifier;
-    expect(oid.identifier, '1.3.101.112'); // Ed25519
+    final curveOid = algId.elements[1] as ASN1ObjectIdentifier;
+    expect(oid.identifier, '1.2.840.10045.2.1'); // ecPublicKey
+    expect(curveOid.identifier, '1.2.840.10045.3.1.7'); // prime256v1
 
     final extensionsWrapper = tbsElements[7];
     final extParser = ASN1Parser(extensionsWrapper.valueBytes());
@@ -40,18 +46,31 @@ void main() {
     expect(String.fromCharCodes(uriObj.valueBytes()), 'cribcall:test-device');
   });
 
-  test('encodes Ed25519 private key as RFC8410-wrapped PKCS#8', () {
-    final seed = List<int>.generate(32, (i) => i);
-    final pkcs8 = ed25519PrivateKeyPkcs8(seed);
+  test('encodes P-256 private key as PKCS#8 with curve params', () {
+    final priv = List<int>.generate(32, (i) => i);
+    final pub = List<int>.filled(65, 1); // dummy uncompressed key
+    final pkcs8 = p256PrivateKeyPkcs8(
+      privateKeyBytes: priv,
+      publicKeyBytes: pub,
+    );
 
     final parser = ASN1Parser(Uint8List.fromList(pkcs8));
     final seq = parser.nextObject() as ASN1Sequence;
     expect(seq.elements.length, 3);
 
+    final algId = seq.elements[1] as ASN1Sequence;
+    final algOid = algId.elements[0] as ASN1ObjectIdentifier;
+    final curveOid = algId.elements[1] as ASN1ObjectIdentifier;
+    expect(algOid.identifier, '1.2.840.10045.2.1');
+    expect(curveOid.identifier, '1.2.840.10045.3.1.7');
+
     final privateKeyOctetString = seq.elements[2] as ASN1OctetString;
-    final wrapped = privateKeyOctetString.octets;
-    expect(wrapped[0], 0x04);
-    expect(wrapped[1], seed.length);
-    expect(wrapped.sublist(2), seed);
+    final ecPrivateSeq =
+        ASN1Parser(
+              Uint8List.fromList(privateKeyOctetString.octets),
+            ).nextObject()
+            as ASN1Sequence;
+    final version = ecPrivateSeq.elements[0] as ASN1Integer;
+    expect(version.valueAsBigInteger, BigInt.one);
   });
 }

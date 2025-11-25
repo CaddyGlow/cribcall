@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter/foundation.dart';
+import '../foundation/foundation_stub.dart'
+    if (dart.library.ui) 'package:flutter/foundation.dart';
 import 'dart:io';
 
 import '../config/build_flags.dart';
@@ -158,7 +160,7 @@ final serviceIdentityProvider = Provider<ServiceIdentityBuilder>((ref) {
   return const ServiceIdentityBuilder(
     serviceProtocol: 'baby-monitor',
     serviceVersion: 1,
-    defaultPort: 48080,
+    defaultPort: kControlDefaultPort,
     transport: kDefaultControlTransport,
   );
 });
@@ -208,6 +210,13 @@ final controlServerAutoStartProvider = Provider<void>((ref) {
     if (!monitoringEnabled ||
         !identity.hasValue ||
         !trustedListeners.hasValue) {
+      developer.log(
+        'Control server auto-start skipped '
+        'monitoring=$monitoringEnabled '
+        'identityReady=${identity.hasValue} '
+        'trustedReady=${trustedListeners.hasValue}',
+        name: 'control_server',
+      );
       await ref.read(controlServerProvider.notifier).stop();
       return;
     }
@@ -215,6 +224,11 @@ final controlServerAutoStartProvider = Provider<void>((ref) {
     final trustedFingerprints = trustedListeners.requireValue
         .map((p) => p.certFingerprint)
         .toList();
+    developer.log(
+      'Control server auto-start invoking '
+      'port=${builder.defaultPort} trusted=${trustedFingerprints.length}',
+      name: 'control_server',
+    );
     await ref
         .read(controlServerProvider.notifier)
         .start(
@@ -275,6 +289,9 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
         monitorId: payload.monitorId,
         monitorName: payload.monitorName,
         certFingerprint: payload.monitorCertFingerprint,
+        servicePort: payload.service.defaultPort,
+        serviceVersion: payload.service.version,
+        transport: payload.service.transport,
         addedAtEpochSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
       ),
     ];
@@ -299,13 +316,48 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
     );
     if (index == -1) return;
     final existing = current[index];
-    if (existing.lastKnownIp == advertisement.ip) return;
+    if (existing.lastKnownIp == advertisement.ip &&
+        existing.servicePort == advertisement.servicePort &&
+        existing.transport == advertisement.transport &&
+        existing.serviceVersion == advertisement.version) {
+      return;
+    }
     final updated = [...current];
     updated[index] = TrustedMonitor(
       monitorId: existing.monitorId,
       monitorName: existing.monitorName,
       certFingerprint: existing.certFingerprint,
-      lastKnownIp: advertisement.ip,
+      lastKnownIp: advertisement.ip ?? existing.lastKnownIp,
+      lastNoiseEpochMs: existing.lastNoiseEpochMs,
+      servicePort: advertisement.servicePort,
+      serviceVersion: advertisement.version,
+      transport: advertisement.transport,
+      addedAtEpochSec: existing.addedAtEpochSec,
+    );
+    state = AsyncData(updated);
+    await ref.read(trustedMonitorsRepoProvider).save(updated);
+  }
+
+  Future<void> recordNoiseEvent({
+    required String monitorId,
+    required int timestampMs,
+  }) async {
+    final current = await _ensureValue();
+    final index = current.indexWhere(
+      (monitor) => monitor.monitorId == monitorId,
+    );
+    if (index == -1) return;
+    final existing = current[index];
+    final updated = [...current];
+    updated[index] = TrustedMonitor(
+      monitorId: existing.monitorId,
+      monitorName: existing.monitorName,
+      certFingerprint: existing.certFingerprint,
+      lastKnownIp: existing.lastKnownIp,
+      lastNoiseEpochMs: timestampMs,
+      servicePort: existing.servicePort,
+      serviceVersion: existing.serviceVersion,
+      transport: existing.transport,
       addedAtEpochSec: existing.addedAtEpochSec,
     );
     state = AsyncData(updated);

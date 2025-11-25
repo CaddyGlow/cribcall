@@ -97,7 +97,7 @@ class _HeroBanner extends StatelessWidget {
             children: [
               _HeroPill(text: 'Pinned cert fingerprints'),
               _HeroPill(text: 'RFC 8785 transcripts'),
-              _HeroPill(text: 'HTTP+WS control (QUIC optional)'),
+              _HeroPill(text: 'HTTP+WS control channel'),
             ],
           ),
         ],
@@ -153,10 +153,10 @@ class _RoleCards extends StatelessWidget {
           _RoleCard(
             title: 'Monitor',
             subtitle:
-                'Lives in the nursery. Captures audio/video, detects noise, and advertises itself.',
+                'Lives in the nursery. Captures audio, detects noise, and advertises itself.',
             icon: Icons.sensors,
             highlights: const [
-              'Runs control server (HTTP+WS default, QUIC optional)',
+              'Runs control server over HTTP+WS',
               'Sound detection with cooldown',
               'Shows QR or PIN for pairing',
             ],
@@ -166,12 +166,12 @@ class _RoleCards extends StatelessWidget {
           _RoleCard(
             title: 'Listener',
             subtitle:
-                'Stays with the parent. Discovers monitors, validates pinned certs, and opens streams.',
+                'Stays with the parent. Discovers monitors, validates pinned certs, and opens audio streams.',
             icon: Icons.hearing,
             highlights: const [
               'Scan QR or LAN for monitors',
               'Receives NOISE_EVENT alerts',
-              'Starts audio or video streams',
+              'Starts audio streams',
             ],
             buttonLabel: 'Use as Listener',
             onTap: () => onSelect(DeviceRole.listener),

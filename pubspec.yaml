@@ -1,5 +1,5 @@
 name: cribcall
-description: "LAN-only baby monitor using QUIC for control and WebRTC for media."
+description: "LAN-only baby monitor using HTTP+WebSocket control and WebRTC for media."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -46,8 +46,7 @@ dependencies:
   mobile_scanner: ^5.2.1
   flutter_secure_storage: ^9.2.2
   multicast_dns: ^0.3.2
-  cribcall_quic:
-    path: native/cribcall_quic
+  pointycastle: ^3.9.1
 
 dev_dependencies:
   flutter_test:
