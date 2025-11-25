@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 import 'dart:io';
 
 import 'package:cribcall_quic/cribcall_quic.dart';
@@ -32,11 +33,19 @@ class NativeQuicControlClient implements QuicControlClient {
     required QuicEndpoint endpoint,
     required DeviceIdentity clientIdentity,
   }) async {
+    _logQuicTransport(
+      'Connecting to ${endpoint.host}:${endpoint.port} '
+      '(expected fp ${_shortFingerprint(endpoint.expectedServerFingerprint)})',
+    );
     final resources = await _quiche.startClient(
       host: endpoint.host,
       port: endpoint.port,
       expectedServerFingerprint: endpoint.expectedServerFingerprint,
       identity: clientIdentity,
+    );
+    _logQuicTransport(
+      'QUIC control client started for ${endpoint.host}:${endpoint.port} '
+      'handle=${resources.native.handle}',
     );
     return NativeQuicControlConnection(
       remoteDescription: endpoint,
@@ -65,6 +74,10 @@ class NativeQuicControlServer implements QuicControlServer {
     List<String> trustedListenerFingerprints = const [],
   }) async {
     trustedFingerprints = trustedListenerFingerprints;
+    _logQuicTransport(
+      'Starting QUIC control server on $bindAddress:$port '
+      '(trusted=${trustedListenerFingerprints.length})',
+    );
     final resources = await _quiche.startServer(
       port: port,
       identity: serverIdentity,
@@ -73,10 +86,14 @@ class NativeQuicControlServer implements QuicControlServer {
     );
     _nativeConnection = resources.native;
     _cleanupDir = resources.identityDir;
+    _logQuicTransport(
+      'QUIC control server running on $bindAddress:$port handle=${_nativeConnection?.handle}',
+    );
   }
 
   @override
   Future<void> stop() async {
+    _logQuicTransport('Stopping QUIC control server');
     _nativeConnection?.close();
     _nativeConnection = null;
     final dir = _cleanupDir;
@@ -156,6 +173,10 @@ class NativeQuicControlConnection extends QuicControlConnection {
   void _handleEvent(QuicEvent event) {
     if (_closed) return;
     if (event is QuicMessage) {
+      _logQuicTransport(
+        'Received QUIC control chunk bytes=${event.data.length} '
+        'conn=${event.connectionId ?? 'unknown'}',
+      );
       final frames = _decoder.addChunkAndDecodeJson(event.data);
       for (final frame in frames) {
         try {
@@ -165,6 +186,10 @@ class NativeQuicControlConnection extends QuicControlConnection {
         }
       }
     } else if (event is QuicConnected) {
+      _logQuicTransport(
+        'QUIC connected conn=${event.connectionId ?? 'unknown'} '
+        'peer_fp=${_shortFingerprint(event.peerFingerprint)}',
+      );
       if (event.connectionId != null) {
         _connectionEvents.add(
           ControlConnected(
@@ -174,6 +199,10 @@ class NativeQuicControlConnection extends QuicControlConnection {
         );
       }
     } else if (event is QuicClosed) {
+      _logQuicTransport(
+        'QUIC closed conn=${event.connectionId ?? 'unknown'} '
+        'reason=${event.reason ?? 'none'}',
+      );
       if (event.connectionId != null) {
         _connectionEvents.add(
           ControlConnectionClosed(
@@ -184,6 +213,10 @@ class NativeQuicControlConnection extends QuicControlConnection {
       }
       _finishFromNative();
     } else if (event is QuicError) {
+      _logQuicTransport(
+        'QUIC error conn=${event.connectionId ?? 'unknown'} '
+        'message=${event.message}',
+      );
       _connectionEvents.add(
         ControlConnectionError(
           connectionId: event.connectionId,
@@ -199,6 +232,9 @@ class NativeQuicControlConnection extends QuicControlConnection {
     ControlMessage message, {
     String? connectionId,
   }) async {
+    _logQuicTransport(
+      'Sending ${message.runtimeType} over QUIC conn=${connectionId ?? 'auto'}',
+    );
     final frame = ControlFrameCodec.encodeJson(message.toWireJson());
     native.send(frame, connectionId: connectionId);
   }
@@ -222,6 +258,7 @@ class NativeQuicControlConnection extends QuicControlConnection {
 
   Future<void> _teardown() async {
     if (_closed) return;
+    _logQuicTransport('Tearing down QUIC control connection');
     _closed = true;
     native.close();
     await _messages.close();
@@ -303,4 +340,17 @@ UnsupportedError _unsupportedQuicError({QuicEndpoint? endpoint}) {
   return UnsupportedError(
     'QUIC control transport is unavailable for $description',
   );
+}
+
+void _logQuicTransport(String message) {
+  developer.log(message, name: 'quic_transport');
+}
+
+String _shortFingerprint(String fingerprint) {
+  if (fingerprint.length <= 12) {
+    return fingerprint;
+  }
+  final prefix = fingerprint.substring(0, 6);
+  final suffix = fingerprint.substring(fingerprint.length - 4);
+  return '$prefix...$suffix';
 }

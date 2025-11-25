@@ -1,19 +1,19 @@
 use allo_isolate::Isolate;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use dashmap::DashMap;
-use log::{error, warn};
+use log::{debug, error, info, warn};
 use once_cell::sync::OnceCell;
 use rand::{rngs::OsRng, RngCore};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::ffi::{CStr, CString};
 use std::collections::{HashMap, HashSet};
+use std::ffi::{CStr, CString};
 use std::net::{SocketAddr, UdpSocket};
 use std::os::raw::{c_char, c_void};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const CONTROL_ALPN: &[u8] = b"cribcall-ctrl";
 const DEFAULT_IDLE_TIMEOUT_MS: u64 = 30_000;
@@ -87,10 +87,25 @@ static CONNECTIONS: OnceCell<DashMap<u64, ConnectionHandle>> = OnceCell::new();
 
 #[no_mangle]
 pub extern "C" fn cc_quic_init_logging() -> i32 {
-    if env_logger::try_init().is_ok() {
-        CcQuicStatus::Ok.code()
-    } else {
-        CcQuicStatus::Internal.code()
+    #[cfg(target_os = "android")]
+    {
+        use android_logger::Config;
+        use log::LevelFilter;
+        android_logger::init_once(
+            Config::default()
+                .with_max_level(LevelFilter::Info)
+                .with_tag("cribcall_quic"),
+        );
+        return CcQuicStatus::Ok.code();
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let env = env_logger::Env::default().default_filter_or("info");
+        let _ = env_logger::Builder::from_env(env)
+            .format_timestamp_millis()
+            .try_init();
+        return CcQuicStatus::Ok.code();
     }
 }
 
@@ -207,6 +222,10 @@ pub extern "C" fn cc_quic_client_connect(
         Ok(s) => s,
         Err(code) => return code.code(),
     };
+    info!(
+        "client connect host={host}:{port} server_name={server_name} expected_fp={}",
+        short_hex(&expected_fp)
+    );
 
     let mut config = unsafe { Box::from_raw(config) }.inner;
     if let Err(err) = config.load_cert_chain_from_pem_file(&cert_path) {
@@ -335,6 +354,10 @@ pub extern "C" fn cc_quic_server_start(
             return CcQuicStatus::SocketError.code();
         }
     };
+    info!(
+        "server start bind={bind_host}:{port} trusted_allowlist={}",
+        trusted_allowlist.len()
+    );
     if socket.set_nonblocking(true).is_err() {
         warn!("failed to set nonblocking on server socket");
     }
@@ -438,6 +461,7 @@ fn run_client_worker(
     dart_port: i64,
     rx: mpsc::Receiver<WorkerCommand>,
 ) {
+    let start = Instant::now();
     let local_addr = match socket.local_addr() {
         Ok(addr) => addr,
         Err(err) => {
@@ -457,6 +481,14 @@ fn run_client_worker(
     OsRng.fill_bytes(&mut scid);
     let scid = quiche::ConnectionId::from_ref(&scid);
     let conn_id_hex = hex_string(scid.as_ref());
+    info!(
+        "client {} connecting from {} to {} (server_name={} expected_fp={})",
+        handle_id,
+        local_addr,
+        peer,
+        server_name,
+        short_hex(&expected_fp)
+    );
 
     let mut conn = match quiche::connect(
         Some(&server_name),
@@ -511,16 +543,21 @@ fn run_client_worker(
             }
             Err(quiche::Error::Done) => {}
             Err(err) => {
+                warn!(
+                    "client {} send loop error (established={}): {err}",
+                    conn_id_hex,
+                    conn.is_established()
+                );
                 post_event(
                     dart_port,
-                QuicEvent::Error {
-                    handle: handle_id,
-                    connection_id: Some(conn_id_hex.clone()),
-                    message: format!("quic send error: {err}"),
-                },
-            );
-            break;
-        }
+                    QuicEvent::Error {
+                        handle: handle_id,
+                        connection_id: Some(conn_id_hex.clone()),
+                        message: format!("quic send error: {err}"),
+                    },
+                );
+                break;
+            }
         }
 
         match socket.recv_from(&mut buf) {
@@ -534,7 +571,7 @@ fn run_client_worker(
             }
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(err) => {
-                warn!("udp recv error: {err}");
+                warn!("client udp recv error: {err}");
                 break;
             }
         }
@@ -546,6 +583,12 @@ fn run_client_worker(
                 None => String::new(),
             };
             if !expected_fp.is_empty() && peer_fp.to_lowercase() != expected_fp {
+                warn!(
+                    "client {} fingerprint mismatch: expected {} got {}",
+                    conn_id_hex,
+                    short_hex(&expected_fp),
+                    short_hex(&peer_fp)
+                );
                 let _ = conn.close(false, 0x102, b"fingerprint mismatch");
                 post_event(
                     dart_port,
@@ -557,6 +600,11 @@ fn run_client_worker(
                 );
                 break;
             }
+            info!(
+                "client connected conn_id={} peer_fp={}",
+                conn_id_hex,
+                short_hex(&peer_fp)
+            );
             post_event(
                 dart_port,
                 QuicEvent::Connected {
@@ -593,6 +641,13 @@ fn run_client_worker(
 
         if conn.is_closed() {
             let reason = conn.peer_error().map(|err| format!("{err:?}"));
+            info!(
+                "client connection {} closed established={} ({:?}) stats={}",
+                conn_id_hex,
+                conn.is_established(),
+                reason,
+                format_stats(&conn.stats())
+            );
             post_event(
                 dart_port,
                 QuicEvent::Closed {
@@ -611,6 +666,13 @@ fn run_client_worker(
                 let wait = timeout.min(Duration::from_millis(5));
                 thread::sleep(wait);
                 if wait >= timeout {
+                    if !conn.is_established() {
+                        warn!(
+                            "client {} handshake timeout fired after {:?}",
+                            conn_id_hex,
+                            start.elapsed()
+                        );
+                    }
                     conn.on_timeout();
                 }
             }
@@ -647,6 +709,7 @@ fn run_server_worker(
     let mut out = [0u8; MAX_DATAGRAM_SIZE];
     let mut conns: HashMap<Vec<u8>, quiche::Connection> = HashMap::new();
     let mut announced: HashSet<Vec<u8>> = HashSet::new();
+    let mut start_times: HashMap<Vec<u8>, Instant> = HashMap::new();
 
     loop {
         while let Ok(cmd) = rx.try_recv() {
@@ -695,7 +758,13 @@ fn run_server_worker(
                     let scid = quiche::ConnectionId::from_ref(&scid);
                     match quiche::accept(&scid, Some(&hdr.scid), local_addr, from, &mut config) {
                         Ok(c) => {
+                            info!(
+                                "server accepted conn_id={} from {}",
+                                hex_string(scid.as_ref()),
+                                from
+                            );
                             conns.insert(scid.to_vec(), c);
+                            start_times.insert(scid.to_vec(), Instant::now());
                         }
                         Err(err) => {
                             warn!("accept error: {err}");
@@ -732,6 +801,11 @@ fn run_server_worker(
                 }
                 Err(quiche::Error::Done) => {}
                 Err(err) => {
+                    warn!(
+                        "server send error conn_id={} established={} err={err}",
+                        id_hex,
+                        connection.is_established()
+                    );
                     post_event(
                         dart_port,
                         QuicEvent::Error {
@@ -752,12 +826,21 @@ fn run_server_worker(
                 };
 
                 if !trusted_allowlist.is_empty() && !trusted_allowlist.contains(&peer_fp) {
-                    warn!("rejecting untrusted client: {peer_fp}");
+                    warn!(
+                        "rejecting untrusted client conn={} fp={}",
+                        id_hex,
+                        short_hex(&peer_fp)
+                    );
                     let _ = connection.close(false, 0x103, b"untrusted client");
                     to_close.push(id.clone());
                     continue;
                 }
 
+                info!(
+                    "server connection established conn_id={} peer_fp={}",
+                    id_hex,
+                    short_hex(&peer_fp)
+                );
                 announced.insert(id.clone());
                 post_event(
                     dart_port,
@@ -795,6 +878,12 @@ fn run_server_worker(
 
             if connection.is_closed() {
                 let reason = connection.peer_error().map(|err| format!("{err:?}"));
+                info!(
+                    "server connection {} closed established={} ({:?})",
+                    id_hex,
+                    connection.is_established(),
+                    reason
+                );
                 post_event(
                     dart_port,
                     QuicEvent::Closed {
@@ -814,6 +903,17 @@ fn run_server_worker(
                     let wait = timeout.min(Duration::from_millis(5));
                     thread::sleep(wait);
                     if wait >= timeout {
+                        if !connection.is_established() {
+                            let elapsed = start_times
+                                .get(id)
+                                .map(|s| s.elapsed())
+                                .unwrap_or_default();
+                            warn!(
+                                "server conn {} handshake timeout fired after {:?}",
+                                id_hex,
+                                elapsed
+                            );
+                        }
                         connection.on_timeout();
                     }
                 }
@@ -823,6 +923,7 @@ fn run_server_worker(
         for id in to_close {
             conns.remove(&id);
             announced.remove(&id);
+            start_times.remove(&id);
         }
 
     }
@@ -865,6 +966,21 @@ fn sha256_hex(data: &[u8]) -> String {
 
 fn hex_string(data: &[u8]) -> String {
     data.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn short_hex(hex: &str) -> String {
+    let trimmed = hex.trim();
+    if trimmed.len() <= 12 {
+        return trimmed.to_string();
+    }
+    let prefix_len = 6.min(trimmed.len());
+    let suffix_len = 4.min(trimmed.len().saturating_sub(prefix_len));
+    let suffix_start = trimmed.len().saturating_sub(suffix_len);
+    format!(
+        "{}...{}",
+        &trimmed[..prefix_len],
+        &trimmed[suffix_start..]
+    )
 }
 
 fn post_event(port: i64, event: QuicEvent) {

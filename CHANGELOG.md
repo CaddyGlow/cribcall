@@ -1,9 +1,13 @@
 # Changelog
 
 ## Unreleased
- - Task: plan-control-stream — Fixed cribcall_quic loading on Darwin by preferring process/executable handles (static Cargokit outputs) with framework/dylib fallback and added Linux bundle-path fallback (`<exe>/lib/libcribcall_quic.so`) plus RFC8410-wrapped Ed25519 PKCS#8 keys to avoid cert_load_error during native QUIC startup across platforms.
+- Task: rustup-toolchain — Exported ANDROID_SDK_ROOT/ANDROID_NDK_HOME defaults in the Nix dev shell so Cargokit Android builds can find the NDK.
+- Task: rustup-toolchain — Updated flake dev shell to read rust-toolchain.toml, surface rustup-managed toolchain paths, and add bindgen/clang env for native Rust builds.
+- Task: rustup-toolchain — Dropped the fenix Rust overlay from the dev shell so Rust installs are managed via rustup instead.
+- Task: plan-control-stream — Fixed cribcall_quic loading on Darwin by preferring process/executable handles (static Cargokit outputs) with framework/dylib fallback and added Linux bundle-path fallback (`<exe>/lib/libcribcall_quic.so`) plus RFC8410-wrapped Ed25519 PKCS#8 keys to avoid cert_load_error during native QUIC startup across platforms.
 - Task: plan-control-stream — Implemented QUIC control connection events plus a ControlChannel wrapper with send queueing, connection state/error mapping, and tests to kick off the plan’s code work.
 - Task: plan-control-stream — Wired monitor QUIC server/controller startup with trusted listener allowlist and listener-side control client connect hook using the new ControlChannel scaffolding.
+- Task: plan-control-stream — Added QUIC client/server debug logging (Rust + Dart) with idempotent logger init (Android logs tagged `cribcall_quic`) to trace connection setup/teardown and fingerprint checks for connection debugging.
 - Task: plan-control-stream — Added a detailed control channel + WebRTC stream integration plan (QUIC wiring, pairing enforcement, heartbeat, and media handoff).
 - Task: plan-control-stream — Hydrate listener PIN sessions from `PIN_REQUIRED` so PIN submissions no longer return `NO_SESSION`, keep attempts alive for control-channel retries, and cover the flow with a PIN_REQUIRED test.
 - Task: presence-mdns — Auto-start monitor mDNS advertisements when monitoring is enabled and add a TTL-based heartbeat for discovered monitors so listener online/offline reflects current presence after pairing.

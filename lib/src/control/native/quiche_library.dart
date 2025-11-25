@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:developer' as developer;
 import 'dart:io';
 
 import 'package:cryptography/cryptography.dart';
@@ -18,6 +19,10 @@ class QuicheLibrary {
     required String expectedServerFingerprint,
     required DeviceIdentity identity,
   }) async {
+    _logQuic(
+      'Starting QUIC client to $host:$port '
+      '(expected server fp ${_shortFingerprint(expectedServerFingerprint)})',
+    );
     _native.initLogging();
     final identityFiles = await _writeIdentity(identity);
     final config = _native.createConfig();
@@ -29,6 +34,10 @@ class QuicheLibrary {
       expectedServerFingerprint: expectedServerFingerprint,
       certPemPath: identityFiles.certPath,
       keyPemPath: identityFiles.keyPath,
+    );
+    _logQuic(
+      'QUIC client handle=${connection.handle} using identity dir '
+      '${identityFiles.dir.path}',
     );
     return QuicheConnectionResources(
       native: connection,
@@ -42,6 +51,10 @@ class QuicheLibrary {
     String bindAddress = '0.0.0.0',
     List<String> trustedFingerprints = const [],
   }) async {
+    _logQuic(
+      'Starting QUIC server on $bindAddress:$port '
+      '(trusted allowlist count=${trustedFingerprints.length})',
+    );
     _native.initLogging();
     final identityFiles = await _writeIdentity(identity);
     final config = _native.createConfig();
@@ -52,6 +65,10 @@ class QuicheLibrary {
       certPemPath: identityFiles.certPath,
       keyPemPath: identityFiles.keyPath,
       trustedFingerprints: trustedFingerprints,
+    );
+    _logQuic(
+      'QUIC server handle=${connection.handle} using identity dir '
+      '${identityFiles.dir.path}',
     );
     return QuicheConnectionResources(
       native: connection,
@@ -105,4 +122,17 @@ String _pemEncode(String label, List<int> derBytes) {
     ..writeln('-----END $label-----')
     ..write('\n');
   return buffer.toString();
+}
+
+void _logQuic(String message) {
+  developer.log(message, name: 'quiche');
+}
+
+String _shortFingerprint(String fingerprint) {
+  if (fingerprint.length <= 12) {
+    return fingerprint;
+  }
+  final prefix = fingerprint.substring(0, 6);
+  final suffix = fingerprint.substring(fingerprint.length - 4);
+  return '$prefix...$suffix';
 }
