@@ -61,7 +61,8 @@ class MethodChannelMdnsService implements MdnsService {
     developer.log(
       'Starting platform mDNS advertise '
       'monitorId=${advertisement.monitorId} '
-      'port=${advertisement.servicePort} '
+      'controlPort=${advertisement.controlPort} '
+      'pairingPort=${advertisement.pairingPort} '
       'fp=${_shortFingerprint(advertisement.monitorCertFingerprint)}',
       name: 'mdns',
     );
@@ -121,9 +122,11 @@ class DesktopMdnsService implements MdnsService {
       final monitorName = attributes['monitorName'] ?? srv.target;
       final fingerprint = attributes['monitorCertFingerprint'] ?? '';
       final transport = attributes['transport'] ?? kTransportHttpWs;
+      final controlPortAttr = int.tryParse(attributes['controlPort'] ?? '') ?? srv.port;
+      final pairingPortAttr = int.tryParse(attributes['pairingPort'] ?? '') ?? kPairingDefaultPort;
       developer.log(
         'mDNS found monitor=$monitorId ip=${addressRecord?.address.address ?? 'unknown'} '
-        'port=${srv.port} transport=$transport '
+        'controlPort=$controlPortAttr pairingPort=$pairingPortAttr transport=$transport '
         'fp=${_shortFingerprint(fingerprint)}',
         name: 'mdns',
       );
@@ -131,7 +134,8 @@ class DesktopMdnsService implements MdnsService {
         monitorId: monitorId,
         monitorName: monitorName,
         monitorCertFingerprint: fingerprint,
-        servicePort: srv.port,
+        controlPort: controlPortAttr,
+        pairingPort: pairingPortAttr,
         version: int.tryParse(attributes['version'] ?? '1') ?? 1,
         transport: transport,
         ip: addressRecord?.address.address,
@@ -145,17 +149,19 @@ class DesktopMdnsService implements MdnsService {
     try {
       developer.log(
         'Publishing desktop mDNS monitorId=${advertisement.monitorId} '
-        'port=${advertisement.servicePort} '
+        'controlPort=${advertisement.controlPort} pairingPort=${advertisement.pairingPort} '
         'fp=${_shortFingerprint(advertisement.monitorCertFingerprint)}',
         name: 'mdns',
       );
       _advertiseProcess = await Process.start('avahi-publish-service', [
         '${advertisement.monitorName}-${advertisement.monitorId}',
         '_baby-monitor._tcp',
-        advertisement.servicePort.toString(),
+        advertisement.controlPort.toString(),
         'monitorId=${advertisement.monitorId}',
         'monitorName=${advertisement.monitorName}',
         'monitorCertFingerprint=${advertisement.monitorCertFingerprint}',
+        'controlPort=${advertisement.controlPort}',
+        'pairingPort=${advertisement.pairingPort}',
         'version=${advertisement.version}',
         'transport=${advertisement.transport}',
       ]);

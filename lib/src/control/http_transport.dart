@@ -82,7 +82,9 @@ class HttpControlServer implements ControlServer {
           final pem = encodePem('CERTIFICATE', certDer);
           context.setTrustedCertificatesBytes(utf8.encode(pem));
           context.setClientAuthoritiesBytes(utf8.encode(pem));
-          _logHttp('Added trusted client cert: ${_shortFingerprint(_fingerprintHex(certDer))}');
+          _logHttp(
+            'Added trusted client cert: ${_shortFingerprint(_fingerprintHex(certDer))}',
+          );
         } catch (e) {
           _logHttp('Failed to add trusted client certificate: $e');
         }
@@ -298,8 +300,9 @@ class HttpControlServer implements ControlServer {
       return _rejectUpgrade(request, 'client certificate required');
     }
     String computedFingerprint = '';
+    List<int>? clientCertDer;
     if (clientCert != null) {
-      final clientCertDer = clientCert.der;
+      clientCertDer = clientCert.der;
       computedFingerprint = _fingerprintHex(clientCertDer);
     }
     final trusted = _trustedFingerprints.contains(computedFingerprint);
@@ -331,6 +334,7 @@ class HttpControlServer implements ControlServer {
       socket: socket,
       peerFingerprint: computedFingerprint,
       connectionId: connectionId,
+      peerCertificateDer: clientCertDer,
       restrictToPairing: !trusted,
     );
     _connections.add(connection);
@@ -592,12 +596,14 @@ class HttpControlConnection extends ControlConnection {
     required this.socket,
     required this.peerFingerprint,
     required this.connectionId,
+    this.peerCertificateDer,
     bool restrictToPairing = false,
   }) {
     _logHttp(
       'HTTP control connection established '
       'connId=$connectionId '
       'peerFp=${_shortFingerprint(peerFingerprint)} '
+      'hasCertDer=${peerCertificateDer != null} '
       'restrictToPairing=$restrictToPairing '
       'remote=${remoteDescription.host}:${remoteDescription.port}',
     );
@@ -626,6 +632,9 @@ class HttpControlConnection extends ControlConnection {
   final WebSocket socket;
   final String peerFingerprint;
   final String connectionId;
+  /// Full DER-encoded certificate of the peer, if available.
+  /// Used to store and trust the peer's certificate for future mTLS connections.
+  final List<int>? peerCertificateDer;
   bool _restrictToPairing = false;
 
   final ControlFrameDecoder _decoder = ControlFrameDecoder();

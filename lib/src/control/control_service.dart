@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:developer' as developer;
-import 'dart:convert';
+
 import '../foundation/foundation_stub.dart'
     if (dart.library.ui) 'package:flutter/foundation.dart';
 
@@ -9,42 +9,185 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../config/build_flags.dart';
 import '../domain/models.dart';
 import '../identity/device_identity.dart';
-import '../pairing/pin_pairing_controller.dart';
 import '../state/app_state.dart';
-import 'control_channel.dart';
-import 'control_message.dart';
-import 'control_transport.dart';
-import 'http_transport.dart';
+import 'control_connection.dart';
+import 'control_messages.dart';
+import 'control_server.dart' as server;
+import 'pairing_server.dart';
+import 'control_client.dart' as client;
+import '../fcm/fcm_sender.dart';
+import '../fcm/fcm_service.dart';
 
-class ControlTransports {
-  const ControlTransports({
-    required this.defaultTransport,
-    required this.httpClient,
-    required this.httpServer,
+// -----------------------------------------------------------------------------
+// Pairing Server Controller (Monitor side - TLS only)
+// -----------------------------------------------------------------------------
+
+enum PairingServerStatus { stopped, starting, running, error }
+
+/// Info about an active pairing session awaiting confirmation.
+class ActivePairingSession {
+  const ActivePairingSession({
+    required this.sessionId,
+    required this.comparisonCode,
+    required this.expiresAt,
   });
 
-  final String defaultTransport;
-  final ControlClient httpClient;
-  final ControlServer httpServer;
+  final String sessionId;
+  /// 6-digit comparison code to display to the user
+  final String comparisonCode;
+  final DateTime expiresAt;
 
-  ControlClient? clientFor(String transport) {
-    if (transport == kTransportHttpWs) return httpClient;
-    return null;
-  }
+  bool get expired => DateTime.now().isAfter(expiresAt);
+}
 
-  ControlServer? serverFor(String transport) {
-    if (transport == kTransportHttpWs) return httpServer;
-    return null;
-  }
+class PairingServerState {
+  const PairingServerState._({
+    required this.status,
+    this.port,
+    this.fingerprint,
+    this.error,
+    this.activeSession,
+  });
 
-  factory ControlTransports.create() {
-    return ControlTransports(
-      defaultTransport: kDefaultControlTransport,
-      httpClient: HttpControlClient(),
-      httpServer: HttpControlServer(),
+  const PairingServerState.stopped()
+    : this._(status: PairingServerStatus.stopped);
+
+  const PairingServerState.starting({required int port, required String fingerprint})
+    : this._(status: PairingServerStatus.starting, port: port, fingerprint: fingerprint);
+
+  const PairingServerState.running({required int port, required String fingerprint, ActivePairingSession? activeSession})
+    : this._(status: PairingServerStatus.running, port: port, fingerprint: fingerprint, activeSession: activeSession);
+
+  const PairingServerState.error({required String error, int? port, String? fingerprint})
+    : this._(status: PairingServerStatus.error, port: port, fingerprint: fingerprint, error: error);
+
+  final PairingServerStatus status;
+  final int? port;
+  final String? fingerprint;
+  final String? error;
+  /// Active pairing session awaiting user confirmation (if any)
+  final ActivePairingSession? activeSession;
+
+  /// Creates a copy with updated active session
+  PairingServerState copyWithSession(ActivePairingSession? session) {
+    return PairingServerState._(
+      status: status,
+      port: port,
+      fingerprint: fingerprint,
+      error: error,
+      activeSession: session,
     );
   }
 }
+
+class PairingServerController extends Notifier<PairingServerState> {
+  PairingServer? _server;
+  bool _starting = false;
+
+  @override
+  PairingServerState build() {
+    ref.onDispose(_shutdown);
+    return const PairingServerState.stopped();
+  }
+
+  Future<void> start({
+    required DeviceIdentity identity,
+    required int port,
+    required String monitorName,
+  }) async {
+    if (_starting) return;
+    _starting = true;
+
+    _logPairing(
+      'Starting pairing server port=$port '
+      'fingerprint=${_shortFingerprint(identity.certFingerprint)}',
+    );
+
+    state = PairingServerState.starting(
+      port: port,
+      fingerprint: identity.certFingerprint,
+    );
+
+    try {
+      _server ??= PairingServer(
+        onPairingComplete: _onPairingComplete,
+        onSessionCreated: _onSessionCreated,
+      );
+
+      await _server!.start(
+        port: port,
+        identity: identity,
+        monitorName: monitorName,
+      );
+
+      final actualPort = _server!.boundPort ?? port;
+      _logPairing(
+        'Pairing server running on port $actualPort '
+        'fingerprint=${_shortFingerprint(identity.certFingerprint)}',
+      );
+
+      state = PairingServerState.running(
+        port: actualPort,
+        fingerprint: identity.certFingerprint,
+      );
+    } catch (e) {
+      _logPairing('Pairing server start failed: $e');
+      state = PairingServerState.error(
+        error: '$e',
+        port: port,
+        fingerprint: identity.certFingerprint,
+      );
+    } finally {
+      _starting = false;
+    }
+  }
+
+  void _onSessionCreated(String sessionId, String comparisonCode, DateTime expiresAt) {
+    _logPairing(
+      'Pairing session created: sessionId=$sessionId '
+      'comparisonCode=$comparisonCode expiresAt=$expiresAt',
+    );
+    // Update state with active session
+    state = state.copyWithSession(ActivePairingSession(
+      sessionId: sessionId,
+      comparisonCode: comparisonCode,
+      expiresAt: expiresAt,
+    ));
+  }
+
+  void _onPairingComplete(TrustedPeer peer) {
+    _logPairing(
+      'Pairing complete: deviceId=${peer.deviceId} '
+      'name=${peer.name} '
+      'fingerprint=${_shortFingerprint(peer.certFingerprint)}',
+    );
+    // Clear active session and persist trusted listener
+    state = state.copyWithSession(null);
+    ref.read(trustedListenersProvider.notifier).addListener(peer);
+  }
+
+  /// Clears the active pairing session (e.g., if user cancels or session expires)
+  void clearSession() {
+    state = state.copyWithSession(null);
+  }
+
+  Future<void> stop() => _shutdown();
+
+  Future<void> _shutdown() async {
+    _logPairing('Stopping pairing server');
+    try {
+      await _server?.stop();
+    } catch (_) {}
+    _server = null;
+    if (state.status != PairingServerStatus.stopped) {
+      state = const PairingServerState.stopped();
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Control Server Controller (Monitor side - mTLS WebSocket)
+// -----------------------------------------------------------------------------
 
 enum ControlServerStatus { stopped, starting, running, error }
 
@@ -103,108 +246,70 @@ class ControlServerState {
 }
 
 class ControlServerController extends Notifier<ControlServerState> {
-  ControlServerController({ControlTransports? transports})
-    : _transports = transports;
-
-  final ControlTransports? _transports;
-  ControlTransports? _resolvedTransports;
-  ControlServer? _server;
-  _ServerConfig? _activeConfig;
+  server.ControlServer? _server;
   bool _starting = false;
-  DeviceIdentity? _identity;
+  final Map<String, ControlConnection> _connections = {};
+  StreamSubscription<server.ControlServerEvent>? _eventSub;
+  FcmSender? _fcmSender;
 
   @override
   ControlServerState build() {
-    try {
-      _resolvedTransports = _transports ?? ControlTransports.create();
-    } catch (e) {
-      _server = const UnsupportedControlServer();
-      final errorState = ControlServerState.error(
-        error: 'Failed to load control transports: $e',
-      );
-      state = errorState;
-      ref.onDispose(() => _shutdown());
-      return errorState;
-    }
-    ref.onDispose(() => _shutdown());
+    ref.onDispose(_shutdown);
     return const ControlServerState.stopped();
   }
 
   Future<void> start({
     required DeviceIdentity identity,
     required int port,
-    required List<String> trustedFingerprints,
-    List<List<int>> trustedClientCertificates = const [],
+    required List<TrustedPeer> trustedPeers,
   }) async {
     if (_starting) return;
-    _resolvedTransports ??= _transports ?? ControlTransports.create();
-    final transportKey = _resolvedTransports!.defaultTransport;
-    final server = _resolvedTransports!.serverFor(transportKey);
-    _logControlServer(
-      'Starting control server transport=$transportKey port=$port '
+    _starting = true;
+
+    final trustedFingerprints = trustedPeers.map((p) => p.certFingerprint).toList();
+
+    _logControl(
+      'Starting control server port=$port '
       'trusted=${trustedFingerprints.length} '
       'fingerprint=${_shortFingerprint(identity.certFingerprint)}',
     );
-    if (server == null || server is UnsupportedControlServer) {
-      state = ControlServerState.error(
-        error: 'Control transport ($transportKey) not available',
-        port: port,
-        trustedFingerprints: trustedFingerprints,
-        fingerprint: identity.certFingerprint,
-      );
-      return;
-    }
-    // Stop any running server without clearing the selected instance.
-    if (_server != null) {
-      try {
-        await _server?.stop();
-      } catch (_) {
-        // Best-effort stop; ignore errors.
-      }
-      _activeConfig = null;
-    }
-    _server = server;
-    final config = _ServerConfig(port, trustedFingerprints, transportKey);
-    if (_activeConfig == config &&
-        state.status == ControlServerStatus.running) {
-      return;
-    }
-    _starting = true;
-    _identity = identity;
+
     state = ControlServerState.starting(
       port: port,
       trustedFingerprints: trustedFingerprints,
       fingerprint: identity.certFingerprint,
     );
+
     try {
-      // Set up pairing message handler before starting
-      if (server is HttpControlServer) {
-        _logControlServer('Registering pairing message handler');
-        server.setPairingMessageHandler(_handlePairingMessage);
-      }
+      _server ??= server.ControlServer();
+
       await _server!.start(
         port: port,
-        serverIdentity: identity,
-        trustedListenerFingerprints: trustedFingerprints,
-        trustedClientCertificates: trustedClientCertificates,
+        identity: identity,
+        trustedPeers: trustedPeers,
       );
-      final actualPort = _serverPort(port);
-      _activeConfig = config;
-      _logControlServer(
-        'Control server running on $actualPort '
+
+      // Listen for server events (new connections, etc.)
+      _eventSub?.cancel();
+      _eventSub = _server!.events.listen(_handleServerEvent);
+
+      final actualPort = _server!.boundPort ?? port;
+      _logControl(
+        'Control server running on port $actualPort '
         'trusted=${trustedFingerprints.length} '
         'fingerprint=${_shortFingerprint(identity.certFingerprint)}',
       );
+
       state = ControlServerState.running(
         port: actualPort,
         trustedFingerprints: trustedFingerprints,
         fingerprint: identity.certFingerprint,
       );
     } catch (e) {
-      _logControlServer('Control server start failed: $e');
+      _logControl('Control server start failed: $e');
       state = ControlServerState.error(
         error: '$e',
-        port: _serverPort(port),
+        port: port,
         trustedFingerprints: trustedFingerprints,
         fingerprint: identity.certFingerprint,
       );
@@ -213,164 +318,216 @@ class ControlServerController extends Notifier<ControlServerState> {
     }
   }
 
-  /// Handles incoming pairing messages from untrusted clients.
-  Future<void> _handlePairingMessage(
-    ControlMessage message,
-    HttpControlConnection connection,
-  ) async {
-    _logControlServer(
-      'Handling pairing message ${message.type.name} '
-      'from connId=${connection.connectionId} '
-      'peerFp=${_shortFingerprint(connection.peerFingerprint)}',
-    );
-
-    if (message is PinPairingInitMessage) {
-      _logControlServer(
-        'Received PIN_PAIRING_INIT:\n'
-        '  listenerId=${message.listenerId}\n'
-        '  listenerName=${message.listenerName}\n'
-        '  listenerCertFingerprint=${_shortFingerprint(message.listenerCertFingerprint)}',
-      );
-
-      // Check if we have an active PIN session
-      final pinController = ref.read(pinSessionProvider.notifier);
-      final currentSession = ref.read(pinSessionProvider);
-
-      if (currentSession == null) {
-        _logControlServer(
-          'No active PIN session on monitor - rejecting PIN_PAIRING_INIT\n'
-          '  HINT: Monitor user must tap "Start PIN session" first',
-        );
-        // Send rejection
-        await connection.sendMessage(
-          PairRejectedMessage(reason: 'No active PIN session on monitor'),
-        );
-        return;
-      }
-
-      if (currentSession.expired) {
-        _logControlServer('PIN session expired - rejecting PIN_PAIRING_INIT');
-        await connection.sendMessage(
-          PairRejectedMessage(reason: 'PIN session expired'),
-        );
-        return;
-      }
-
-      // Send PIN_REQUIRED with session details
-      final pinRequired = PinRequiredMessage(
-        pairingSessionId: currentSession.sessionId,
-        pakeMsgA: currentSession.pakeMsgA,
-        expiresInSec: currentSession.expiresAt
-            .difference(DateTime.now())
-            .inSeconds
-            .clamp(0, 60),
-        maxAttempts: currentSession.maxAttempts,
-      );
-      _logControlServer(
-        'Sending PIN_REQUIRED response:\n'
-        '  sessionId=${pinRequired.pairingSessionId}\n'
-        '  expiresInSec=${pinRequired.expiresInSec}',
-      );
-      await connection.sendMessage(pinRequired);
-    } else if (message is PinSubmitMessage) {
-      _logControlServer(
-        'Received PIN_SUBMIT:\n'
-        '  pairingSessionId=${message.pairingSessionId}',
-      );
-      // TODO: Validate PIN_SUBMIT and respond with PAIR_ACCEPTED/REJECTED
-      // For now, just log it
-      _logControlServer(
-        'PIN_SUBMIT handling not yet implemented - '
-        'pairing will complete on listener side only',
-      );
-    } else if (message is PairRequestMessage) {
-      final monitorIdentity = _identity;
-      _logControlServer(
-        'Received PAIR_REQUEST:\n'
-        '  listenerId=${message.listenerId}\n'
-        '  listenerName=${message.listenerName}\n'
-        '  listenerCertFingerprint=${_shortFingerprint(message.listenerCertFingerprint)}\n'
-        '  peerFp=${_shortFingerprint(connection.peerFingerprint)}',
-      );
-      if (monitorIdentity == null) {
-        _logControlServer(
-          'Monitor identity unavailable, rejecting PAIR_REQUEST '
-          'peerFp=${_shortFingerprint(connection.peerFingerprint)}',
-        );
-        await connection.sendMessage(
-          PairRejectedMessage(reason: 'monitor identity unavailable'),
-        );
-        return;
-      }
-      if (message.listenerCertFingerprint != connection.peerFingerprint) {
-        _logControlServer(
-          'PAIR_REQUEST fingerprint mismatch '
-          'msg=${_shortFingerprint(message.listenerCertFingerprint)} '
+  void _handleServerEvent(server.ControlServerEvent event) {
+    switch (event) {
+      case server.ClientConnected(:final connection):
+        _logControl(
+          'Client connected: ${connection.connectionId} '
           'peer=${_shortFingerprint(connection.peerFingerprint)}',
         );
-        await connection.sendMessage(
-          PairRejectedMessage(reason: 'fingerprint mismatch'),
-        );
+        _connections[connection.connectionId] = connection;
+        _listenToConnection(connection);
+      case server.ClientDisconnected(:final connectionId, :final reason):
+        _logControl('Client disconnected: $connectionId reason=$reason');
+        _connections.remove(connectionId);
+    }
+  }
+
+  void _listenToConnection(ControlConnection connection) {
+    connection.messages.listen(
+      (message) => _handleMessage(connection, message),
+      onError: (e) => _logControl('Connection error ${connection.connectionId}: $e'),
+      onDone: () => _connections.remove(connection.connectionId),
+    );
+  }
+
+  void _handleMessage(ControlConnection connection, ControlMessage message) {
+    _logControl(
+      'Received ${message.type.name} from ${connection.connectionId}',
+    );
+    // Handle control messages
+    switch (message) {
+      case FcmTokenUpdateMessage(:final fcmToken, :final listenerId):
+        _handleFcmTokenUpdate(listenerId, fcmToken);
+      default:
+        // Other message types handled as needed
+        break;
+    }
+  }
+
+  /// Handle FCM token update from a listener.
+  Future<void> _handleFcmTokenUpdate(String listenerId, String fcmToken) async {
+    _logControl('FCM token update from listener=$listenerId');
+    await ref.read(trustedListenersProvider.notifier).updateFcmToken(
+      listenerId,
+      fcmToken,
+    );
+  }
+
+  /// Add a newly paired peer to the trusted list.
+  /// Uses hot reload to update the server without restart.
+  Future<void> addTrustedPeer(TrustedPeer peer) async {
+    final srv = _server;
+    if (srv == null) return;
+
+    _logControl(
+      'Adding trusted peer: ${peer.deviceId} '
+      'fingerprint=${_shortFingerprint(peer.certFingerprint)}',
+    );
+    await srv.addTrustedPeer(peer);
+
+    // Update state with new trusted list
+    final newFingerprints = [...state.trustedFingerprints, peer.certFingerprint];
+    state = ControlServerState.running(
+      port: state.port ?? kControlDefaultPort,
+      trustedFingerprints: newFingerprints,
+      fingerprint: state.fingerprint ?? '',
+    );
+  }
+
+  /// Remove a peer from the trusted list.
+  Future<void> removeTrustedPeer(String fingerprint) async {
+    final srv = _server;
+    if (srv == null) return;
+
+    _logControl('Removing trusted peer: fingerprint=${_shortFingerprint(fingerprint)}');
+    await srv.removeTrustedPeer(fingerprint);
+
+    // Update state
+    final newFingerprints = state.trustedFingerprints
+        .where((fp) => fp != fingerprint)
+        .toList();
+    state = ControlServerState.running(
+      port: state.port ?? kControlDefaultPort,
+      trustedFingerprints: newFingerprints,
+      fingerprint: state.fingerprint ?? '',
+    );
+  }
+
+  /// Broadcast a message to all connected clients.
+  Future<void> broadcast(ControlMessage message) async {
+    _logControl('Broadcasting ${message.type.name} to ${_connections.length} clients');
+    for (final conn in _connections.values) {
+      try {
+        await conn.send(message);
+      } catch (e) {
+        _logControl('Broadcast to ${conn.connectionId} failed: $e');
+      }
+    }
+  }
+
+  /// Send a message to a specific connection.
+  Future<void> sendTo(String connectionId, ControlMessage message) async {
+    final conn = _connections[connectionId];
+    if (conn == null) {
+      _logControl('Cannot send to $connectionId - not connected');
+      return;
+    }
+    await conn.send(message);
+  }
+
+  /// Broadcast a noise event to all connected listeners via WebSocket AND FCM.
+  Future<void> broadcastNoiseEvent({
+    required int timestampMs,
+    required int peakLevel,
+  }) async {
+    final monitorId = state.fingerprint ?? '';
+    final message = NoiseEventMessage(
+      monitorId: monitorId,
+      timestamp: timestampMs,
+      peakLevel: peakLevel,
+    );
+
+    // Path 1: WebSocket broadcast to connected clients
+    await broadcast(message);
+
+    // Path 2: FCM push to all trusted listeners (even if not currently connected)
+    await _sendNoiseEventViaFcm(
+      monitorId: monitorId,
+      timestamp: timestampMs,
+      peakLevel: peakLevel,
+    );
+  }
+
+  /// Send noise event via FCM Cloud Function.
+  Future<void> _sendNoiseEventViaFcm({
+    required String monitorId,
+    required int timestamp,
+    required int peakLevel,
+  }) async {
+    // Get all trusted listeners with FCM tokens
+    final trustedListeners =
+        ref.read(trustedListenersProvider).asData?.value ?? [];
+    final fcmTokens = trustedListeners
+        .where((p) => p.fcmToken != null && p.fcmToken!.isNotEmpty)
+        .map((p) => p.fcmToken!)
+        .toList();
+
+    if (fcmTokens.isEmpty) {
+      _logControl('No FCM tokens available, skipping push');
+      return;
+    }
+
+    // Get monitor name for notification
+    final monitorSettings = ref.read(monitorSettingsProvider).asData?.value;
+    final monitorName = monitorSettings?.name ?? 'Monitor';
+
+    try {
+      _fcmSender ??= FcmSender();
+
+      if (!_fcmSender!.isEnabled) {
+        _logControl('FCM not configured, skipping push');
         return;
       }
-      _logControlServer(
-        'PAIR_REQUEST accepted; persisting trusted listener '
-        'listenerId=${message.listenerId} '
-        'listenerName=${message.listenerName} '
-        'fingerprint=${_shortFingerprint(message.listenerCertFingerprint)}',
+
+      final result = await _fcmSender!.sendNoiseEvent(
+        monitorId: monitorId,
+        monitorName: monitorName,
+        timestamp: timestamp,
+        peakLevel: peakLevel,
+        fcmTokens: fcmTokens,
       );
-      final peer = TrustedPeer(
-        deviceId: message.listenerId,
-        name: message.listenerName,
-        certFingerprint: message.listenerCertFingerprint,
-        addedAtEpochSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+
+      _logControl(
+        'FCM sent: success=${result.success} failure=${result.failure}',
       );
-      await ref.read(trustedListenersProvider.notifier).addListener(peer);
-      _logControlServer(
-        'Trusted listener persisted '
-        'count=${ref.read(trustedListenersProvider).value?.length ?? 0}',
-      );
-      final server = _server;
-      if (server is HttpControlServer) {
-        server.addTrustedFingerprint(peer.certFingerprint);
+
+      // Clean up invalid tokens
+      if (result.invalidTokens.isNotEmpty) {
+        for (final token in result.invalidTokens) {
+          await ref
+              .read(trustedListenersProvider.notifier)
+              .clearFcmTokenByToken(token);
+        }
       }
-      connection.elevateToTrusted();
-      await connection.sendMessage(
-        PairAcceptedMessage(monitorId: monitorIdentity.deviceId),
-      );
-      _logControlServer(
-        'Trusted listener added from QR pairing '
-        'listenerId=${peer.deviceId} '
-        'fingerprint=${_shortFingerprint(peer.certFingerprint)}',
-      );
+    } catch (e) {
+      _logControl('FCM send error: $e');
+      // Don't throw - WebSocket delivery is primary path
     }
   }
 
   Future<void> stop() => _shutdown();
 
   Future<void> _shutdown() async {
-    _logControlServer('Stopping control server (status=${state.status.name})');
-    _activeConfig = null;
-    _identity = null;
+    _logControl('Stopping control server');
+    _eventSub?.cancel();
+    _eventSub = null;
+    _connections.clear();
+    _fcmSender?.dispose();
+    _fcmSender = null;
     try {
       await _server?.stop();
-    } catch (_) {
-      // Ignore stop errors; stopping should be best-effort.
-    }
+    } catch (_) {}
     _server = null;
     if (state.status != ControlServerStatus.stopped) {
       state = const ControlServerState.stopped();
     }
   }
-
-  int _serverPort(int requested) {
-    final server = _server;
-    if (server is HttpControlServer) {
-      return server.boundPort ?? requested;
-    }
-    return requested;
-  }
 }
+
+// -----------------------------------------------------------------------------
+// Control Client Controller (Listener side - connects to monitor)
+// -----------------------------------------------------------------------------
 
 enum ControlClientStatus { idle, connecting, connected, error }
 
@@ -381,7 +538,7 @@ class ControlClientState {
     this.monitorName,
     this.connectionId,
     this.peerFingerprint,
-    this.failure,
+    this.error,
   });
 
   const ControlClientState.idle() : this._(status: ControlClientStatus.idle);
@@ -413,12 +570,12 @@ class ControlClientState {
   const ControlClientState.error({
     required String monitorId,
     required String monitorName,
-    required ControlFailure failure,
+    required String error,
   }) : this._(
          status: ControlClientStatus.error,
          monitorId: monitorId,
          monitorName: monitorName,
-         failure: failure,
+         error: error,
        );
 
   final ControlClientStatus status;
@@ -426,255 +583,233 @@ class ControlClientState {
   final String? monitorName;
   final String? connectionId;
   final String? peerFingerprint;
-  final ControlFailure? failure;
+  final String? error;
 }
 
 class ControlClientController extends Notifier<ControlClientState> {
-  ControlClientController({ControlTransports? transports})
-    : _transports = transports;
-
-  final ControlTransports? _transports;
-  ControlTransports? _resolvedTransports;
-  ControlChannel? _channel;
-  StreamSubscription<ControlChannelState>? _channelSub;
+  client.ControlClient? _client;
+  ControlConnection? _connection;
+  StreamSubscription<ControlMessage>? _messageSub;
 
   @override
   ControlClientState build() {
-    try {
-      _resolvedTransports = _transports ?? ControlTransports.create();
-    } catch (e) {
-      final errorState = ControlClientState.error(
-        monitorId: '',
-        monitorName: '',
-        failure: ControlFailure(
-          ControlFailureType.transport,
-          'Failed to load control transports: $e',
-        ),
-      );
-      state = errorState;
-      ref.onDispose(() => disconnect());
-      return errorState;
-    }
-    ref.onDispose(() => disconnect());
+    ref.onDispose(_shutdown);
     return const ControlClientState.idle();
   }
 
-  Future<ControlFailure?> connectToMonitor({
+  /// Connect to a monitor's control server.
+  Future<String?> connectToMonitor({
     required MdnsAdvertisement advertisement,
     required TrustedMonitor monitor,
     required DeviceIdentity identity,
   }) async {
-    _resolvedTransports ??= _transports ?? ControlTransports.create();
     await disconnect();
-    final transportKey = advertisement.transport;
-    final client = _resolvedTransports?.clientFor(transportKey);
-    if (client == null || client is UnsupportedControlClient) {
-      final failure = ControlFailure(
-        ControlFailureType.transport,
-        'Control transport ($transportKey) not available in this build',
-      );
-      state = ControlClientState.error(
-        monitorId: monitor.monitorId,
-        monitorName: monitor.monitorName,
-        failure: failure,
-      );
-      return failure;
-    }
+
     final ip = advertisement.ip;
     if (ip == null) {
-      final failure = ControlFailure(
-        ControlFailureType.unknown,
-        'Monitor is offline or missing IP address',
-      );
+      const error = 'Monitor is offline or missing IP address';
       state = ControlClientState.error(
         monitorId: monitor.monitorId,
         monitorName: monitor.monitorName,
-        failure: failure,
+        error: error,
       );
-      return failure;
+      return error;
     }
+
     state = ControlClientState.connecting(
       monitorId: monitor.monitorId,
       monitorName: monitor.monitorName,
       peerFingerprint: monitor.certFingerprint,
     );
-    _logControlClient(
+
+    _logClient(
       'Connecting to monitor=${monitor.monitorId} '
       'name=${monitor.monitorName} '
-      'ip=$ip '
-      'port=${advertisement.servicePort} '
-      'transport=$transportKey '
+      'ip=$ip port=${advertisement.controlPort} '
       'expectedFp=${_shortFingerprint(monitor.certFingerprint)}',
     );
+
     try {
-      final endpoint = ControlEndpoint(
+      _client ??= client.ControlClient(identity: identity);
+
+      _connection = await _client!.connect(
         host: ip,
-        port: advertisement.servicePort,
-        expectedServerFingerprint: monitor.certFingerprint,
-        transport: transportKey,
+        port: advertisement.controlPort,
+        expectedFingerprint: monitor.certFingerprint,
       );
-      final connection = await client.connect(
-        endpoint: endpoint,
-        clientIdentity: identity,
+
+      _logClient(
+        'Connected to monitor: connectionId=${_connection!.connectionId} '
+        'peer=${_shortFingerprint(_connection!.peerFingerprint)}',
       );
-      if (connection == null) {
-        final failure = ControlFailure(
-          ControlFailureType.transport,
-          'Control transport unavailable',
-        );
-        state = ControlClientState.error(
-          monitorId: monitor.monitorId,
-          monitorName: monitor.monitorName,
-          failure: failure,
-        );
-        return failure;
-      }
-      _logControlClient(
-        'Control transport connected to ${endpoint.host}:${endpoint.port} '
-        'fingerprint=${_shortFingerprint(monitor.certFingerprint)}',
+
+      // Listen for messages
+      _messageSub = _connection!.messages.listen(
+        _handleMessage,
+        onError: (e) {
+          _logClient('Connection error: $e');
+          state = ControlClientState.error(
+            monitorId: monitor.monitorId,
+            monitorName: monitor.monitorName,
+            error: '$e',
+          );
+        },
+        onDone: () {
+          _logClient('Connection closed');
+          state = const ControlClientState.idle();
+        },
       );
-      final channel = ControlChannel(connection: connection);
-      _channel = channel;
-      _channelSub = channel.states.listen((channelState) {
-        switch (channelState.status) {
-          case ControlChannelStatus.connected:
-            _logControlClient(
-              'Control channel connected '
-              'connectionId=${channelState.connectionId} '
-              'peerFp=${_shortFingerprint(channelState.peerFingerprint ?? '')}',
-            );
-            state = ControlClientState.connected(
-              monitorId: monitor.monitorId,
-              monitorName: monitor.monitorName,
-              connectionId: channelState.connectionId ?? '',
-              peerFingerprint: channelState.peerFingerprint ?? '',
-            );
-            unawaited(
-              _sendPairRequest(channel: channel, listenerIdentity: identity),
-            );
-            break;
-          case ControlChannelStatus.error:
-            final failure =
-                channelState.failure ??
-                ControlFailure(
-                  ControlFailureType.transport,
-                  'Control channel error',
-                );
-            _logControlClient(
-              'Control channel error '
-              'connectionId=${channelState.connectionId ?? ''} '
-              'peerFp=${_shortFingerprint(channelState.peerFingerprint ?? '')} '
-              'failure=${failure.type.name}: ${failure.message}',
-            );
-            state = ControlClientState.error(
-              monitorId: monitor.monitorId,
-              monitorName: monitor.monitorName,
-              failure: failure,
-            );
-            break;
-          case ControlChannelStatus.closed:
-            _logControlClient(
-              'Control channel closed '
-              'connectionId=${channelState.connectionId ?? ''}',
-            );
-            state = const ControlClientState.idle();
-            break;
-          case ControlChannelStatus.connecting:
-            break;
-        }
-      });
-      return null;
+
+      state = ControlClientState.connected(
+        monitorId: monitor.monitorId,
+        monitorName: monitor.monitorName,
+        connectionId: _connection!.connectionId,
+        peerFingerprint: _connection!.peerFingerprint,
+      );
+
+      // Send FCM token to monitor (if available)
+      await _sendFcmTokenToMonitor(identity.deviceId);
+
+      return null; // Success
     } catch (e) {
-      _logControlClient('Control client connect failed: $e');
-      final failure = ControlFailure(ControlFailureType.transport, '$e');
+      _logClient('Connection failed: $e');
+      final error = '$e';
       state = ControlClientState.error(
         monitorId: monitor.monitorId,
         monitorName: monitor.monitorName,
-        failure: failure,
+        error: error,
       );
-      return failure;
+      return error;
     }
   }
 
-  Future<void> disconnect() async {
-    _logControlClient('Disconnecting control client');
-    await _channelSub?.cancel();
-    _channelSub = null;
-    await _channel?.dispose();
-    _channel = null;
+  void _handleMessage(ControlMessage message) {
+    _logClient('Received ${message.type.name}');
+
+    switch (message) {
+      case NoiseEventMessage(:final monitorId, :final timestamp, :final peakLevel):
+        _handleNoiseEvent(monitorId, timestamp, peakLevel);
+      default:
+        // Other message types handled as needed
+        break;
+    }
+  }
+
+  /// Handle incoming noise event with deduplication.
+  void _handleNoiseEvent(String monitorId, int timestamp, int peakLevel) {
+    _logClient('Noise event: monitorId=$monitorId peakLevel=$peakLevel timestamp=$timestamp');
+
+    // Create event data for deduplication
+    final event = NoiseEventData(
+      monitorId: monitorId,
+      monitorName: state.monitorName ?? 'Monitor',
+      timestamp: timestamp,
+      peakLevel: peakLevel,
+    );
+
+    // Check if already received via FCM
+    final dedup = ref.read(noiseEventDeduplicationProvider.notifier);
+    if (!dedup.processEvent(event)) {
+      _logClient('Duplicate noise event ignored (already received via FCM)');
+      return;
+    }
+
+    // Record the noise event for this monitor
+    ref.read(trustedMonitorsProvider.notifier).recordNoiseEvent(
+      monitorId: monitorId,
+      timestampMs: timestamp,
+    );
+
+    // TODO: Trigger UI notification / sound alert
+  }
+
+  /// Send FCM token to the connected monitor.
+  Future<void> _sendFcmTokenToMonitor(String listenerId) async {
+    final fcmService = FcmService.instance;
+    final fcmToken = fcmService.currentToken;
+
+    if (fcmToken == null || fcmToken.isEmpty) {
+      _logClient('No FCM token available, skipping token sync');
+      return;
+    }
+
+    try {
+      final message = FcmTokenUpdateMessage(
+        fcmToken: fcmToken,
+        listenerId: listenerId,
+      );
+      await send(message);
+      _logClient('Sent FCM token to monitor');
+    } catch (e) {
+      _logClient('Failed to send FCM token: $e');
+    }
+  }
+
+  /// Update FCM token with the connected monitor (call when token refreshes).
+  Future<void> updateFcmToken(String listenerId, String newToken) async {
+    if (state.status != ControlClientStatus.connected) {
+      _logClient('Not connected, cannot update FCM token');
+      return;
+    }
+
+    try {
+      final message = FcmTokenUpdateMessage(
+        fcmToken: newToken,
+        listenerId: listenerId,
+      );
+      await send(message);
+      _logClient('Sent updated FCM token to monitor');
+    } catch (e) {
+      _logClient('Failed to send updated FCM token: $e');
+    }
+  }
+
+  /// Send a message to the connected monitor.
+  Future<void> send(ControlMessage message) async {
+    final conn = _connection;
+    if (conn == null) {
+      throw StateError('Not connected to monitor');
+    }
+    await conn.send(message);
+  }
+
+  Future<void> disconnect() => _shutdown();
+
+  Future<void> _shutdown() async {
+    _logClient('Disconnecting');
+    _messageSub?.cancel();
+    _messageSub = null;
+    try {
+      await _connection?.close();
+    } catch (_) {}
+    _connection = null;
+    _client = null;
     if (state.status != ControlClientStatus.idle) {
       state = const ControlClientState.idle();
     }
   }
-
-  Future<void> _sendPairRequest({
-    required ControlChannel channel,
-    required DeviceIdentity listenerIdentity,
-  }) async {
-    try {
-      final message = PairRequestMessage(
-        listenerId: listenerIdentity.deviceId,
-        listenerName: 'Listener',
-        listenerPublicKey: base64.encode(listenerIdentity.publicKey.bytes),
-        listenerCertFingerprint: listenerIdentity.certFingerprint,
-      );
-      _logControlClient(
-        'Sending PAIR_REQUEST listenerId=${message.listenerId} '
-        'fingerprint=${_shortFingerprint(message.listenerCertFingerprint)}',
-      );
-      await channel.send(message);
-      _logControlClient(
-        'PAIR_REQUEST sent; waiting for PAIR_ACCEPTED '
-        'connId=${channel.state.connectionId ?? 'unknown'}',
-      );
-    } catch (e) {
-      _logControlClient('Failed to send PAIR_REQUEST: $e');
-    }
-  }
 }
 
-class _ServerConfig {
-  _ServerConfig(this.port, List<String> trusted, this.transport)
-    : trustedFingerprints = List.of(trusted)..sort();
+// -----------------------------------------------------------------------------
+// Logging
+// -----------------------------------------------------------------------------
 
-  final int port;
-  final List<String> trustedFingerprints;
-  final String transport;
-
-  @override
-  bool operator ==(Object other) {
-    return other is _ServerConfig &&
-        other.port == port &&
-        other.transport == transport &&
-        _listsEqual(other.trustedFingerprints, trustedFingerprints);
-  }
-
-  @override
-  int get hashCode =>
-      Object.hash(port, transport, Object.hashAll(trustedFingerprints));
+void _logPairing(String message) {
+  developer.log(message, name: 'pairing_ctrl');
+  debugPrint('[pairing_ctrl] $message');
 }
 
-bool _listsEqual(List<String> a, List<String> b) {
-  if (a.length != b.length) return false;
-  for (var i = 0; i < a.length; i++) {
-    if (a[i] != b[i]) return false;
-  }
-  return true;
+void _logControl(String message) {
+  developer.log(message, name: 'control_ctrl');
+  debugPrint('[control_ctrl] $message');
 }
 
-void _logControlServer(String message) {
-  developer.log(message, name: 'control_server');
-  debugPrint('[control_server] $message');
-}
-
-void _logControlClient(String message) {
-  developer.log(message, name: 'control_client');
-  debugPrint('[control_client] $message');
+void _logClient(String message) {
+  developer.log(message, name: 'client_ctrl');
+  debugPrint('[client_ctrl] $message');
 }
 
 String _shortFingerprint(String fingerprint) {
   if (fingerprint.length <= 12) return fingerprint;
-  final prefix = fingerprint.substring(0, 6);
-  final suffix = fingerprint.substring(fingerprint.length - 4);
-  return '$prefix...$suffix';
+  return '${fingerprint.substring(0, 6)}...${fingerprint.substring(fingerprint.length - 4)}';
 }

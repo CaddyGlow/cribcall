@@ -1,63 +1,96 @@
 import 'dart:async';
-import 'dart:convert';
 
 import '../config/build_flags.dart';
-import '../control/control_channel.dart';
-import '../control/control_message.dart';
-import '../control/control_transport.dart';
-import '../control/http_transport.dart';
+import '../control/control_client.dart';
+import '../control/control_connection.dart';
+import '../control/control_messages.dart';
+import '../control/control_server.dart';
+import '../control/pairing_server.dart';
 import '../domain/models.dart';
 import '../identity/device_identity.dart';
 
+/// CLI harness for a monitor device using the two-port architecture.
+/// - PairingServer (TLS only, port 48081) for pairing new listeners
+/// - ControlServer (mTLS, port 48080) for control connections
 class MonitorCliHarness {
   MonitorCliHarness({
     required this.identity,
-    this.port = kControlDefaultPort,
-    Iterable<String> trustedFingerprints = const [],
-    bool allowUntrustedClients = false,
-    bool useTls = true,
-    this.trustedClientCertificates = const [],
+    required this.monitorName,
+    this.controlPort = kControlDefaultPort,
+    this.pairingPort = kPairingDefaultPort,
+    Iterable<TrustedPeer> trustedPeers = const [],
     this.logger,
     this.onTrustedListener,
     this.onMessage,
-    HttpControlServer? server,
-  })  : _trustedFingerprints = {...trustedFingerprints},
-        _server = server ??
-            HttpControlServer(
-              useTls: useTls,
-              allowUntrustedClients: allowUntrustedClients,
-            );
+  }) : _trustedPeers = [...trustedPeers];
 
   final DeviceIdentity identity;
-  final int port;
-  final HttpControlServer _server;
-  final Set<String> _trustedFingerprints;
-  final List<List<int>> trustedClientCertificates;
+  final String monitorName;
+  final int controlPort;
+  final int pairingPort;
+  final List<TrustedPeer> _trustedPeers;
   final void Function(String message)? logger;
   final void Function(TrustedPeer peer)? onTrustedListener;
   final void Function(ControlMessage message)? onMessage;
+
+  PairingServer? _pairingServer;
+  ControlServer? _controlServer;
   final List<StreamSubscription> _subscriptions = [];
   bool _started = false;
 
-  int? get boundPort => _server.boundPort;
+  int? get boundControlPort => _controlServer?.boundPort;
+  int? get boundPairingPort => _pairingServer?.boundPort;
 
-  Set<String> get trustedFingerprints => Set.unmodifiable(_trustedFingerprints);
+  List<TrustedPeer> get trustedPeers => List.unmodifiable(_trustedPeers);
 
   Future<void> start() async {
     if (_started) return;
-    _server.setPairingMessageHandler(_handlePairingMessage);
-    await _server.start(
-      port: port,
-      serverIdentity: identity,
-      trustedListenerFingerprints: _trustedFingerprints.toList(),
-      trustedClientCertificates: trustedClientCertificates,
+
+    // Start pairing server (TLS only)
+    _pairingServer = PairingServer(
+      onPairingComplete: _handlePairingComplete,
     );
-    _started = true;
+    await _pairingServer!.start(
+      port: pairingPort,
+      identity: identity,
+      monitorName: monitorName,
+    );
     _log(
-      'Monitor control server listening on ${_server.boundPort ?? port} '
-      'fingerprint=${_shortFp(identity.certFingerprint)} '
-      'trusted=${_trustedFingerprints.length}',
+      'Pairing server listening on ${_pairingServer!.boundPort} '
+      'fingerprint=${_shortFp(identity.certFingerprint)}',
     );
+
+    // Start control server (mTLS)
+    _controlServer = ControlServer();
+    await _controlServer!.start(
+      port: controlPort,
+      identity: identity,
+      trustedPeers: _trustedPeers,
+    );
+    _log(
+      'Control server listening on ${_controlServer!.boundPort} '
+      'fingerprint=${_shortFp(identity.certFingerprint)} '
+      'trustedPeers=${_trustedPeers.length}',
+    );
+
+    // Listen for control server events
+    final eventSub = _controlServer!.events.listen((event) {
+      if (event is ClientConnected) {
+        _log(
+          'Client connected: ${event.connection.connectionId} '
+          'peer=${_shortFp(event.connection.peerFingerprint)}',
+        );
+        _attachConnectionListeners(event.connection);
+      } else if (event is ClientDisconnected) {
+        _log(
+          'Client disconnected: ${event.connectionId} '
+          'reason=${event.reason ?? 'closed'}',
+        );
+      }
+    });
+    _subscriptions.add(eventSub);
+
+    _started = true;
   }
 
   Future<void> stop() async {
@@ -66,87 +99,36 @@ class MonitorCliHarness {
       await sub.cancel();
     }
     _subscriptions.clear();
-    await _server.stop();
+    await _pairingServer?.stop();
+    await _controlServer?.stop();
+    _pairingServer = null;
+    _controlServer = null;
     _started = false;
+    _log('Monitor harness stopped');
   }
 
-  Future<void> _handlePairingMessage(
-    ControlMessage message,
-    HttpControlConnection connection,
-  ) async {
-    if (message is PairRequestMessage) {
-      await _handlePairRequest(message, connection);
-      return;
-    }
-    if (message is PinPairingInitMessage) {
-      _log(
-        'PIN_PAIRING_INIT received (not validated in CLI harness) '
-        'listener=${message.listenerId} '
-        'fingerprint=${_shortFp(message.listenerCertFingerprint)}',
-      );
-      return;
-    }
-    if (message is PinSubmitMessage) {
-      _log(
-        'PIN_SUBMIT received (not validated in CLI harness) '
-        'pairingSessionId=${message.pairingSessionId}',
-      );
-    }
-  }
-
-  Future<void> _handlePairRequest(
-    PairRequestMessage message,
-    HttpControlConnection connection,
-  ) async {
-    final peerFp = message.listenerCertFingerprint;
-    if (peerFp != connection.peerFingerprint &&
-        connection.peerFingerprint.isNotEmpty) {
-      _log(
-        'Rejecting PAIR_REQUEST due to fingerprint mismatch '
-        'msg=${_shortFp(peerFp)} peer=${_shortFp(connection.peerFingerprint)}',
-      );
-      await connection.sendMessage(
-        PairRejectedMessage(reason: 'fingerprint mismatch'),
-      );
-      return;
-    }
-
-    final newlyTrusted = _trustedFingerprints.add(peerFp);
-    if (newlyTrusted) {
-      _server.addTrustedFingerprint(peerFp);
-      _log(
-        'Trusted listener added id=${message.listenerId} '
-        'name=${message.listenerName} '
-        'fingerprint=${_shortFp(peerFp)} '
-        'trustedCount=${_trustedFingerprints.length}',
-      );
-    } else {
-      _log(
-        'Listener already trusted id=${message.listenerId} '
-        'fingerprint=${_shortFp(peerFp)}',
-      );
-    }
-
-    connection.elevateToTrusted();
-    final peer = TrustedPeer(
-      deviceId: message.listenerId,
-      name: message.listenerName,
-      certFingerprint: peerFp,
-      addedAtEpochSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+  void _handlePairingComplete(TrustedPeer peer) {
+    _log(
+      'Pairing complete: id=${peer.deviceId} '
+      'name=${peer.name} '
+      'fingerprint=${_shortFp(peer.certFingerprint)}',
     );
+
+    // Add to trusted peers
+    if (!_trustedPeers.any((p) => p.certFingerprint == peer.certFingerprint)) {
+      _trustedPeers.add(peer);
+      // Update control server with new trusted peer
+      _controlServer?.addTrustedPeer(peer);
+    }
+
     onTrustedListener?.call(peer);
-
-    await connection.sendMessage(
-      PairAcceptedMessage(monitorId: identity.deviceId),
-    );
-    _attachConnectionListeners(connection);
   }
 
-  void _attachConnectionListeners(HttpControlConnection connection) {
-    final messageSub = connection.receiveMessages().listen((message) async {
+  void _attachConnectionListeners(ControlConnection connection) {
+    final messageSub = connection.messages.listen((message) async {
       onMessage?.call(message);
       if (message is PingMessage) {
-        await connection.sendMessage(PongMessage(timestamp: message.timestamp));
+        await connection.send(PongMessage(timestamp: message.timestamp));
         _log(
           'Ping received on connId=${connection.connectionId}; pong sent '
           'ts=${message.timestamp}',
@@ -160,23 +142,7 @@ class MonitorCliHarness {
       }
     });
 
-    final eventSub = connection.connectionEvents().listen((event) {
-      if (event is ControlConnectionClosed) {
-        _log(
-          'Control connection ${event.connectionId ?? connection.connectionId} '
-          'closed reason=${event.reason ?? 'closed'}',
-        );
-      } else if (event is ControlConnectionError) {
-        _log(
-          'Control connection error ${event.connectionId ?? connection.connectionId} '
-          'message=${event.message}',
-        );
-      }
-    });
-
-    _subscriptions
-      ..add(messageSub)
-      ..add(eventSub);
+    _subscriptions.add(messageSub);
   }
 
   void _log(String message) {
@@ -184,74 +150,117 @@ class MonitorCliHarness {
   }
 }
 
+/// CLI harness for a listener device.
+/// Uses ControlClient for pairing + mTLS WebSocket control.
 class ListenerCliHarness {
   ListenerCliHarness({
     required this.identity,
-    required this.endpoint,
+    required this.monitorHost,
+    required this.monitorControlPort,
+    required this.monitorPairingPort,
+    required this.monitorFingerprint,
     this.listenerName = 'CLI Listener',
-    this.allowUnpinned = false,
-    bool useTls = true,
     this.logger,
     this.onMessage,
-  }) : _client = HttpControlClient(useTls: useTls);
+  });
 
   final DeviceIdentity identity;
-  final ControlEndpoint endpoint;
+  final String monitorHost;
+  final int monitorControlPort;
+  final int monitorPairingPort;
+  final String monitorFingerprint;
   final String listenerName;
-  final bool allowUnpinned;
   final void Function(String message)? logger;
   final void Function(ControlMessage message)? onMessage;
 
-  final HttpControlClient _client;
-  ControlChannel? _channel;
+  ControlClient? _client;
+  ControlConnection? _connection;
   StreamSubscription<ControlMessage>? _messageSub;
-  StreamSubscription<ControlChannelState>? _stateSub;
-  bool _pairRequestSent = false;
   bool _stopped = false;
 
-  Future<ListenerRunResult> start({bool sendPingAfterPair = false}) async {
+  /// Pair with the monitor using numeric comparison protocol.
+  /// Returns the pairing result on success.
+  ///
+  /// The [onComparisonCode] callback is called with the comparison code that
+  /// the user should verify matches what the monitor displays. If it returns
+  /// false, pairing is aborted.
+  Future<ListenerRunResult> pairAndConnect({
+    required Future<bool> Function(String comparisonCode) onComparisonCode,
+    bool sendPingAfterConnect = false,
+  }) async {
     _stopped = false;
-    _pairRequestSent = false;
     try {
-      final connection = await _client.connect(
-        endpoint: endpoint,
-        clientIdentity: identity,
-        allowUnpinned: allowUnpinned,
-      );
-      _channel = ControlChannel(connection: connection);
-      final result = Completer<ListenerRunResult>();
+      _client = ControlClient(identity: identity);
 
-      _messageSub = _channel!.incomingMessages.listen((message) async {
+      // Step 1: Initiate pairing
+      _log(
+        'Starting pairing with $monitorHost:$monitorPairingPort '
+        'expectedFp=${_shortFp(monitorFingerprint)}',
+      );
+
+      final initResult = await _client!.initPairing(
+        host: monitorHost,
+        pairingPort: monitorPairingPort,
+        expectedFingerprint: monitorFingerprint,
+        listenerName: listenerName,
+        allowUnpinned: monitorFingerprint.isEmpty,
+      );
+
+      _log(
+        'Pairing initiated: session=${initResult.sessionId} '
+        'comparisonCode=${initResult.comparisonCode}',
+      );
+
+      // Step 2: Verify comparison code
+      final confirmed = await onComparisonCode(initResult.comparisonCode);
+      if (!confirmed) {
+        _log('Pairing cancelled: comparison code not confirmed');
+        _client?.close();
+        return ListenerRunResult.failed('Comparison code not confirmed');
+      }
+
+      // Step 3: Confirm pairing
+      final effectiveFingerprint = monitorFingerprint.isNotEmpty
+          ? monitorFingerprint
+          : (_client!.lastSeenFingerprint ?? '');
+
+      final pairingResult = await _client!.confirmPairing(
+        host: monitorHost,
+        pairingPort: monitorPairingPort,
+        expectedFingerprint: effectiveFingerprint,
+        sessionId: initResult.sessionId,
+        pairingKey: initResult.pairingKey,
+        allowUnpinned: monitorFingerprint.isEmpty,
+      );
+
+      _log(
+        'Pairing successful: monitorId=${pairingResult.monitorId} '
+        'monitorName=${pairingResult.monitorName}',
+      );
+
+      // Step 4: Connect to control server (mTLS)
+      _log(
+        'Connecting to control server $monitorHost:$monitorControlPort',
+      );
+
+      _connection = await _client!.connect(
+        host: monitorHost,
+        port: monitorControlPort,
+        expectedFingerprint: pairingResult.monitorCertFingerprint,
+      );
+
+      _log(
+        'Control connection established: ${_connection!.connectionId} '
+        'peer=${_shortFp(_connection!.peerFingerprint)}',
+      );
+
+      // Listen for messages
+      _messageSub = _connection!.messages.listen((message) async {
         onMessage?.call(message);
-        if (message is PairAcceptedMessage && !result.isCompleted) {
-          _log(
-            'PAIR_ACCEPTED from monitor=${message.monitorId} '
-            'connId=${_channel?.state.connectionId ?? 'unknown'}',
-          );
-          if (sendPingAfterPair) {
-            await _channel?.send(
-              PingMessage(timestamp: DateTime.now().millisecondsSinceEpoch),
-            );
-          }
-          result.complete(
-            ListenerRunResult.paired(
-              connectionId: _channel?.state.connectionId,
-              peerFingerprint:
-                  _client.lastSeenFingerprint ??
-                  endpoint.expectedServerFingerprint,
-            ),
-          );
-        } else if (message is PairRejectedMessage && !result.isCompleted) {
-          final failure = ControlFailure(
-            ControlFailureType.untrustedClient,
-            message.reason,
-          );
-          _log('PAIR_REJECTED: ${message.reason}');
-          result.complete(ListenerRunResult.failed(failure));
-        } else if (message is PongMessage) {
+        if (message is PongMessage) {
           _log('PONG ts=${message.timestamp}');
         } else if (message is PingMessage) {
-          await _channel?.send(PongMessage(timestamp: message.timestamp));
+          await _connection?.send(PongMessage(timestamp: message.timestamp));
         } else if (message is NoiseEventMessage) {
           _log(
             'NOISE_EVENT monitorId=${message.monitorId} '
@@ -261,64 +270,78 @@ class ListenerCliHarness {
         }
       });
 
-      _stateSub = _channel!.states.listen((state) {
-        switch (state.status) {
-          case ControlChannelStatus.connected:
-            if (_pairRequestSent) return;
-            _pairRequestSent = true;
-            final pairRequest = PairRequestMessage(
-              listenerId: identity.deviceId,
-              listenerName: listenerName,
-              listenerPublicKey: base64.encode(identity.publicKey.bytes),
-              listenerCertFingerprint: identity.certFingerprint,
-            );
-            _log(
-              'Control channel connected; sending PAIR_REQUEST '
-              'listenerId=${pairRequest.listenerId} '
-              'fingerprint=${_shortFp(pairRequest.listenerCertFingerprint)}',
-            );
-            _channel?.send(pairRequest, connectionId: state.connectionId);
-            break;
-          case ControlChannelStatus.error:
-            final failure =
-                state.failure ??
-                ControlFailure(
-                  ControlFailureType.transport,
-                  'Control channel error',
-                );
-            if (!result.isCompleted) {
-              result.complete(ListenerRunResult.failed(failure));
-            }
-            break;
-          case ControlChannelStatus.closed:
-            if (!result.isCompleted) {
-              result.complete(
-                ListenerRunResult.failed(
-                  ControlFailure(
-                    ControlFailureType.closed,
-                    'Control channel closed',
-                  ),
-                ),
-              );
-            }
-            break;
-          case ControlChannelStatus.connecting:
-            break;
+      if (sendPingAfterConnect) {
+        await _connection!.send(
+          PingMessage(timestamp: DateTime.now().millisecondsSinceEpoch),
+        );
+        _log('Ping sent');
+      }
+
+      return ListenerRunResult.paired(
+        connectionId: _connection!.connectionId,
+        peerFingerprint: _connection!.peerFingerprint,
+        pairingResult: pairingResult,
+      );
+    } catch (e) {
+      _log('Pairing/connection failed: $e');
+      return ListenerRunResult.failed('$e');
+    }
+  }
+
+  /// Connect to a monitor that is already trusted (skip pairing).
+  Future<ListenerRunResult> connect({
+    bool sendPingAfterConnect = false,
+  }) async {
+    _stopped = false;
+    try {
+      _client = ControlClient(identity: identity);
+
+      _log(
+        'Connecting to control server $monitorHost:$monitorControlPort '
+        'expectedFp=${_shortFp(monitorFingerprint)}',
+      );
+
+      _connection = await _client!.connect(
+        host: monitorHost,
+        port: monitorControlPort,
+        expectedFingerprint: monitorFingerprint,
+      );
+
+      _log(
+        'Control connection established: ${_connection!.connectionId} '
+        'peer=${_shortFp(_connection!.peerFingerprint)}',
+      );
+
+      // Listen for messages
+      _messageSub = _connection!.messages.listen((message) async {
+        onMessage?.call(message);
+        if (message is PongMessage) {
+          _log('PONG ts=${message.timestamp}');
+        } else if (message is PingMessage) {
+          await _connection?.send(PongMessage(timestamp: message.timestamp));
+        } else if (message is NoiseEventMessage) {
+          _log(
+            'NOISE_EVENT monitorId=${message.monitorId} '
+            'peak=${message.peakLevel} '
+            'ts=${message.timestamp}',
+          );
         }
       });
 
-      return result.future;
-    } catch (e) {
-      final failure = ControlFailure(ControlFailureType.transport, '$e');
-      if ('$e'.contains('NO_COMMON_SIGNATURE_ALGORITHMS')) {
-        _log(
-          'TLS handshake failed (certificate signature not supported by this '
-          'runtime): $e',
+      if (sendPingAfterConnect) {
+        await _connection!.send(
+          PingMessage(timestamp: DateTime.now().millisecondsSinceEpoch),
         );
-      } else {
-        _log('Control client failed: $e');
+        _log('Ping sent');
       }
-      return ListenerRunResult.failed(failure);
+
+      return ListenerRunResult.paired(
+        connectionId: _connection!.connectionId,
+        peerFingerprint: _connection!.peerFingerprint,
+      );
+    } catch (e) {
+      _log('Connection failed: $e');
+      return ListenerRunResult.failed('$e');
     }
   }
 
@@ -326,12 +349,11 @@ class ListenerCliHarness {
     if (_stopped) return;
     _stopped = true;
     await _messageSub?.cancel();
-    await _stateSub?.cancel();
-    await _channel?.dispose();
-    _pairRequestSent = false;
+    await _connection?.close();
     _messageSub = null;
-    _stateSub = null;
-    _channel = null;
+    _connection = null;
+    _client = null;
+    _log('Listener harness stopped');
   }
 
   void _log(String message) {
@@ -342,31 +364,35 @@ class ListenerCliHarness {
 class ListenerRunResult {
   const ListenerRunResult._({
     required this.paired,
-    this.failure,
+    this.error,
     this.connectionId,
     this.peerFingerprint,
+    this.pairingResult,
   });
 
   final bool paired;
-  final ControlFailure? failure;
+  final String? error;
   final String? connectionId;
   final String? peerFingerprint;
+  final PairingResult? pairingResult;
 
-  bool get ok => paired && failure == null;
+  bool get ok => paired && error == null;
 
   factory ListenerRunResult.paired({
     String? connectionId,
     String? peerFingerprint,
+    PairingResult? pairingResult,
   }) {
     return ListenerRunResult._(
       paired: true,
       connectionId: connectionId,
       peerFingerprint: peerFingerprint,
+      pairingResult: pairingResult,
     );
   }
 
-  factory ListenerRunResult.failed(ControlFailure failure) {
-    return ListenerRunResult._(paired: false, failure: failure);
+  factory ListenerRunResult.failed(String error) {
+    return ListenerRunResult._(paired: false, error: error);
   }
 }
 

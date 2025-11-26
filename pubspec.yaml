@@ -47,6 +47,8 @@ dependencies:
   flutter_secure_storage: ^9.2.2
   multicast_dns: ^0.3.2
   pointycastle: ^3.9.1
+  firebase_core: ^3.8.0
+  firebase_messaging: ^15.1.5
 
 dev_dependencies:
   flutter_test:

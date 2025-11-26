@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../domain/models.dart';
-import '../../control/control_service.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
 import 'listener_pin_page.dart';
@@ -55,13 +54,14 @@ class ListenerDashboard extends ConsumerWidget {
       ).showSnackBar(SnackBar(content: Text('Forgot $monitorName')));
     }
 
-    MdnsAdvertisement? _fallbackAdvertisement(TrustedMonitor monitor) {
+    MdnsAdvertisement? fallbackAdvertisement(TrustedMonitor monitor) {
       if (monitor.lastKnownIp == null) return null;
       return MdnsAdvertisement(
         monitorId: monitor.monitorId,
         monitorName: monitor.monitorName,
         monitorCertFingerprint: monitor.certFingerprint,
-        servicePort: monitor.servicePort,
+        controlPort: monitor.controlPort,
+        pairingPort: monitor.pairingPort,
         version: monitor.serviceVersion,
         transport: monitor.transport,
         ip: monitor.lastKnownIp,
@@ -125,7 +125,7 @@ class ListenerDashboard extends ConsumerWidget {
       if (!uiContext.mounted) return;
       if (failure != null) {
         ScaffoldMessenger.of(uiContext).showSnackBar(
-          SnackBar(content: Text('Control connect failed: ${failure.message}')),
+          SnackBar(content: Text('Control connect failed: $failure')),
         );
       } else {
         ScaffoldMessenger.of(uiContext).showSnackBar(
@@ -167,7 +167,7 @@ class ListenerDashboard extends ConsumerWidget {
         if (!advertisements.any((ad) => ad.monitorId == monitor.monitorId))
           (() {
             late final _MonitorCardData data;
-            final fallback = _fallbackAdvertisement(monitor);
+            final fallback = fallbackAdvertisement(monitor);
             data = _MonitorCardData(
               name: monitor.monitorName,
               status: fallback == null ? 'Offline' : 'Last seen',

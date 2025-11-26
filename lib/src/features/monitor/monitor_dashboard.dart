@@ -7,13 +7,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import '../../config/build_flags.dart';
+import '../../control/control_service.dart';
 import '../../domain/models.dart';
 import '../../discovery/mdns_service.dart';
 import '../../identity/device_identity.dart';
-import '../../pairing/pin_pairing_controller.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
-import '../../control/control_service.dart';
 
 void _logMonitorDashboard(String message) {
   developer.log(message, name: 'monitor_dashboard');
@@ -57,11 +56,14 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
 
     final builder = ref.read(serviceIdentityProvider);
     final controlState = ref.read(controlServerProvider);
-    final servicePort = controlState.port ?? builder.defaultPort;
+    final pairingState = ref.read(pairingServerProvider);
+    final controlPort = controlState.port ?? builder.defaultPort;
+    final pairingPort = pairingState.port ?? builder.defaultPairingPort;
     final nextAd = builder.buildMdnsAdvertisement(
       identity: identity.requireValue,
       monitorName: settings.requireValue.name,
-      servicePort: servicePort,
+      controlPort: controlPort,
+      pairingPort: pairingPort,
     );
 
     if (_advertising &&
@@ -91,7 +93,8 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
     return a.monitorId == b.monitorId &&
         a.monitorName == b.monitorName &&
         a.monitorCertFingerprint == b.monitorCertFingerprint &&
-        a.servicePort == b.servicePort &&
+        a.controlPort == b.controlPort &&
+        a.pairingPort == b.pairingPort &&
         a.version == b.version &&
         a.transport == b.transport;
   }
@@ -100,6 +103,8 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
   Widget build(BuildContext context) {
     // Trigger control server auto-start based on monitoring + identity + trust.
     ref.watch(controlServerAutoStartProvider);
+    // Trigger audio capture auto-start when monitoring is enabled.
+    ref.watch(audioCaptureAutoStartProvider);
 
     if (!_listenersAttached) {
       _listenersAttached = true;
@@ -126,7 +131,7 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
     final trustedPeers = ref.watch(trustedListenersProvider);
     final identity = ref.watch(identityProvider);
     final serviceBuilder = ref.watch(serviceIdentityProvider);
-    final pinSession = ref.watch(pinSessionProvider);
+    final pairingServer = ref.watch(pairingServerProvider);
     final controlServer = ref.watch(controlServerProvider);
 
     return Column(
@@ -263,6 +268,36 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
                 ),
               ],
             ),
+            const SizedBox(height: 16),
+            const Divider(),
+            const SizedBox(height: 8),
+            Text(
+              'Testing',
+              style: Theme.of(context)
+                  .textTheme
+                  .titleSmall
+                  ?.copyWith(fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 8),
+            FilledButton.icon(
+              onPressed: controlServer.status == ControlServerStatus.running
+                  ? () {
+                      final timestampMs = DateTime.now().millisecondsSinceEpoch;
+                      ref.read(controlServerProvider.notifier).broadcastNoiseEvent(
+                        timestampMs: timestampMs,
+                        peakLevel: 75,
+                      );
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Test noise event sent'),
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    }
+                  : null,
+              icon: const Icon(Icons.volume_up),
+              label: const Text('Send Test Noise Event'),
+            ),
           ],
         ),
         const SizedBox(height: 14),
@@ -316,61 +351,12 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
                     label: const Text('Show pairing QR'),
                   ),
                 ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: () async {
-                      _logMonitorDashboard('Start PIN session button pressed');
-                      if (!identity.hasValue) {
-                        _logMonitorDashboard('Identity not ready');
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Identity still loading'),
-                          ),
-                        );
-                        return;
-                      }
-                      try {
-                        _logMonitorDashboard(
-                          'Starting PIN session for identity=${identity.requireValue.deviceId}',
-                        );
-                        final msg = await ref
-                            .read(pinSessionProvider.notifier)
-                            .startSession(identity.requireValue);
-                        _logMonitorDashboard(
-                          'PIN session created:\n'
-                          '  sessionId=${msg.pairingSessionId}\n'
-                          '  expiresInSec=${msg.expiresInSec}\n'
-                          '  maxAttempts=${msg.maxAttempts}\n'
-                          '  NOTE: Listener must send PIN_PAIRING_INIT to receive this PIN_REQUIRED message',
-                        );
-                        if (!context.mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              'PIN session started (${msg.expiresInSec}s)',
-                            ),
-                          ),
-                        );
-                      } catch (e, stack) {
-                        _logMonitorDashboard('PIN session start failed: $e\n$stack');
-                        if (!context.mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Could not start PIN session'),
-                          ),
-                        );
-                      }
-                    },
-                    icon: const Icon(Icons.pin),
-                    label: const Text('Start PIN session'),
-                  ),
-                ),
               ],
             ),
-            if (pinSession != null) ...[
+            // Display active pairing session when a listener initiates pairing
+            if (pairingServer.activeSession != null) ...[
               const SizedBox(height: 8),
-              _PinSessionBanner(session: pinSession),
+              _PairingSessionBanner(session: pairingServer.activeSession!),
             ],
           ],
         ),
@@ -712,10 +698,10 @@ class _TrustedListenerRow extends StatelessWidget {
   }
 }
 
-class _PinSessionBanner extends StatelessWidget {
-  const _PinSessionBanner({required this.session});
+class _PairingSessionBanner extends StatelessWidget {
+  const _PairingSessionBanner({required this.session});
 
-  final PinSessionState session;
+  final ActivePairingSession session;
 
   @override
   Widget build(BuildContext context) {
@@ -732,20 +718,28 @@ class _PinSessionBanner extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'Active PIN session',
+            'Pairing Request',
             style: Theme.of(
               context,
             ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800),
           ),
           const SizedBox(height: 6),
+          Text(
+            'Verify this code matches the listener device:',
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+          ),
+          const SizedBox(height: 8),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                session.pin ?? '------',
+                session.comparisonCode,
                 style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                  letterSpacing: 2,
+                  letterSpacing: 4,
                   fontWeight: FontWeight.w900,
+                  fontFamily: 'monospace',
                 ),
               ),
               Text(
@@ -758,7 +752,7 @@ class _PinSessionBanner extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text(
-            'Session ID ${session.sessionId.substring(0, 8)} • attempts ${session.attemptsUsed}/${session.maxAttempts}',
+            'Session ${session.sessionId.substring(0, 8)}',
             style: Theme.of(
               context,
             ).textTheme.bodySmall?.copyWith(color: AppColors.muted),

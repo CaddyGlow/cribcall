@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+
+# TypeScript build output
+lib/
+
+# Firebase
+.firebase/
+
+# IDE
+.idea/
+*.iml

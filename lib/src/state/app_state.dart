@@ -15,10 +15,13 @@ import '../identity/identity_store.dart';
 import '../identity/service_identity.dart';
 import '../pairing/pake_engine.dart';
 import '../pairing/pin_pairing_controller.dart';
+import '../background/background_service.dart';
+import '../sound/audio_capture.dart';
 import '../storage/settings_repository.dart';
 import '../storage/trusted_listeners_repository.dart';
 import '../storage/trusted_monitors_repository.dart';
 import '../control/control_service.dart';
+import '../fcm/fcm_service.dart';
 
 class RoleController extends Notifier<DeviceRole?> {
   @override
@@ -189,9 +192,10 @@ final trustedMonitorsRepoProvider = Provider<TrustedMonitorsRepository>((ref) {
 final pakeEngineProvider = Provider<PakeEngine>((ref) {
   return X25519PakeEngine();
 });
-final controlTransportsProvider = Provider<ControlTransports>((ref) {
-  return ControlTransports.create();
-});
+final pairingServerProvider =
+    NotifierProvider<PairingServerController, PairingServerState>(
+      PairingServerController.new,
+    );
 final controlServerProvider =
     NotifierProvider<ControlServerController, ControlServerState>(
       ControlServerController.new,
@@ -204,40 +208,197 @@ final controlServerAutoStartProvider = Provider<void>((ref) {
   final monitoringEnabled = ref.watch(monitoringStatusProvider);
   final identity = ref.watch(identityProvider);
   final trustedListeners = ref.watch(trustedListenersProvider);
-  final builder = ref.watch(serviceIdentityProvider);
+  final monitorSettings = ref.watch(monitorSettingsProvider);
 
   Future.microtask(() async {
     if (!monitoringEnabled ||
         !identity.hasValue ||
-        !trustedListeners.hasValue) {
+        !trustedListeners.hasValue ||
+        !monitorSettings.hasValue) {
       developer.log(
-        'Control server auto-start skipped '
+        'Server auto-start skipped '
         'monitoring=$monitoringEnabled '
         'identityReady=${identity.hasValue} '
-        'trustedReady=${trustedListeners.hasValue}',
+        'trustedReady=${trustedListeners.hasValue} '
+        'settingsReady=${monitorSettings.hasValue}',
         name: 'control_server',
       );
+      await ref.read(pairingServerProvider.notifier).stop();
       await ref.read(controlServerProvider.notifier).stop();
       return;
     }
 
-    final trustedFingerprints = trustedListeners.requireValue
-        .map((p) => p.certFingerprint)
-        .toList();
+    final deviceIdentity = identity.requireValue;
+    final peers = trustedListeners.requireValue;
+    final settings = monitorSettings.requireValue;
+
     developer.log(
-      'Control server auto-start invoking '
-      'port=${builder.defaultPort} trusted=${trustedFingerprints.length}',
+      'Server auto-start invoking '
+      'controlPort=$kControlDefaultPort pairingPort=$kPairingDefaultPort '
+      'trusted=${peers.length}',
       name: 'control_server',
     );
-    await ref
-        .read(controlServerProvider.notifier)
-        .start(
-          identity: identity.requireValue,
-          port: builder.defaultPort,
-          trustedFingerprints: trustedFingerprints,
-          // Pass identity cert for mTLS - allows TLS-level validation
-          trustedClientCertificates: [identity.requireValue.certificateDer],
+
+    // Start pairing server (TLS only, for new device pairing)
+    await ref.read(pairingServerProvider.notifier).start(
+      identity: deviceIdentity,
+      port: kPairingDefaultPort,
+      monitorName: settings.name,
+    );
+
+    // Start control server (mTLS WebSocket, for trusted connections)
+    await ref.read(controlServerProvider.notifier).start(
+      identity: deviceIdentity,
+      port: kControlDefaultPort,
+      trustedPeers: peers,
+    );
+  });
+});
+
+/// Background service manager for platform-specific foreground services.
+final backgroundServiceProvider = Provider<BackgroundServiceManager>((ref) {
+  return createBackgroundServiceManager();
+});
+
+/// Audio capture state tracking
+enum AudioCaptureStatus { stopped, starting, running, error }
+
+class AudioCaptureState {
+  const AudioCaptureState({
+    this.status = AudioCaptureStatus.stopped,
+    this.error,
+  });
+
+  final AudioCaptureStatus status;
+  final String? error;
+
+  AudioCaptureState copyWith({AudioCaptureStatus? status, String? error}) {
+    return AudioCaptureState(
+      status: status ?? this.status,
+      error: error,
+    );
+  }
+}
+
+class AudioCaptureController extends Notifier<AudioCaptureState> {
+  AudioCaptureService? _service;
+
+  @override
+  AudioCaptureState build() => const AudioCaptureState();
+
+  Future<void> start({
+    required NoiseSettings settings,
+    required NoiseEventSink onNoise,
+  }) async {
+    if (_service != null) {
+      developer.log(
+        'Audio capture already active, stopping first',
+        name: 'audio_capture',
+      );
+      await stop();
+    }
+
+    state = state.copyWith(status: AudioCaptureStatus.starting);
+
+    // Select platform-appropriate service
+    if (!kIsWeb && Platform.isLinux) {
+      _service = LinuxSubprocessAudioCaptureService(
+        settings: settings,
+        onNoise: onNoise,
+      );
+    } else if (!kIsWeb && Platform.isAndroid) {
+      _service = AndroidAudioCaptureService(
+        settings: settings,
+        onNoise: onNoise,
+      );
+    } else {
+      developer.log(
+        'No audio capture available for ${Platform.operatingSystem}',
+        name: 'audio_capture',
+      );
+      _service = NoopAudioCaptureService(
+        settings: settings,
+        onNoise: onNoise,
+      );
+    }
+
+    try {
+      await _service!.start();
+      state = state.copyWith(status: AudioCaptureStatus.running);
+      developer.log('Audio capture started', name: 'audio_capture');
+    } catch (e) {
+      state = state.copyWith(
+        status: AudioCaptureStatus.error,
+        error: e.toString(),
+      );
+      developer.log('Audio capture start failed: $e', name: 'audio_capture');
+    }
+  }
+
+  Future<void> stop() async {
+    if (_service == null) return;
+
+    try {
+      await _service!.stop();
+    } catch (e) {
+      developer.log('Audio capture stop error: $e', name: 'audio_capture');
+    }
+    _service = null;
+    state = const AudioCaptureState(status: AudioCaptureStatus.stopped);
+    developer.log('Audio capture stopped', name: 'audio_capture');
+  }
+}
+
+final audioCaptureProvider =
+    NotifierProvider<AudioCaptureController, AudioCaptureState>(
+      AudioCaptureController.new,
+    );
+
+/// Auto-starts audio capture when monitoring is enabled on the monitor role.
+final audioCaptureAutoStartProvider = Provider<void>((ref) {
+  final role = ref.watch(roleProvider);
+  final monitoringEnabled = ref.watch(monitoringStatusProvider);
+  final monitorSettings = ref.watch(monitorSettingsProvider);
+
+  Future.microtask(() async {
+    // Only run audio capture on monitor devices
+    if (role != DeviceRole.monitor) {
+      await ref.read(audioCaptureProvider.notifier).stop();
+      return;
+    }
+
+    if (!monitoringEnabled || !monitorSettings.hasValue) {
+      developer.log(
+        'Audio capture skipped: monitoring=$monitoringEnabled settingsReady=${monitorSettings.hasValue}',
+        name: 'audio_capture',
+      );
+      await ref.read(audioCaptureProvider.notifier).stop();
+      return;
+    }
+
+    final settings = monitorSettings.requireValue;
+
+    developer.log(
+      'Audio capture auto-start: threshold=${settings.noise.threshold} '
+      'minDuration=${settings.noise.minDurationMs}ms cooldown=${settings.noise.cooldownSeconds}s',
+      name: 'audio_capture',
+    );
+
+    await ref.read(audioCaptureProvider.notifier).start(
+      settings: settings.noise,
+      onNoise: (event) {
+        developer.log(
+          'Noise detected: peak=${event.peakLevel} ts=${event.timestampMs}',
+          name: 'audio_capture',
         );
+        // Send noise event to connected listeners via control server
+        final server = ref.read(controlServerProvider.notifier);
+        server.broadcastNoiseEvent(
+          timestampMs: event.timestampMs,
+          peakLevel: event.peakLevel,
+        );
+      },
+    );
   });
 });
 
@@ -263,6 +424,44 @@ class TrustedListenersController extends AsyncNotifier<List<TrustedPeer>> {
         .toList();
     state = AsyncData(updated);
     await ref.read(trustedListenersRepoProvider).save(updated);
+  }
+
+  /// Update FCM token for a listener (called when listener sends FCM_TOKEN_UPDATE).
+  Future<void> updateFcmToken(String deviceId, String fcmToken) async {
+    final current = await _ensureValue();
+    final index = current.indexWhere((p) => p.deviceId == deviceId);
+    if (index == -1) {
+      developer.log(
+        'Cannot update FCM token: listener $deviceId not found',
+        name: 'fcm',
+      );
+      return;
+    }
+
+    final updated = [...current];
+    updated[index] = current[index].copyWith(fcmToken: fcmToken);
+    state = AsyncData(updated);
+    await ref.read(trustedListenersRepoProvider).save(updated);
+    developer.log(
+      'Updated FCM token for listener $deviceId',
+      name: 'fcm',
+    );
+  }
+
+  /// Clear FCM token for listeners with matching token (called when token is invalid).
+  Future<void> clearFcmTokenByToken(String fcmToken) async {
+    final current = await _ensureValue();
+    final index = current.indexWhere((p) => p.fcmToken == fcmToken);
+    if (index == -1) return;
+
+    final updated = [...current];
+    updated[index] = current[index].clearFcmToken();
+    state = AsyncData(updated);
+    await ref.read(trustedListenersRepoProvider).save(updated);
+    developer.log(
+      'Cleared invalid FCM token for listener ${current[index].deviceId}',
+      name: 'fcm',
+    );
   }
 
   Future<List<TrustedPeer>> _ensureValue() async {
@@ -291,7 +490,8 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
         monitorId: payload.monitorId,
         monitorName: payload.monitorName,
         certFingerprint: payload.monitorCertFingerprint,
-        servicePort: payload.service.defaultPort,
+        controlPort: payload.service.controlPort,
+        pairingPort: payload.service.pairingPort,
         serviceVersion: payload.service.version,
         transport: payload.service.transport,
         addedAtEpochSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
@@ -319,7 +519,8 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
     if (index == -1) return;
     final existing = current[index];
     if (existing.lastKnownIp == advertisement.ip &&
-        existing.servicePort == advertisement.servicePort &&
+        existing.controlPort == advertisement.controlPort &&
+        existing.pairingPort == advertisement.pairingPort &&
         existing.transport == advertisement.transport &&
         existing.serviceVersion == advertisement.version) {
       return;
@@ -331,7 +532,8 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
       certFingerprint: existing.certFingerprint,
       lastKnownIp: advertisement.ip ?? existing.lastKnownIp,
       lastNoiseEpochMs: existing.lastNoiseEpochMs,
-      servicePort: advertisement.servicePort,
+      controlPort: advertisement.controlPort,
+      pairingPort: advertisement.pairingPort,
       serviceVersion: advertisement.version,
       transport: advertisement.transport,
       addedAtEpochSec: existing.addedAtEpochSec,
@@ -357,7 +559,8 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
       certFingerprint: existing.certFingerprint,
       lastKnownIp: existing.lastKnownIp,
       lastNoiseEpochMs: timestampMs,
-      servicePort: existing.servicePort,
+      controlPort: existing.controlPort,
+      pairingPort: existing.pairingPort,
       serviceVersion: existing.serviceVersion,
       transport: existing.transport,
       addedAtEpochSec: existing.addedAtEpochSec,
@@ -462,7 +665,102 @@ class IdentityController extends AsyncNotifier<DeviceIdentity> {
   }
 }
 
-final pinSessionProvider =
-    NotifierProvider<PinPairingController, PinSessionState?>(
-      PinPairingController.new,
+final pairingSessionProvider =
+    NotifierProvider<PairingController, PairingSessionState?>(
+      PairingController.new,
     );
+
+// ---------------------------------------------------------------------------
+// FCM (Firebase Cloud Messaging) providers
+// ---------------------------------------------------------------------------
+
+/// Singleton FCM service instance.
+final fcmServiceProvider = Provider<FcmService>((ref) {
+  return FcmService.instance;
+});
+
+/// State for noise event deduplication.
+/// Tracks recently seen events to avoid duplicate notifications when
+/// receiving the same event via both WebSocket and FCM.
+class NoiseEventDeduplicationState {
+  const NoiseEventDeduplicationState({
+    this.lastEvent,
+    this.recentEventIds = const {},
+  });
+
+  final NoiseEventData? lastEvent;
+  final Set<String> recentEventIds;
+
+  NoiseEventDeduplicationState copyWith({
+    NoiseEventData? lastEvent,
+    Set<String>? recentEventIds,
+  }) {
+    return NoiseEventDeduplicationState(
+      lastEvent: lastEvent ?? this.lastEvent,
+      recentEventIds: recentEventIds ?? this.recentEventIds,
+    );
+  }
+}
+
+/// Controller for deduplicating noise events received via multiple channels.
+class NoiseEventDeduplicationController
+    extends Notifier<NoiseEventDeduplicationState> {
+  static const _maxEventIds = 100;
+
+  @override
+  NoiseEventDeduplicationState build() =>
+      const NoiseEventDeduplicationState();
+
+  /// Process a noise event. Returns true if new, false if duplicate.
+  bool processEvent(NoiseEventData event) {
+    final eventId = event.eventId;
+
+    if (state.recentEventIds.contains(eventId)) {
+      developer.log(
+        'Duplicate noise event ignored: $eventId',
+        name: 'fcm',
+      );
+      return false;
+    }
+
+    // Add to recent IDs, pruning if necessary
+    var newIds = {...state.recentEventIds, eventId};
+    if (newIds.length > _maxEventIds) {
+      // Remove oldest entries (arbitrary since Set is unordered, but good enough)
+      newIds = newIds.skip(newIds.length - _maxEventIds).toSet();
+    }
+
+    state = NoiseEventDeduplicationState(
+      lastEvent: event,
+      recentEventIds: newIds,
+    );
+
+    developer.log(
+      'New noise event processed: $eventId (${newIds.length} cached)',
+      name: 'fcm',
+    );
+    return true;
+  }
+
+  /// Check if an event ID has been seen recently (for WebSocket events).
+  bool isEventSeen(String monitorId, int timestamp) {
+    return state.recentEventIds.contains('$monitorId-$timestamp');
+  }
+
+  /// Mark an event as seen (for WebSocket events before FCM arrives).
+  void markEventSeen(String monitorId, int timestamp) {
+    final eventId = '$monitorId-$timestamp';
+    if (state.recentEventIds.contains(eventId)) return;
+
+    var newIds = {...state.recentEventIds, eventId};
+    if (newIds.length > _maxEventIds) {
+      newIds = newIds.skip(newIds.length - _maxEventIds).toSet();
+    }
+    state = state.copyWith(recentEventIds: newIds);
+  }
+}
+
+final noiseEventDeduplicationProvider = NotifierProvider<
+    NoiseEventDeduplicationController, NoiseEventDeduplicationState>(
+  NoiseEventDeduplicationController.new,
+);

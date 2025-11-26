@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import '../config/build_flags.dart';
 
 enum DeviceRole { monitor, listener }
@@ -151,26 +153,69 @@ class TrustedPeer {
     required this.name,
     required this.certFingerprint,
     required this.addedAtEpochSec,
+    this.certificateDer,
+    this.fcmToken,
   });
 
   final String deviceId;
   final String name;
   final String certFingerprint;
   final int addedAtEpochSec;
+  /// Full certificate DER bytes for TLS-level mTLS validation.
+  /// Optional for backward compatibility with existing stored peers.
+  final List<int>? certificateDer;
+  /// FCM token for push notifications.
+  /// Listener sends this after connecting so Monitor can send noise events via FCM.
+  final String? fcmToken;
+
+  TrustedPeer copyWith({
+    String? deviceId,
+    String? name,
+    String? certFingerprint,
+    int? addedAtEpochSec,
+    List<int>? certificateDer,
+    String? fcmToken,
+  }) {
+    return TrustedPeer(
+      deviceId: deviceId ?? this.deviceId,
+      name: name ?? this.name,
+      certFingerprint: certFingerprint ?? this.certFingerprint,
+      addedAtEpochSec: addedAtEpochSec ?? this.addedAtEpochSec,
+      certificateDer: certificateDer ?? this.certificateDer,
+      fcmToken: fcmToken ?? this.fcmToken,
+    );
+  }
+
+  /// Returns a copy with fcmToken explicitly cleared (set to null).
+  TrustedPeer clearFcmToken() {
+    return TrustedPeer(
+      deviceId: deviceId,
+      name: name,
+      certFingerprint: certFingerprint,
+      addedAtEpochSec: addedAtEpochSec,
+      certificateDer: certificateDer,
+      fcmToken: null,
+    );
+  }
 
   Map<String, dynamic> toJson() => {
     'deviceId': deviceId,
     'name': name,
     'certFingerprint': certFingerprint,
     'addedAtEpochSec': addedAtEpochSec,
+    if (certificateDer != null) 'certificateDer': base64Encode(certificateDer!),
+    if (fcmToken != null) 'fcmToken': fcmToken,
   };
 
   factory TrustedPeer.fromJson(Map<String, dynamic> json) {
+    final certDerB64 = json['certificateDer'] as String?;
     return TrustedPeer(
       deviceId: json['deviceId'] as String,
       name: json['name'] as String,
       certFingerprint: json['certFingerprint'] as String,
       addedAtEpochSec: json['addedAtEpochSec'] as int,
+      certificateDer: certDerB64 != null ? base64Decode(certDerB64) : null,
+      fcmToken: json['fcmToken'] as String?,
     );
   }
 }
@@ -180,47 +225,61 @@ class TrustedMonitor {
     required this.monitorId,
     required this.monitorName,
     required this.certFingerprint,
-    this.servicePort = kControlDefaultPort,
+    this.controlPort = kControlDefaultPort,
+    this.pairingPort = kPairingDefaultPort,
     this.serviceVersion = 1,
     this.transport = kTransportHttpWs,
     this.lastKnownIp,
     this.lastNoiseEpochMs,
     required this.addedAtEpochSec,
+    this.certificateDer,
   });
 
   final String monitorId;
   final String monitorName;
   final String certFingerprint;
-  final int servicePort;
+  /// Port for mTLS WebSocket control connections.
+  final int controlPort;
+  /// Port for TLS HTTP pairing server.
+  final int pairingPort;
   final int serviceVersion;
   final String transport;
   final String? lastKnownIp;
   final int? lastNoiseEpochMs;
   final int addedAtEpochSec;
+  /// Full certificate DER bytes for TLS-level mTLS validation.
+  /// Optional for backward compatibility with existing stored monitors.
+  final List<int>? certificateDer;
 
   Map<String, dynamic> toJson() => {
     'monitorId': monitorId,
     'monitorName': monitorName,
     'certFingerprint': certFingerprint,
-    'servicePort': servicePort,
+    'controlPort': controlPort,
+    'pairingPort': pairingPort,
     'serviceVersion': serviceVersion,
     'transport': transport,
     if (lastKnownIp != null) 'lastKnownIp': lastKnownIp,
     if (lastNoiseEpochMs != null) 'lastNoiseEpochMs': lastNoiseEpochMs,
     'addedAtEpochSec': addedAtEpochSec,
+    if (certificateDer != null) 'certificateDer': base64Encode(certificateDer!),
   };
 
   factory TrustedMonitor.fromJson(Map<String, dynamic> json) {
+    final certDerB64 = json['certificateDer'] as String?;
     return TrustedMonitor(
       monitorId: json['monitorId'] as String,
       monitorName: json['monitorName'] as String,
       certFingerprint: json['certFingerprint'] as String,
-      servicePort: json['servicePort'] as int? ?? kControlDefaultPort,
+      // Support old 'servicePort' field for backward compatibility
+      controlPort: json['controlPort'] as int? ?? json['servicePort'] as int? ?? kControlDefaultPort,
+      pairingPort: json['pairingPort'] as int? ?? kPairingDefaultPort,
       serviceVersion: json['serviceVersion'] as int? ?? 1,
       transport: json['transport'] as String? ?? kTransportHttpWs,
       lastKnownIp: json['lastKnownIp'] as String?,
       lastNoiseEpochMs: json['lastNoiseEpochMs'] as int?,
       addedAtEpochSec: json['addedAtEpochSec'] as int,
+      certificateDer: certDerB64 != null ? base64Decode(certDerB64) : null,
     );
   }
 }
@@ -229,19 +288,24 @@ class QrServiceInfo {
   const QrServiceInfo({
     required this.protocol,
     required this.version,
-    required this.defaultPort,
+    required this.controlPort,
+    required this.pairingPort,
     this.transport = kTransportHttpWs,
   });
 
   final String protocol;
   final int version;
-  final int defaultPort;
+  /// Port for mTLS WebSocket control connections.
+  final int controlPort;
+  /// Port for TLS HTTP pairing server.
+  final int pairingPort;
   final String transport;
 
   Map<String, dynamic> toJson() => {
     'protocol': protocol,
     'version': version,
-    'defaultPort': defaultPort,
+    'controlPort': controlPort,
+    'pairingPort': pairingPort,
     'transport': transport,
   };
 
@@ -249,7 +313,9 @@ class QrServiceInfo {
     return QrServiceInfo(
       protocol: json['protocol'] as String,
       version: json['version'] as int,
-      defaultPort: json['defaultPort'] as int,
+      // Support old 'defaultPort' field for backward compatibility
+      controlPort: json['controlPort'] as int? ?? json['defaultPort'] as int? ?? kControlDefaultPort,
+      pairingPort: json['pairingPort'] as int? ?? kPairingDefaultPort,
       transport: json['transport'] as String? ?? kTransportHttpWs,
     );
   }
@@ -302,7 +368,8 @@ class MdnsAdvertisement {
     required this.monitorId,
     required this.monitorName,
     required this.monitorCertFingerprint,
-    required this.servicePort,
+    required this.controlPort,
+    required this.pairingPort,
     required this.version,
     this.transport = kTransportHttpWs,
     this.ip,
@@ -311,7 +378,10 @@ class MdnsAdvertisement {
   final String monitorId;
   final String monitorName;
   final String monitorCertFingerprint;
-  final int servicePort;
+  /// Port for mTLS WebSocket control connections.
+  final int controlPort;
+  /// Port for TLS HTTP pairing server.
+  final int pairingPort;
   final int version;
   final String transport;
   final String? ip;
@@ -320,7 +390,8 @@ class MdnsAdvertisement {
     'monitorId': monitorId,
     'monitorName': monitorName,
     'monitorCertFingerprint': monitorCertFingerprint,
-    'servicePort': servicePort,
+    'controlPort': controlPort,
+    'pairingPort': pairingPort,
     'version': version,
     'transport': transport,
     if (ip != null) 'ip': ip,
@@ -331,7 +402,9 @@ class MdnsAdvertisement {
       monitorId: json['monitorId'] as String,
       monitorName: json['monitorName'] as String,
       monitorCertFingerprint: json['monitorCertFingerprint'] as String,
-      servicePort: json['servicePort'] as int,
+      // Support old 'servicePort' field for backward compatibility
+      controlPort: json['controlPort'] as int? ?? json['servicePort'] as int? ?? kControlDefaultPort,
+      pairingPort: json['pairingPort'] as int? ?? kPairingDefaultPort,
       version: json['version'] as int,
       transport: json['transport'] as String? ?? kTransportHttpWs,
       ip: json['ip'] as String?,

@@ -4,12 +4,21 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
+import android.Manifest
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
-import android.content.Context
+import android.os.Build
 import android.os.Handler
+import android.os.IBinder
 import android.os.Looper
 import android.util.Log
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 
 class MainActivity : FlutterActivity() {
     private val mdnsChannel = "cribcall/mdns"
@@ -21,10 +30,45 @@ class MainActivity : FlutterActivity() {
     private var discoveryListener: NsdManager.DiscoveryListener? = null
     private val logTag = "cribcall_mdns"
 
+    // Audio capture via foreground service
+    private val audioChannel = "cribcall/audio"
+    private val audioEvents = "cribcall/audio_events"
+    private var audioEventSink: EventChannel.EventSink? = null
+    private val audioLogTag = "cribcall_audio"
+    private val RECORD_AUDIO_PERMISSION_CODE = 1001
+    private val POST_NOTIFICATIONS_PERMISSION_CODE = 1002
+
+    // Service binding
+    private var audioCaptureService: AudioCaptureService? = null
+    private var serviceBound = false
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as AudioCaptureService.LocalBinder
+            audioCaptureService = binder.getService()
+            serviceBound = true
+            Log.i(audioLogTag, "AudioCaptureService bound")
+
+            // Set up callback to forward audio data to Flutter
+            audioCaptureService?.onAudioData = { bytes ->
+                audioEventSink?.success(bytes)
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            audioCaptureService = null
+            serviceBound = false
+            Log.i(audioLogTag, "AudioCaptureService unbound")
+        }
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         val messenger = flutterEngine.dartExecutor.binaryMessenger
         nsdManager = getSystemService(Context.NSD_SERVICE) as NsdManager
+
+        // Bind to audio service early
+        bindAudioService()
 
         MethodChannel(messenger, mdnsChannel).setMethodCallHandler { call, result ->
             when (call.method) {
@@ -56,6 +100,65 @@ class MainActivity : FlutterActivity() {
                 stopDiscovery()
             }
         })
+
+        // Audio capture channels (now using foreground service)
+        MethodChannel(messenger, audioChannel).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "start" -> {
+                    if (!checkAudioPermission()) {
+                        requestAudioPermission()
+                        result.error("permission_denied", "RECORD_AUDIO permission required", null)
+                        return@setMethodCallHandler
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !checkNotificationPermission()) {
+                        requestNotificationPermission()
+                        // Continue anyway - notification permission is not strictly required
+                    }
+                    startAudioCaptureService()
+                    result.success(null)
+                }
+                "stop" -> {
+                    stopAudioCaptureService()
+                    result.success(null)
+                }
+                "hasPermission" -> {
+                    result.success(checkAudioPermission())
+                }
+                "requestPermission" -> {
+                    if (checkAudioPermission()) {
+                        result.success(true)
+                    } else {
+                        requestAudioPermission()
+                        result.success(false)
+                    }
+                }
+                "isRunning" -> {
+                    result.success(audioCaptureService?.isCapturing() == true)
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        EventChannel(messenger, audioEvents).setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                audioEventSink = events
+                Log.i(audioLogTag, "Audio event channel connected")
+                // Update callback if service is already bound
+                audioCaptureService?.onAudioData = { bytes ->
+                    audioEventSink?.success(bytes)
+                }
+            }
+
+            override fun onCancel(arguments: Any?) {
+                audioEventSink = null
+                Log.i(audioLogTag, "Audio event channel disconnected")
+            }
+        })
+    }
+
+    private fun bindAudioService() {
+        val intent = Intent(this, AudioCaptureService::class.java)
+        bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
     }
 
     private fun startAdvertise(args: Map<*, *>) {
@@ -196,5 +299,72 @@ class MainActivity : FlutterActivity() {
             }
         }
         registrationListener = null
+    }
+
+    // Audio permission methods
+    private fun checkAudioPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun requestAudioPermission() {
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(Manifest.permission.RECORD_AUDIO),
+            RECORD_AUDIO_PERMISSION_CODE
+        )
+    }
+
+    private fun checkNotificationPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                POST_NOTIFICATIONS_PERMISSION_CODE
+            )
+        }
+    }
+
+    // Foreground service methods
+    private fun startAudioCaptureService() {
+        Log.i(audioLogTag, "Starting audio capture foreground service")
+        val intent = Intent(this, AudioCaptureService::class.java).apply {
+            action = AudioCaptureService.ACTION_START
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+    }
+
+    private fun stopAudioCaptureService() {
+        Log.i(audioLogTag, "Stopping audio capture foreground service")
+        val intent = Intent(this, AudioCaptureService::class.java).apply {
+            action = AudioCaptureService.ACTION_STOP
+        }
+        startService(intent)
+    }
+
+    override fun onDestroy() {
+        if (serviceBound) {
+            unbindService(serviceConnection)
+            serviceBound = false
+        }
+        stopMdns()
+        super.onDestroy()
     }
 }

@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import '../config/build_flags.dart';
 import '../domain/models.dart';
 import '../utils/canonical_json.dart';
 import 'device_identity.dart';
@@ -10,11 +11,13 @@ class ServiceIdentityBuilder {
     required this.serviceVersion,
     required this.defaultPort,
     required this.transport,
+    this.defaultPairingPort = kPairingDefaultPort,
   });
 
   final String serviceProtocol;
   final int serviceVersion;
   final int defaultPort;
+  final int defaultPairingPort;
   final String transport;
 
   MonitorQrPayload buildQrPayload({
@@ -29,7 +32,8 @@ class ServiceIdentityBuilder {
       service: QrServiceInfo(
         protocol: serviceProtocol,
         version: serviceVersion,
-        defaultPort: defaultPort,
+        controlPort: defaultPort,
+        pairingPort: defaultPairingPort,
         transport: transport,
       ),
     );
@@ -49,13 +53,15 @@ class ServiceIdentityBuilder {
   MdnsAdvertisement buildMdnsAdvertisement({
     required DeviceIdentity identity,
     required String monitorName,
-    required int servicePort,
+    required int controlPort,
+    required int pairingPort,
   }) {
     return MdnsAdvertisement(
       monitorId: identity.deviceId,
       monitorName: monitorName,
       monitorCertFingerprint: identity.certFingerprint,
-      servicePort: servicePort,
+      controlPort: controlPort,
+      pairingPort: pairingPort,
       version: serviceVersion,
       transport: transport,
     );

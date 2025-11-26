@@ -19,16 +19,19 @@ void main() {
     );
     expect(qr.monitorId, 'device-123');
     expect(qr.monitorCertFingerprint, identity.certFingerprint);
-    expect(qr.service.defaultPort, kControlDefaultPort);
+    expect(qr.service.controlPort, kControlDefaultPort);
+    expect(qr.service.pairingPort, kPairingDefaultPort);
     expect(qr.service.transport, kTransportHttpWs);
 
     final mdns = builder.buildMdnsAdvertisement(
       identity: identity,
       monitorName: 'Nursery',
-      servicePort: kControlDefaultPort,
+      controlPort: kControlDefaultPort,
+      pairingPort: kPairingDefaultPort,
     );
     expect(mdns.monitorCertFingerprint, identity.certFingerprint);
-    expect(mdns.servicePort, kControlDefaultPort);
+    expect(mdns.controlPort, kControlDefaultPort);
+    expect(mdns.pairingPort, kPairingDefaultPort);
     expect(mdns.transport, kTransportHttpWs);
   });
 

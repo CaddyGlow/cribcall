@@ -9,7 +9,8 @@ void main() {
   const service = QrServiceInfo(
     protocol: 'baby-monitor',
     version: 1,
-    defaultPort: kControlDefaultPort,
+    controlPort: kControlDefaultPort,
+    pairingPort: kPairingDefaultPort,
     transport: kTransportHttpWs,
   );
 
@@ -27,7 +28,8 @@ void main() {
     expect(parsed.monitorId, equals('M1-UUID'));
     expect(parsed.monitorName, equals('Nursery'));
     expect(parsed.monitorCertFingerprint, equals('hex-sha256'));
-    expect(parsed.service.defaultPort, equals(kControlDefaultPort));
+    expect(parsed.service.controlPort, equals(kControlDefaultPort));
+    expect(parsed.service.pairingPort, equals(kPairingDefaultPort));
     expect(parsed.service.protocol, equals('baby-monitor'));
   });
 

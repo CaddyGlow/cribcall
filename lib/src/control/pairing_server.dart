@@ -1,0 +1,488 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:developer' as developer;
+import 'dart:io';
+import 'dart:math';
+import 'dart:typed_data';
+
+import 'package:cryptography/cryptography.dart';
+import 'package:pointycastle/export.dart' as pc;
+import '../foundation/foundation_stub.dart'
+    if (dart.library.ui) 'package:flutter/foundation.dart';
+
+import '../config/build_flags.dart';
+import '../domain/models.dart';
+import '../identity/device_identity.dart';
+import '../identity/pem.dart';
+import '../identity/pkcs8.dart';
+import '../utils/canonical_json.dart';
+import 'pairing_messages.dart';
+
+/// Callback when pairing is successfully completed.
+typedef PairingCompleteCallback = void Function(TrustedPeer peer);
+
+/// Callback when a new pairing session is created, providing the comparison code.
+/// The UI should display this code for the user to verify it matches the listener.
+typedef PairingSessionCreatedCallback = void Function(
+  String sessionId,
+  String comparisonCode,
+  DateTime expiresAt,
+);
+
+/// TLS HTTP server for pairing only.
+/// Uses server-side TLS (client validates server fingerprint from QR/mDNS).
+/// No client certificate required.
+/// Binds to both IPv4 and IPv6 addresses.
+class PairingServer {
+  PairingServer({
+    required this.onPairingComplete,
+    this.onSessionCreated,
+  });
+
+  final PairingCompleteCallback onPairingComplete;
+  final PairingSessionCreatedCallback? onSessionCreated;
+
+  final List<HttpServer> _servers = [];
+  int? _boundPort;
+  DeviceIdentity? _identity;
+  String? _monitorName;
+  late DateTime _startedAt;
+
+  /// Active pairing sessions, keyed by session ID.
+  final Map<String, _PairingSession> _sessions = {};
+
+  int? get boundPort => _boundPort;
+  String? get fingerprint => _identity?.certFingerprint;
+
+  Future<void> start({
+    required int port,
+    required DeviceIdentity identity,
+    required String monitorName,
+  }) async {
+    await stop();
+    _identity = identity;
+    _monitorName = monitorName;
+    _startedAt = DateTime.now();
+
+    final context = await _buildSecurityContext(identity);
+
+    // Bind to both IPv4 and IPv6
+    final bindAddresses = [
+      InternetAddress.anyIPv4,
+      InternetAddress.anyIPv6,
+    ];
+
+    for (final address in bindAddresses) {
+      try {
+        _log(
+          'Binding pairing server on ${address.address}:$port '
+          'fingerprint=${_shortFingerprint(identity.certFingerprint)}',
+        );
+
+        // TLS with server cert only - no client cert required
+        final server = await HttpServer.bindSecure(
+          address,
+          port,
+          context,
+          requestClientCertificate: false,
+        );
+        _servers.add(server);
+        _boundPort ??= server.port;
+
+        server.listen(
+          _handleRequest,
+          onError: (error, stack) {
+            _log('Pairing server error (${address.address}): $error');
+          },
+        );
+
+        _log(
+          'Pairing server running on ${address.address}:${server.port} '
+          'fingerprint=${_shortFingerprint(identity.certFingerprint)}',
+        );
+      } catch (e) {
+        _log('Failed to bind pairing server on ${address.address}:$port: $e');
+      }
+    }
+
+    if (_servers.isEmpty) {
+      throw StateError('Failed to bind pairing server on any address');
+    }
+  }
+
+  Future<void> stop() async {
+    _sessions.clear();
+    for (final server in _servers) {
+      await server.close(force: true);
+    }
+    _servers.clear();
+    _boundPort = null;
+    _identity = null;
+    _log('Pairing server stopped');
+  }
+
+  Future<void> _handleRequest(HttpRequest request) async {
+    final remoteIp = request.connectionInfo?.remoteAddress.address ?? 'unknown';
+    final remotePort = request.connectionInfo?.remotePort ?? 0;
+    _log('Incoming ${request.method} ${request.uri.path} from $remoteIp:$remotePort');
+
+    try {
+      switch (request.uri.path) {
+        case '/health':
+          await _handleHealth(request);
+          return;
+        case '/pair/init':
+          if (request.method == 'POST') {
+            await _handlePairInit(request);
+            return;
+          }
+          break;
+        case '/pair/confirm':
+          if (request.method == 'POST') {
+            await _handlePairConfirm(request);
+            return;
+          }
+          break;
+      }
+      _sendError(request, HttpStatus.notFound, 'not_found', 'Endpoint not found');
+    } catch (e, stack) {
+      _log('Request handling error: $e\n$stack');
+      try {
+        _sendError(request, HttpStatus.internalServerError, 'internal_error', 'Internal server error');
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _handleHealth(HttpRequest request) async {
+    final body = jsonEncode({
+      'status': 'ok',
+      'role': 'pairing',
+      'protocol': kTransportHttpWs,
+      'uptimeSec': DateTime.now().difference(_startedAt).inSeconds,
+      'activeSessions': _sessions.length,
+      if (_identity != null) 'fingerprint': _identity!.certFingerprint,
+    });
+    request.response
+      ..statusCode = HttpStatus.ok
+      ..headers.contentType = ContentType.json
+      ..headers.set('Cache-Control', 'no-store')
+      ..write(body);
+    await request.response.close();
+  }
+
+  Future<void> _handlePairInit(HttpRequest request) async {
+    final bodyStr = await utf8.decodeStream(request);
+    final Map<String, dynamic> body;
+    try {
+      body = jsonDecode(bodyStr) as Map<String, dynamic>;
+    } catch (e) {
+      _sendError(request, HttpStatus.badRequest, 'invalid_json', 'Invalid JSON body');
+      return;
+    }
+
+    final PairInitRequest initRequest;
+    try {
+      initRequest = PairInitRequest.fromJson(body);
+    } catch (e) {
+      _sendError(request, HttpStatus.badRequest, 'invalid_request', 'Invalid request format: $e');
+      return;
+    }
+
+    _log(
+      'Pair init from listener=${initRequest.listenerId} '
+      'name=${initRequest.listenerName} '
+      'fingerprint=${_shortFingerprint(initRequest.listenerCertFingerprint)}',
+    );
+
+    // Parse listener's P-256 identity public key (uncompressed format: 0x04 + x + y)
+    final listenerPublicKeyBytes = base64Decode(initRequest.listenerPublicKey);
+    if (listenerPublicKeyBytes.length != 65 || listenerPublicKeyBytes[0] != 0x04) {
+      _sendError(request, HttpStatus.badRequest, 'invalid_key', 'Invalid public key format');
+      return;
+    }
+
+    // Compute shared secret via P-256 ECDH using pointycastle
+    final sharedSecretBytes = await _computeEcdhSharedSecret(
+      ourIdentity: _identity!,
+      theirPublicKeyUncompressed: listenerPublicKeyBytes,
+    );
+
+    // Derive comparison code and pairing key from shared secret
+    final hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
+    final derived = await hkdf.deriveKey(
+      secretKey: SecretKey(sharedSecretBytes),
+      info: utf8.encode('cribcall-pairing-v2'),
+    );
+    final derivedBytes = await derived.extractBytes();
+
+    // First 3 bytes -> 6-digit comparison code (displayed on both devices)
+    final comparisonCode = _bytesToComparisonCode(derivedBytes.sublist(0, 3));
+    // Remaining bytes -> pairing key for auth tag verification
+    final pairingKey = derivedBytes.sublist(3);
+
+    final sessionId = _generateSessionId();
+    final expiresAt = DateTime.now().add(const Duration(seconds: 60));
+
+    final session = _PairingSession(
+      sessionId: sessionId,
+      listenerId: initRequest.listenerId,
+      listenerName: initRequest.listenerName,
+      listenerCertFingerprint: initRequest.listenerCertFingerprint,
+      listenerCertificateDer: initRequest.listenerCertificateDer,
+      listenerPublicKey: listenerPublicKeyBytes,
+      comparisonCode: comparisonCode,
+      pairingKey: pairingKey,
+      expiresAt: expiresAt,
+    );
+    _sessions[sessionId] = session;
+
+    _log(
+      'Created pairing session=$sessionId comparisonCode=$comparisonCode '
+      'for listener=${initRequest.listenerId}',
+    );
+
+    // Notify UI to display comparison code
+    onSessionCreated?.call(sessionId, comparisonCode, expiresAt);
+
+    final response = PairInitResponse(
+      pairingSessionId: sessionId,
+      monitorPublicKey: base64Encode(_identity!.publicKeyUncompressed),
+      expiresInSec: 60,
+    );
+
+    request.response
+      ..statusCode = HttpStatus.ok
+      ..headers.contentType = ContentType.json
+      ..write(response.toJsonString());
+    await request.response.close();
+  }
+
+  /// Converts 3 bytes to a 6-digit comparison code.
+  String _bytesToComparisonCode(List<int> bytes) {
+    // Combine 3 bytes into a 24-bit number, mod 1000000 for 6 digits
+    final value = (bytes[0] << 16) | (bytes[1] << 8) | bytes[2];
+    return (value % 1000000).toString().padLeft(6, '0');
+  }
+
+  Future<void> _handlePairConfirm(HttpRequest request) async {
+    final bodyStr = await utf8.decodeStream(request);
+    final Map<String, dynamic> body;
+    try {
+      body = jsonDecode(bodyStr) as Map<String, dynamic>;
+    } catch (e) {
+      _sendError(request, HttpStatus.badRequest, 'invalid_json', 'Invalid JSON body');
+      return;
+    }
+
+    final PairConfirmRequest confirmRequest;
+    try {
+      confirmRequest = PairConfirmRequest.fromJson(body);
+    } catch (e) {
+      _sendError(request, HttpStatus.badRequest, 'invalid_request', 'Invalid request format: $e');
+      return;
+    }
+
+    final session = _sessions[confirmRequest.pairingSessionId];
+    if (session == null) {
+      _log('Pair confirm with unknown session=${confirmRequest.pairingSessionId}');
+      _sendConfirmResponse(request, PairConfirmResponse.rejected('Session not found'));
+      return;
+    }
+
+    if (DateTime.now().isAfter(session.expiresAt)) {
+      _sessions.remove(session.sessionId);
+      _log('Pair confirm with expired session=${session.sessionId}');
+      _sendConfirmResponse(request, PairConfirmResponse.rejected('Session expired'));
+      return;
+    }
+
+    // Validate auth tag using pre-computed pairing key
+    final valid = await _validateAuthTag(session, confirmRequest);
+    if (!valid) {
+      _sessions.remove(session.sessionId);
+      _log('Pair confirm auth validation failed session=${session.sessionId}');
+      _sendConfirmResponse(request, PairConfirmResponse.rejected('Auth validation failed'));
+      return;
+    }
+
+    // Pairing successful
+    _sessions.remove(session.sessionId);
+    _log(
+      'Pairing successful session=${session.sessionId} '
+      'listener=${session.listenerId}',
+    );
+
+    final peer = TrustedPeer(
+      deviceId: session.listenerId,
+      name: session.listenerName,
+      certFingerprint: session.listenerCertFingerprint,
+      addedAtEpochSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      certificateDer: session.listenerCertificateDer,
+    );
+
+    // Notify callback
+    onPairingComplete(peer);
+
+    // Send success response with monitor's certificate
+    final response = PairConfirmResponse.accepted(
+      monitorId: _identity!.deviceId,
+      monitorName: _monitorName!,
+      monitorCertFingerprint: _identity!.certFingerprint,
+      monitorCertificateDer: _identity!.certificateDer,
+    );
+
+    _sendConfirmResponse(request, response);
+  }
+
+  Future<bool> _validateAuthTag(
+    _PairingSession session,
+    PairConfirmRequest confirmRequest,
+  ) async {
+    try {
+      // Compute expected auth tag using pre-computed pairing key
+      final canonicalTranscript = canonicalizeJson(confirmRequest.transcript);
+      final hmacAlgo = Hmac.sha256();
+      final mac = await hmacAlgo.calculateMac(
+        utf8.encode(canonicalTranscript),
+        secretKey: SecretKey(session.pairingKey),
+      );
+      final expectedAuthTag = base64Encode(mac.bytes);
+
+      // Compare auth tags
+      final valid = expectedAuthTag == confirmRequest.authTag;
+      _log(
+        'Auth validation: expected=${_shortFingerprint(expectedAuthTag)} '
+        'got=${_shortFingerprint(confirmRequest.authTag)} valid=$valid',
+      );
+      return valid;
+    } catch (e) {
+      _log('Auth validation error: $e');
+      return false;
+    }
+  }
+
+  void _sendConfirmResponse(HttpRequest request, PairConfirmResponse response) {
+    request.response
+      ..statusCode = HttpStatus.ok
+      ..headers.contentType = ContentType.json
+      ..write(response.toJsonString());
+    request.response.close();
+  }
+
+  void _sendError(HttpRequest request, int status, String code, String message) {
+    final error = PairErrorResponse(error: message, code: code);
+    request.response
+      ..statusCode = status
+      ..headers.contentType = ContentType.json
+      ..write(error.toJsonString());
+    request.response.close();
+  }
+
+  String _generateSessionId() {
+    final random = Random.secure();
+    final bytes = List<int>.generate(16, (_) => random.nextInt(256));
+    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  }
+}
+
+class _PairingSession {
+  _PairingSession({
+    required this.sessionId,
+    required this.listenerId,
+    required this.listenerName,
+    required this.listenerCertFingerprint,
+    required this.listenerCertificateDer,
+    required this.listenerPublicKey,
+    required this.comparisonCode,
+    required this.pairingKey,
+    required this.expiresAt,
+  });
+
+  final String sessionId;
+  final String listenerId;
+  final String listenerName;
+  final String listenerCertFingerprint;
+  final List<int> listenerCertificateDer;
+  final List<int> listenerPublicKey;
+  /// 6-digit comparison code displayed on both devices
+  final String comparisonCode;
+  /// Derived key for auth tag verification
+  final List<int> pairingKey;
+  final DateTime expiresAt;
+}
+
+Future<SecurityContext> _buildSecurityContext(DeviceIdentity identity) async {
+  final ctx = SecurityContext(withTrustedRoots: false);
+  final certPem = encodePem('CERTIFICATE', identity.certificateDer);
+  final extracted = await identity.keyPair.extract();
+  final pkcs8 = p256PrivateKeyPkcs8(
+    privateKeyBytes: (extracted as SimpleKeyPairData).bytes,
+    publicKeyBytes: identity.publicKeyUncompressed,
+  );
+  final keyPem = encodePem('PRIVATE KEY', pkcs8);
+  ctx.useCertificateChainBytes(utf8.encode(certPem));
+  ctx.usePrivateKeyBytes(utf8.encode(keyPem));
+  return ctx;
+}
+
+void _log(String message) {
+  developer.log(message, name: 'pairing_server');
+  debugPrint('[pairing_server] $message');
+}
+
+String _shortFingerprint(String fingerprint) {
+  if (fingerprint.length <= 12) return fingerprint;
+  return '${fingerprint.substring(0, 6)}...${fingerprint.substring(fingerprint.length - 4)}';
+}
+
+/// Computes ECDH shared secret using P-256 curve via pointycastle.
+Future<List<int>> _computeEcdhSharedSecret({
+  required DeviceIdentity ourIdentity,
+  required List<int> theirPublicKeyUncompressed,
+}) async {
+  final domainParams = pc.ECDomainParameters('secp256r1');
+
+  // Parse their public key (uncompressed: 0x04 + x + y)
+  final theirPoint = domainParams.curve.decodePoint(
+    Uint8List.fromList(theirPublicKeyUncompressed),
+  );
+  final theirPublicKey = pc.ECPublicKey(theirPoint, domainParams);
+
+  // Extract our private key
+  final privateKeyData = await ourIdentity.keyPair.extract();
+  final dBytes = (privateKeyData as SimpleKeyPairData).bytes;
+  final d = _bytesToBigInt(dBytes);
+  final ourPrivateKey = pc.ECPrivateKey(d, domainParams);
+
+  // Compute shared secret
+  final agreement = pc.ECDHBasicAgreement();
+  agreement.init(ourPrivateKey);
+  final sharedSecretBigInt = agreement.calculateAgreement(theirPublicKey);
+
+  // Convert to 32 bytes (P-256 field size)
+  return _bigIntToBytes(sharedSecretBigInt, 32);
+}
+
+/// Converts bytes to BigInt (big-endian unsigned).
+BigInt _bytesToBigInt(List<int> bytes) {
+  var result = BigInt.zero;
+  for (final byte in bytes) {
+    result = (result << 8) | BigInt.from(byte);
+  }
+  return result;
+}
+
+/// Converts BigInt to fixed-length bytes (big-endian unsigned).
+List<int> _bigIntToBytes(BigInt value, int length) {
+  final bytes = <int>[];
+  var v = value;
+  while (v > BigInt.zero) {
+    bytes.insert(0, (v & BigInt.from(0xff)).toInt());
+    v = v >> 8;
+  }
+  // Pad to required length
+  while (bytes.length < length) {
+    bytes.insert(0, 0);
+  }
+  return bytes;
+}

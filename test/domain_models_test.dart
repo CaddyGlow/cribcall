@@ -8,7 +8,8 @@ void main() {
     const service = QrServiceInfo(
       protocol: 'baby-monitor',
       version: 1,
-      defaultPort: kControlDefaultPort,
+      controlPort: kControlDefaultPort,
+      pairingPort: kPairingDefaultPort,
       transport: kTransportHttpWs,
     );
     const payload = MonitorQrPayload(
@@ -28,7 +29,8 @@ void main() {
       decoded.monitorCertFingerprint,
       equals(payload.monitorCertFingerprint),
     );
-    expect(decoded.service.defaultPort, equals(kControlDefaultPort));
+    expect(decoded.service.controlPort, equals(kControlDefaultPort));
+    expect(decoded.service.pairingPort, equals(kPairingDefaultPort));
     expect(decoded.service.transport, equals(kTransportHttpWs));
 
     expect(
@@ -62,13 +64,16 @@ void main() {
       monitorId: 'monitor-1',
       monitorName: 'Nursery',
       monitorCertFingerprint: 'fp',
-      servicePort: kControlDefaultPort,
+      controlPort: kControlDefaultPort,
+      pairingPort: kPairingDefaultPort,
       version: 1,
       transport: kTransportHttpWs,
     );
 
     final parsed = MdnsAdvertisement.fromJson(ad.toJson());
     expect(parsed.monitorName, 'Nursery');
+    expect(parsed.controlPort, kControlDefaultPort);
+    expect(parsed.pairingPort, kPairingDefaultPort);
     expect(parsed.transport, kTransportHttpWs);
   });
 }

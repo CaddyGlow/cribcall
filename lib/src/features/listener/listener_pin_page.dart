@@ -1,6 +1,5 @@
 import 'dart:developer' as developer;
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -8,11 +7,17 @@ import '../../domain/models.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
 
-void _logPinPage(String message) {
-  developer.log(message, name: 'listener_pin_page');
-  debugPrint('[listener_pin_page] $message');
+void _logPairingPage(String message) {
+  developer.log(message, name: 'listener_pairing_page');
+  debugPrint('[listener_pairing_page] $message');
 }
 
+/// Page for numeric comparison pairing with a monitor.
+///
+/// Flow:
+/// 1. Initiates pairing with monitor -> receives comparison code
+/// 2. Displays comparison code for user to verify
+/// 3. User confirms codes match -> completes pairing
 class ListenerPinPage extends ConsumerStatefulWidget {
   const ListenerPinPage({super.key, required this.advertisement});
 
@@ -23,32 +28,29 @@ class ListenerPinPage extends ConsumerStatefulWidget {
 }
 
 class _ListenerPinPageState extends ConsumerState<ListenerPinPage> {
-  final _pinController = TextEditingController();
   String? _status;
   bool _connecting = false;
-  bool _connected = false;
+  bool _confirming = false;
 
   @override
   void initState() {
     super.initState();
-    _logPinPage(
-      'PIN page opened for monitor=${widget.advertisement.monitorId} '
+    _logPairingPage(
+      'Pairing page opened for monitor=${widget.advertisement.monitorId} '
       'name=${widget.advertisement.monitorName} '
       'ip=${widget.advertisement.ip ?? 'unknown'} '
       'fingerprint=${_shortFingerprint(widget.advertisement.monitorCertFingerprint)}',
     );
-    // Initiate PIN pairing protocol
     _initiatePairing();
   }
 
   Future<void> _initiatePairing() async {
     final identity = ref.read(identityProvider);
     if (!identity.hasValue) {
-      _logPinPage('Waiting for identity to load before initiating pairing');
+      _logPairingPage('Waiting for identity to load before initiating pairing');
       setState(() {
         _status = 'Loading identity...';
       });
-      // Wait a bit and retry
       await Future.delayed(const Duration(milliseconds: 500));
       if (!mounted) return;
       final identityRetry = ref.read(identityProvider);
@@ -65,10 +67,10 @@ class _ListenerPinPageState extends ConsumerState<ListenerPinPage> {
       _status = 'Connecting to monitor...';
     });
 
-    _logPinPage('Initiating PIN pairing protocol...');
-    final error = await ref
-        .read(pinSessionProvider.notifier)
-        .initiatePinPairing(
+    _logPairingPage('Initiating pairing protocol...');
+    final result = await ref
+        .read(pairingSessionProvider.notifier)
+        .initiatePairing(
           advertisement: widget.advertisement,
           listenerIdentity: ref.read(identityProvider).requireValue,
           listenerName: 'Listener',
@@ -76,36 +78,73 @@ class _ListenerPinPageState extends ConsumerState<ListenerPinPage> {
 
     if (!mounted) return;
 
-    if (error != null) {
-      _logPinPage('PIN pairing initiation failed: $error');
+    if (result.error != null) {
+      _logPairingPage('Pairing initiation failed: ${result.error}');
       setState(() {
         _connecting = false;
-        _status = error;
+        _status = result.error;
       });
     } else {
-      _logPinPage('PIN pairing initiated successfully - session hydrated');
+      _logPairingPage('Pairing initiated - comparison code: ${result.comparisonCode}');
       setState(() {
         _connecting = false;
-        _connected = true;
         _status = null;
       });
     }
   }
 
+  Future<void> _confirmPairing() async {
+    final identity = ref.read(identityProvider);
+    if (!identity.hasValue) {
+      setState(() {
+        _status = 'Identity not available';
+      });
+      return;
+    }
+
+    setState(() {
+      _confirming = true;
+      _status = 'Confirming pairing...';
+    });
+
+    _logPairingPage('Confirming pairing...');
+    final error = await ref
+        .read(pairingSessionProvider.notifier)
+        .confirmPairing(listenerIdentity: identity.requireValue);
+
+    if (!mounted) return;
+
+    if (error != null) {
+      _logPairingPage('Pairing confirmation failed: $error');
+      setState(() {
+        _confirming = false;
+        _status = error;
+      });
+    } else {
+      _logPairingPage('Pairing confirmed successfully');
+      Navigator.of(context).pop();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Pairing successful')),
+      );
+    }
+  }
+
+  void _cancelPairing() {
+    ref.read(pairingSessionProvider.notifier).cancelPairing();
+    Navigator.of(context).pop();
+  }
+
   @override
   void dispose() {
-    _logPinPage('PIN page disposed');
-    // Close the connection when the page is closed
-    ref.read(pinSessionProvider.notifier).closeConnection();
-    _pinController.dispose();
+    _logPairingPage('Pairing page disposed');
+    ref.read(pairingSessionProvider.notifier).closeConnection();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final identity = ref.watch(identityProvider);
-    final session = ref.watch(pinSessionProvider);
-    final canSubmit = _connected && !_connecting && session != null;
+    final session = ref.watch(pairingSessionProvider);
+    final hasSession = session != null;
 
     return Padding(
       padding: const EdgeInsets.all(16),
@@ -114,19 +153,21 @@ class _ListenerPinPageState extends ConsumerState<ListenerPinPage> {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            'Pair with PIN',
-            style: Theme.of(
-              context,
-            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+            'Pair with Monitor',
+            style: Theme.of(context)
+                .textTheme
+                .titleMedium
+                ?.copyWith(fontWeight: FontWeight.w800),
           ),
           const SizedBox(height: 8),
           Text(
             '${widget.advertisement.monitorName} - ${_shortFingerprint(widget.advertisement.monitorCertFingerprint)}',
-            style: Theme.of(
-              context,
-            ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
+            style: Theme.of(context)
+                .textTheme
+                .bodyMedium
+                ?.copyWith(color: AppColors.muted),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 16),
           if (_connecting) ...[
             const Row(
               children: [
@@ -140,121 +181,94 @@ class _ListenerPinPageState extends ConsumerState<ListenerPinPage> {
               ],
             ),
             const SizedBox(height: 12),
-          ],
-          TextField(
-            controller: _pinController,
-            keyboardType: TextInputType.number,
-            maxLength: 6,
-            enabled: canSubmit,
-            decoration: InputDecoration(
-              labelText: canSubmit
-                  ? 'Enter 6-digit PIN from monitor'
-                  : 'Waiting for connection...',
-              counterText: '',
+          ] else if (hasSession) ...[
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: AppColors.primary.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: AppColors.primary.withValues(alpha: 0.3)),
+              ),
+              child: Column(
+                children: [
+                  Text(
+                    'Verify this code matches the monitor:',
+                    style: Theme.of(context)
+                        .textTheme
+                        .bodyMedium
+                        ?.copyWith(color: AppColors.muted),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    session.comparisonCode,
+                    style: Theme.of(context).textTheme.displaySmall?.copyWith(
+                          letterSpacing: 8,
+                          fontWeight: FontWeight.w900,
+                          fontFamily: 'monospace',
+                        ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Expires in ${session.expiresAt.difference(DateTime.now()).inSeconds}s',
+                    style: Theme.of(context)
+                        .textTheme
+                        .bodySmall
+                        ?.copyWith(color: AppColors.muted),
+                  ),
+                ],
+              ),
             ),
-          ),
-          if (_status != null) ...[
-            const SizedBox(height: 6),
+            const SizedBox(height: 16),
+            if (_confirming)
+              const Row(
+                children: [
+                  SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  SizedBox(width: 12),
+                  Text('Confirming pairing...'),
+                ],
+              )
+            else
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: _confirmPairing,
+                      child: const Text('Codes Match'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: _cancelPairing,
+                      child: const Text('Cancel'),
+                    ),
+                  ),
+                ],
+              ),
+          ],
+          if (_status != null && !_connecting && !_confirming) ...[
+            const SizedBox(height: 8),
             Text(
               _status!,
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(
-                    color: _connecting ? AppColors.muted : Colors.red,
-                  ),
+              style: Theme.of(context)
+                  .textTheme
+                  .bodySmall
+                  ?.copyWith(color: Colors.red),
+            ),
+            const SizedBox(height: 8),
+            TextButton(
+              onPressed: _initiatePairing,
+              child: const Text('Retry'),
             ),
           ],
-          if (session != null) ...[
-            const SizedBox(height: 6),
-            Text(
-              'Session ready (expires in ${session.expiresAt.difference(DateTime.now()).inSeconds}s)',
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(color: AppColors.success),
-            ),
-          ],
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: FilledButton(
-                  onPressed: canSubmit ? _submitPin : null,
-                  child: const Text('Submit PIN'),
-                ),
-              ),
-              if (!_connected && !_connecting) ...[
-                const SizedBox(width: 8),
-                TextButton(
-                  onPressed: _initiatePairing,
-                  child: const Text('Retry'),
-                ),
-              ],
-            ],
-          ),
         ],
       ),
     );
-  }
-
-  Future<void> _submitPin() async {
-    final identity = ref.read(identityProvider);
-    _logPinPage('Submit PIN button pressed');
-    if (_pinController.text.length != 6) {
-      _logPinPage('PIN validation failed: length=${_pinController.text.length}');
-      setState(() {
-        _status = 'PIN must be 6 digits';
-      });
-      return;
-    }
-    if (!identity.hasValue) {
-      _logPinPage('Identity not ready');
-      setState(() {
-        _status = 'Identity still loading';
-      });
-      return;
-    }
-    // Log session state before submit
-    final currentSession = ref.read(pinSessionProvider);
-    final sessionId = currentSession?.sessionId ?? widget.advertisement.monitorId;
-    _logPinPage(
-      'Attempting submitPin:\n'
-      '  sessionFromProvider=${currentSession?.sessionId ?? 'NULL'}\n'
-      '  fallbackToMonitorId=${currentSession == null}\n'
-      '  effectiveSessionId=$sessionId\n'
-      '  monitorId=${widget.advertisement.monitorId}',
-    );
-    try {
-      final result = await ref
-          .read(pinSessionProvider.notifier)
-          .submitPin(
-            pairingSessionId: sessionId,
-            pin: _pinController.text,
-            advertisement: widget.advertisement,
-            listenerIdentity: identity.requireValue,
-            listenerName: 'Listener',
-          );
-      _logPinPage(
-        'submitPin result: success=${result.success} message=${result.message}',
-      );
-      if (result.success) {
-        if (!mounted) return;
-        Navigator.of(context).pop();
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('PIN pairing accepted'),
-          ),
-        );
-      } else {
-        setState(() {
-          _status = 'Pairing failed: ${result.message}';
-        });
-      }
-    } catch (e, stack) {
-      _logPinPage('submitPin exception: $e\n$stack');
-      setState(() {
-        _status = 'PIN pairing failed. Try again in a moment.';
-      });
-    }
   }
 
   String _shortFingerprint(String fingerprint) {
