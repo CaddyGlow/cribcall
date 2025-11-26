@@ -235,6 +235,8 @@ final controlServerAutoStartProvider = Provider<void>((ref) {
           identity: identity.requireValue,
           port: builder.defaultPort,
           trustedFingerprints: trustedFingerprints,
+          // Pass identity cert for mTLS - allows TLS-level validation
+          trustedClientCertificates: [identity.requireValue.certificateDer],
         );
   });
 });
