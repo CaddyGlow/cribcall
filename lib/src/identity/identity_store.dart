@@ -4,7 +4,6 @@ import 'dart:io';
 import '../foundation/foundation_stub.dart'
     if (dart.library.ui) 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:path_provider/path_provider.dart';
 
 abstract class IdentityStore {
   Future<Map<String, dynamic>?> read();
@@ -34,6 +33,8 @@ class FileIdentityStore implements IdentityStore {
     debugPrint('[identity_store] using path ${file.path}');
     return file;
   }
+
+  Future<File> file() => _file();
 
   @override
   Future<Map<String, dynamic>?> read() async {

@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Task: plan-control-stream — Exposed a public FileIdentityStore.file helper so the debug shell can surface the on-disk identity path on desktop, fixing the debug_shell build error.
 - Task: mtls-http-control — Switched HTTP control transport to mandatory mTLS, removed the custom nonce header handshake, pinned fingerprints via TLS, and removed the insecure HTTP fallback for pairing/health.
 - Task: listener-qr-fallback — Handle missing/unsupported cameras in the listener QR flow with a friendly fallback plus manual QR JSON entry (validated parser + tests) so pairing works without mobile_scanner.
 - Task: diag-logging — Added diagnostic info logging across control server/client handshakes, control channel message flow, PIN pairing, and mDNS advertise/browse (Dart + Android/iOS/Linux) to trace connection issues.
