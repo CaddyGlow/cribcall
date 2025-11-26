@@ -61,17 +61,28 @@ class HttpControlServer implements ControlServer {
       );
     }
     await stop();
-    _trustedFingerprints = trustedListenerFingerprints;
+    _trustedFingerprints = [...trustedListenerFingerprints];
+    // Compute fingerprints from trusted client certificates for manual validation
+    for (final certDer in trustedClientCertificates) {
+      final fp = _fingerprintHex(certDer);
+      if (!_trustedFingerprints.contains(fp)) {
+        _trustedFingerprints.add(fp);
+      }
+    }
     _fingerprint = serverIdentity.certFingerprint;
     _startedAt = DateTime.now();
     HttpServer server;
     if (useTls) {
       final context = await _buildSecurityContext(serverIdentity);
+      // Add trusted client certificates for TLS-level validation.
+      // Both setTrustedCertificatesBytes (for validation) and
+      // setClientAuthoritiesBytes (advertised to client) are needed.
       for (final certDer in trustedClientCertificates) {
         try {
           final pem = encodePem('CERTIFICATE', certDer);
           context.setTrustedCertificatesBytes(utf8.encode(pem));
           context.setClientAuthoritiesBytes(utf8.encode(pem));
+          _logHttp('Added trusted client cert: ${_shortFingerprint(_fingerprintHex(certDer))}');
         } catch (e) {
           _logHttp('Failed to add trusted client certificate: $e');
         }
@@ -85,7 +96,7 @@ class HttpControlServer implements ControlServer {
         bindAddress,
         port,
         context,
-        requestClientCertificate: !allowUntrustedClients,
+        requestClientCertificate: true,
       );
     } else {
       _logHttp(
@@ -140,10 +151,17 @@ class HttpControlServer implements ControlServer {
   }
 
   Future<void> _handleRequest(HttpRequest request) async {
+    _logHttp(
+      'Incoming request ${request.method} ${request.uri.path} '
+      'hasCert=${request.certificate != null}',
+    );
     try {
       switch (request.uri.path) {
         case '/health':
           await _handleHealth(request);
+          return;
+        case '/test':
+          await _handleTest(request);
           return;
         case '/control/ws':
           if (WebSocketTransformer.isUpgradeRequest(request)) {
@@ -156,29 +174,41 @@ class HttpControlServer implements ControlServer {
         ..statusCode = HttpStatus.notFound
         ..close();
     } catch (e, stack) {
-      _logHttp('HTTP request handling failed: $e');
+      _logHttp('HTTP request handling failed: $e\n$stack');
       try {
         request.response
           ..statusCode = HttpStatus.internalServerError
           ..write('internal error')
           ..close();
-      } catch (_) {}
+      } catch (e2) {
+        _logHttp('Failed to send error response: $e2');
+      }
     }
   }
 
   Future<void> _handleHealth(HttpRequest request) async {
-    final peerCert = request.certificate;
-    if (peerCert == null && !allowUntrustedClients) {
-      _logHttp('Health probe missing client certificate');
-      request.response
-        ..statusCode = HttpStatus.unauthorized
-        ..write('client certificate required');
-      await request.response.close();
-      return;
-    }
+    // Health endpoint is always accessible for monitoring purposes,
+    // regardless of client certificate presence or allowUntrustedClients setting.
     final remoteIp = request.connectionInfo?.remoteAddress.address ?? 'unknown';
     final remotePort = request.connectionInfo?.remotePort ?? 0;
-    _logHttp('Health probe from $remoteIp:$remotePort');
+    try {
+      final clientCert = request.certificate;
+      if (clientCert != null) {
+        final fp = _fingerprintHex(clientCert.der);
+        final trusted = _trustedFingerprints.contains(fp);
+        _logHttp(
+          'Health probe from $remoteIp:$remotePort '
+          'clientCert=${clientCert.subject} '
+          'fingerprint=${_shortFingerprint(fp)} '
+          'trusted=$trusted',
+        );
+      } else {
+        _logHttp('Health probe from $remoteIp:$remotePort (no client cert)');
+      }
+    } catch (e) {
+      // Certificate access may fail if TLS layer rejected it but connection continued
+      _logHttp('Health probe from $remoteIp:$remotePort (cert access failed: $e)');
+    }
     final body = jsonEncode({
       'status': 'ok',
       'role': 'monitor',
@@ -194,6 +224,65 @@ class HttpControlServer implements ControlServer {
     request.response
       ..statusCode = HttpStatus.ok
       ..write(body);
+    await request.response.close();
+  }
+
+  /// Test endpoint that enforces mTLS - requires a valid client certificate
+  /// with a fingerprint in the trusted list.
+  Future<void> _handleTest(HttpRequest request) async {
+    final remoteIp = request.connectionInfo?.remoteAddress.address ?? 'unknown';
+    final remotePort = request.connectionInfo?.remotePort ?? 0;
+
+    // Check if client certificate is present
+    final clientCert = request.certificate;
+    if (clientCert == null) {
+      _logHttp('Test endpoint rejected $remoteIp:$remotePort - no client cert');
+      request.response
+        ..statusCode = HttpStatus.unauthorized
+        ..headers.contentType = ContentType.json
+        ..write(jsonEncode({
+          'error': 'client_certificate_required',
+          'message': 'This endpoint requires mTLS authentication',
+        }));
+      await request.response.close();
+      return;
+    }
+
+    // Validate fingerprint against trusted list
+    final fp = _fingerprintHex(clientCert.der);
+    final trusted = _trustedFingerprints.contains(fp);
+    if (!trusted) {
+      _logHttp(
+        'Test endpoint rejected $remoteIp:$remotePort - '
+        'untrusted cert fingerprint=${_shortFingerprint(fp)}',
+      );
+      request.response
+        ..statusCode = HttpStatus.forbidden
+        ..headers.contentType = ContentType.json
+        ..write(jsonEncode({
+          'error': 'certificate_not_trusted',
+          'message': 'Client certificate fingerprint not in trusted list',
+          'fingerprint': fp,
+        }));
+      await request.response.close();
+      return;
+    }
+
+    _logHttp(
+      'Test endpoint accepted $remoteIp:$remotePort '
+      'clientCert=${clientCert.subject} '
+      'fingerprint=${_shortFingerprint(fp)}',
+    );
+    request.response
+      ..statusCode = HttpStatus.ok
+      ..headers.contentType = ContentType.json
+      ..write(jsonEncode({
+        'status': 'ok',
+        'message': 'mTLS authentication successful',
+        'clientSubject': clientCert.subject,
+        'clientFingerprint': fp,
+        'trusted': true,
+      }));
     await request.response.close();
   }
 

@@ -79,11 +79,14 @@ class DeviceIdentity {
     final algorithmIdentifier = _ecdsaWithSha256AlgorithmIdentifier();
     tbs.add(algorithmIdentifier);
 
-    tbs.add(_buildName('CribCall'));
+    // Issuer and subject must match for a self-signed certificate
+    // to work correctly as its own trust anchor in mTLS validation.
+    final subjectName = _buildName('cribcall-$deviceId');
+    tbs.add(subjectName); // Issuer
 
     tbs.add(_buildValidity(notBefore, notAfter));
 
-    tbs.add(_buildName('cribcall-$deviceId'));
+    tbs.add(subjectName); // Subject (same as issuer for self-signed)
 
     tbs.add(_buildSubjectPublicKeyInfo(publicKey));
 

@@ -124,7 +124,7 @@ class _DebugShellHomeState extends State<DebugShellHome> {
     try {
       final server = HttpControlServer(
         bindAddress: '0.0.0.0',
-        allowUntrustedClients: false,
+        allowUntrustedClients: true,
       );
       final requestedPort = int.tryParse(_portController.text) ?? 0;
       await server.start(
