@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../control/control_service.dart';
 import '../../domain/models.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
 import 'listener_pin_page.dart';
 import 'listener_scan_qr_page.dart';
+import 'listener_stream_page.dart';
 import 'widgets/pinned_badge.dart';
 
 class ListenerDashboard extends ConsumerWidget {
@@ -128,13 +130,17 @@ class ListenerDashboard extends ConsumerWidget {
           SnackBar(content: Text('Control connect failed: $failure')),
         );
       } else {
-        ScaffoldMessenger.of(uiContext).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Connecting to ${data.name} via HTTP+WS control channel...',
+        // Connection successful - navigate to stream page
+        if (uiContext.mounted) {
+          Navigator.of(uiContext).push(
+            MaterialPageRoute(
+              builder: (_) => ListenerStreamPage(
+                monitorName: data.name,
+                autoStart: false,
+              ),
             ),
-          ),
-        );
+          );
+        }
       }
     }
 
@@ -186,6 +192,9 @@ class ListenerDashboard extends ConsumerWidget {
           })(),
     ];
 
+    final controlClientState = ref.watch(controlClientProvider);
+    final isConnected = controlClientState.status == ControlClientStatus.connected;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -196,6 +205,65 @@ class ListenerDashboard extends ConsumerWidget {
           ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
         ),
         const SizedBox(height: 10),
+        // Connection status card
+        if (isConnected)
+          Card(
+            color: AppColors.success.withValues(alpha: 0.1),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: AppColors.success.withValues(alpha: 0.2),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.wifi,
+                      color: AppColors.success,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Connected to ${controlClientState.monitorName ?? "Monitor"}',
+                          style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Ready to receive alerts and stream audio',
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: AppColors.muted,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  FilledButton.icon(
+                    onPressed: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => ListenerStreamPage(
+                            monitorName: controlClientState.monitorName,
+                            autoStart: false,
+                          ),
+                        ),
+                      );
+                    },
+                    icon: const Icon(Icons.play_arrow),
+                    label: const Text('Stream'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        if (isConnected) const SizedBox(height: 14),
         Card(
           child: Padding(
             padding: const EdgeInsets.all(16),

@@ -10,10 +10,12 @@ class DetectedNoise {
 }
 
 typedef NoiseCallback = void Function(DetectedNoise event);
+typedef LevelCallback = void Function(int level);
 
 class SoundDetector {
   final NoiseSettings settings;
   final NoiseCallback onNoise;
+  final LevelCallback? onLevel;
   final int sampleRate;
   final int frameSize;
 
@@ -26,6 +28,7 @@ class SoundDetector {
   void addFrame(List<double> samples, {required int timestampMs}) {
     if (samples.isEmpty) return;
     final level = _levelFromSamples(samples);
+    onLevel?.call(level);
     _peakLevel = max(_peakLevel, level);
 
     if (level >= settings.threshold) {
@@ -55,6 +58,7 @@ class SoundDetector {
   SoundDetector._internal({
     required this.settings,
     required this.onNoise,
+    this.onLevel,
     required this.sampleRate,
     required this.frameSize,
     required int frameDurationMs,
@@ -63,6 +67,7 @@ class SoundDetector {
   factory SoundDetector({
     required NoiseSettings settings,
     required NoiseCallback onNoise,
+    LevelCallback? onLevel,
     int sampleRate = 16000,
     int frameSize = 320,
   }) {
@@ -70,6 +75,7 @@ class SoundDetector {
     final detector = SoundDetector._internal(
       settings: settings,
       onNoise: onNoise,
+      onLevel: onLevel,
       sampleRate: sampleRate,
       frameSize: frameSize,
       frameDurationMs: frameDurationMs,

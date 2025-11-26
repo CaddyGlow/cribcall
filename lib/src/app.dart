@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'features/landing/role_selection_page.dart';
+import 'features/listener/noise_event_handler.dart';
 import 'theme.dart';
 
 class CribCallApp extends StatelessWidget {
@@ -12,7 +13,9 @@ class CribCallApp extends StatelessWidget {
       title: 'CribCall',
       debugShowCheckedModeBanner: false,
       theme: buildTheme(),
-      home: const RoleSelectionPage(),
+      home: const NoiseEventHandler(
+        child: RoleSelectionPage(),
+      ),
     );
   }
 }

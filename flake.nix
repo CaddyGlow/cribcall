@@ -16,8 +16,26 @@
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        pkgs = import nixpkgs { inherit system; };
+        pkgs = import nixpkgs {
+          inherit system;
+          config.allowUnfree = true;
+          config.android_sdk.accept_license = true;
+        };
         flutter = pkgs.flutter;
+        androidComposition = pkgs.androidenv.composeAndroidPackages {
+          cmdLineToolsVersion = "11.0";
+          platformToolsVersion = "36.0.2";
+          buildToolsVersions = [ "36.0.0" ];
+          platformVersions = [ "34" ];
+          includeEmulator = true;
+          emulatorVersion = "36.4.1";
+          includeSystemImages = true;
+          systemImageTypes = [ "google_apis_playstore" ];
+          abiVersions = [ "x86_64" ];
+          includeNDK = true;
+          ndkVersions = [ "26.1.10909125" ];
+        };
+        androidSdk = androidComposition.androidsdk;
         rustToolchain = builtins.fromTOML (builtins.readFile (self + "/rust-toolchain.toml"));
         rustcChannel = rustToolchain.toolchain.channel;
         libPath = pkgs.lib.makeLibraryPath [
@@ -27,6 +45,8 @@
           pkgs.gtk3
           pkgs.libsecret
           pkgs.libGL
+          pkgs.libdrm
+          pkgs.libgbm
         ];
         bindgenIncludePath = [
           ''-I"${pkgs.llvmPackages_latest.libclang.lib}/lib/clang/${pkgs.llvmPackages_latest.libclang.version}/include"''
@@ -46,7 +66,7 @@
             pkgs.openssl
             flutter
             pkgs.dart
-            pkgs.android-tools # adb/fastboot
+            androidSdk
             pkgs.openjdk
             pkgs.clang
             pkgs.llvmPackages.bintools
@@ -59,6 +79,8 @@
             pkgs.gtk3
             pkgs.libsecret
             pkgs.libGL
+            pkgs.libdrm
+            pkgs.libgbm
           ];
 
           RUSTC_VERSION = rustcChannel;
@@ -77,23 +99,19 @@
 
           LD_LIBRARY_PATH = libPath;
 
+          LIBRARY_PATH = libPath;
+
           shellHook = ''
             export FLUTTER_ROOT=${flutter}
             export PATH="$FLUTTER_ROOT/bin:$FLUTTER_ROOT/bin/cache/dart-sdk/bin:$PATH"
             export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
             export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/$RUSTC_VERSION-x86_64-unknown-linux-gnu/bin/
-            export ANDROID_SDK_ROOT="''${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}"
+            export ANDROID_SDK_ROOT="${androidSdk}/libexec/android-sdk"
             export ANDROID_HOME=$ANDROID_SDK_ROOT
-            if [ -z "''${ANDROID_NDK_HOME:-}" ] && [ -d "$ANDROID_SDK_ROOT/ndk" ]; then
-              android_ndk_version=$(ls -1 "$ANDROID_SDK_ROOT/ndk" 2>/dev/null | sort -V | tail -n1)
-              if [ -n "$android_ndk_version" ]; then
-                export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$android_ndk_version"
-              fi
-            fi
-            if [ -n "''${ANDROID_NDK_HOME:-}" ]; then
-              export ANDROID_NDK_ROOT=$ANDROID_NDK_HOME
-            fi
-            echo "CribCall dev shell ready (Flutter, Dart, rustup-managed Rust, Android tools)."
+            export ANDROID_AVD_HOME="$HOME/.config/.android/avd"
+            export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/26.1.10909125"
+            export ANDROID_NDK_ROOT=$ANDROID_NDK_HOME
+            echo "CribCall dev shell ready (Flutter, Dart, rustup-managed Rust, Android SDK)."
           '';
         };
 

@@ -204,13 +204,26 @@ final controlClientProvider =
     NotifierProvider<ControlClientController, ControlClientState>(
       ControlClientController.new,
     );
+/// Derived provider that only emits when the trusted listener FINGERPRINTS change.
+/// This prevents server restarts when only metadata (like FCM tokens) are updated.
+final _trustedListenerFingerprintsProvider = Provider<Set<String>?>((ref) {
+  final listeners = ref.watch(trustedListenersProvider);
+  final data = listeners.asData?.value;
+  if (data == null) return null;
+  return data.map((p) => p.certFingerprint).toSet();
+});
+
 final controlServerAutoStartProvider = Provider<void>((ref) {
   final monitoringEnabled = ref.watch(monitoringStatusProvider);
   final identity = ref.watch(identityProvider);
-  final trustedListeners = ref.watch(trustedListenersProvider);
+  // Watch fingerprints only (not full listener data with FCM tokens)
+  final trustedFingerprints = ref.watch(_trustedListenerFingerprintsProvider);
   final monitorSettings = ref.watch(monitorSettingsProvider);
 
   Future.microtask(() async {
+    // Read full listener data only when actually starting the server
+    final trustedListeners = ref.read(trustedListenersProvider);
+
     if (!monitoringEnabled ||
         !identity.hasValue ||
         !trustedListeners.hasValue ||
@@ -235,7 +248,7 @@ final controlServerAutoStartProvider = Provider<void>((ref) {
     developer.log(
       'Server auto-start invoking '
       'controlPort=$kControlDefaultPort pairingPort=$kPairingDefaultPort '
-      'trusted=${peers.length}',
+      'trusted=${peers.length} fingerprints=${trustedFingerprints?.length ?? 0}',
       name: 'control_server',
     );
 
@@ -263,28 +276,59 @@ final backgroundServiceProvider = Provider<BackgroundServiceManager>((ref) {
 /// Audio capture state tracking
 enum AudioCaptureStatus { stopped, starting, running, error }
 
+/// Number of level samples to keep for waveform display (~5 seconds at 50fps).
+const int kLevelHistorySize = 250;
+
 class AudioCaptureState {
   const AudioCaptureState({
     this.status = AudioCaptureStatus.stopped,
     this.error,
+    this.level = 0,
+    this.levelHistory = const [],
   });
 
   final AudioCaptureStatus status;
   final String? error;
+  /// Current audio level (0-100).
+  final int level;
+  /// Recent level history for waveform display.
+  final List<int> levelHistory;
 
-  AudioCaptureState copyWith({AudioCaptureStatus? status, String? error}) {
+  AudioCaptureState copyWith({
+    AudioCaptureStatus? status,
+    String? error,
+    int? level,
+    List<int>? levelHistory,
+  }) {
     return AudioCaptureState(
       status: status ?? this.status,
       error: error,
+      level: level ?? this.level,
+      levelHistory: levelHistory ?? this.levelHistory,
     );
   }
 }
 
 class AudioCaptureController extends Notifier<AudioCaptureState> {
   AudioCaptureService? _service;
+  final List<int> _levelBuffer = [];
 
   @override
   AudioCaptureState build() => const AudioCaptureState();
+
+  /// Whether the debug audio capture service is being used.
+  bool get isDebugCapture => _service is DebugAudioCaptureService;
+
+  void _onLevel(int level) {
+    _levelBuffer.add(level);
+    if (_levelBuffer.length > kLevelHistorySize) {
+      _levelBuffer.removeAt(0);
+    }
+    state = state.copyWith(
+      level: level,
+      levelHistory: List.unmodifiable(_levelBuffer),
+    );
+  }
 
   Future<void> start({
     required NoiseSettings settings,
@@ -302,14 +346,29 @@ class AudioCaptureController extends Notifier<AudioCaptureState> {
 
     // Select platform-appropriate service
     if (!kIsWeb && Platform.isLinux) {
-      _service = LinuxSubprocessAudioCaptureService(
-        settings: settings,
-        onNoise: onNoise,
-      );
+      // In debug mode on Linux, use synthetic audio for testing
+      if (kDebugMode) {
+        developer.log(
+          'Using debug audio capture (synthetic audio)',
+          name: 'audio_capture',
+        );
+        _service = DebugAudioCaptureService(
+          settings: settings,
+          onNoise: onNoise,
+          onLevel: _onLevel,
+        );
+      } else {
+        _service = LinuxSubprocessAudioCaptureService(
+          settings: settings,
+          onNoise: onNoise,
+          onLevel: _onLevel,
+        );
+      }
     } else if (!kIsWeb && Platform.isAndroid) {
       _service = AndroidAudioCaptureService(
         settings: settings,
         onNoise: onNoise,
+        onLevel: _onLevel,
       );
     } else {
       developer.log(
@@ -319,6 +378,7 @@ class AudioCaptureController extends Notifier<AudioCaptureState> {
       _service = NoopAudioCaptureService(
         settings: settings,
         onNoise: onNoise,
+        onLevel: _onLevel,
       );
     }
 
@@ -335,6 +395,22 @@ class AudioCaptureController extends Notifier<AudioCaptureState> {
     }
   }
 
+  /// Inject synthetic test noise into the audio stream.
+  /// Only works when using [DebugAudioCaptureService].
+  /// Also plays a test tone through the virtual audio sink for WebRTC capture.
+  Future<void> injectTestNoise({int durationMs = 1500}) async {
+    if (_service is DebugAudioCaptureService) {
+      await (_service as DebugAudioCaptureService).injectTestNoise(
+        durationMs: durationMs,
+      );
+    } else {
+      developer.log(
+        'Cannot inject test noise: not using debug audio capture',
+        name: 'audio_capture',
+      );
+    }
+  }
+
   Future<void> stop() async {
     if (_service == null) return;
 
@@ -344,6 +420,7 @@ class AudioCaptureController extends Notifier<AudioCaptureState> {
       developer.log('Audio capture stop error: $e', name: 'audio_capture');
     }
     _service = null;
+    _levelBuffer.clear();
     state = const AudioCaptureState(status: AudioCaptureStatus.stopped);
     developer.log('Audio capture stopped', name: 'audio_capture');
   }

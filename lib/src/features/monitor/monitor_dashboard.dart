@@ -271,32 +271,87 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
             const SizedBox(height: 16),
             const Divider(),
             const SizedBox(height: 8),
-            Text(
-              'Testing',
-              style: Theme.of(context)
-                  .textTheme
-                  .titleSmall
-                  ?.copyWith(fontWeight: FontWeight.w800),
+            Row(
+              children: [
+                Text(
+                  'Testing',
+                  style: Theme.of(context)
+                      .textTheme
+                      .titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(width: 8),
+                if (ref.watch(audioCaptureProvider.notifier).isDebugCapture)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.shade100,
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: Colors.orange.shade300),
+                    ),
+                    child: Text(
+                      'SYNTHETIC AUDIO',
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: Colors.orange.shade800,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ),
+              ],
             ),
             const SizedBox(height: 8),
-            FilledButton.icon(
-              onPressed: controlServer.status == ControlServerStatus.running
-                  ? () {
-                      final timestampMs = DateTime.now().millisecondsSinceEpoch;
-                      ref.read(controlServerProvider.notifier).broadcastNoiseEvent(
-                        timestampMs: timestampMs,
-                        peakLevel: 75,
-                      );
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Test noise event sent'),
-                          duration: Duration(seconds: 2),
-                        ),
-                      );
-                    }
-                  : null,
-              icon: const Icon(Icons.volume_up),
-              label: const Text('Send Test Noise Event'),
+            // Audio waveform
+            if (monitoringEnabled) ...[
+              _AudioWaveform(
+                levelHistory: ref.watch(audioCaptureProvider).levelHistory,
+                currentLevel: ref.watch(audioCaptureProvider).level,
+                threshold: settings.noise.threshold,
+                isDebugCapture: ref.watch(audioCaptureProvider.notifier).isDebugCapture,
+              ),
+              const SizedBox(height: 12),
+            ],
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                FilledButton.icon(
+                  onPressed: controlServer.status == ControlServerStatus.running
+                      ? () {
+                          final timestampMs = DateTime.now().millisecondsSinceEpoch;
+                          ref.read(controlServerProvider.notifier).broadcastNoiseEvent(
+                            timestampMs: timestampMs,
+                            peakLevel: 75,
+                          );
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Test noise event sent'),
+                              duration: Duration(seconds: 2),
+                            ),
+                          );
+                        }
+                      : null,
+                  icon: const Icon(Icons.volume_up),
+                  label: const Text('Send Test Noise Event'),
+                ),
+                // Show inject button only when using debug audio capture
+                if (ref.watch(audioCaptureProvider.notifier).isDebugCapture)
+                  OutlinedButton.icon(
+                    onPressed: monitoringEnabled
+                        ? () {
+                            ref.read(audioCaptureProvider.notifier).injectTestNoise();
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Injecting synthetic noise...'),
+                                duration: Duration(seconds: 2),
+                              ),
+                            );
+                          }
+                        : null,
+                    icon: const Icon(Icons.graphic_eq),
+                    label: const Text('Inject Synthetic Noise'),
+                  ),
+              ],
             ),
           ],
         ),
@@ -822,4 +877,148 @@ void _showQrSheet(
       );
     },
   );
+}
+
+class _AudioWaveform extends StatelessWidget {
+  const _AudioWaveform({
+    required this.levelHistory,
+    required this.currentLevel,
+    required this.threshold,
+    this.isDebugCapture = false,
+  });
+
+  final List<int> levelHistory;
+  final int currentLevel;
+  final int threshold;
+  final bool isDebugCapture;
+
+  @override
+  Widget build(BuildContext context) {
+    final isAboveThreshold = currentLevel >= threshold;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(
+              isDebugCapture ? Icons.science : Icons.graphic_eq,
+              size: 16,
+              color: isDebugCapture ? Colors.orange.shade600 : AppColors.muted,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              isDebugCapture ? 'Synthetic Audio' : 'Audio Waveform',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: isDebugCapture ? Colors.orange.shade600 : AppColors.muted,
+                    fontWeight: FontWeight.w600,
+                  ),
+            ),
+            const Spacer(),
+            Text(
+              '$currentLevel',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: isAboveThreshold ? AppColors.warning : AppColors.muted,
+                    fontWeight: FontWeight.w700,
+                    fontFamily: 'monospace',
+                  ),
+            ),
+            Text(
+              ' / $threshold',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: AppColors.muted,
+                  ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Container(
+          height: 60,
+          width: double.infinity,
+          decoration: BoxDecoration(
+            color: Colors.grey.shade100,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: Colors.grey.shade300),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: CustomPaint(
+            painter: _WaveformPainter(
+              levels: levelHistory,
+              threshold: threshold,
+              primaryColor: AppColors.primary,
+              warningColor: AppColors.warning,
+            ),
+            size: Size.infinite,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _WaveformPainter extends CustomPainter {
+  _WaveformPainter({
+    required this.levels,
+    required this.threshold,
+    required this.primaryColor,
+    required this.warningColor,
+  });
+
+  final List<int> levels;
+  final int threshold;
+  final Color primaryColor;
+  final Color warningColor;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (levels.isEmpty) return;
+
+    final thresholdY = size.height * (1 - threshold / 100.0);
+
+    // Draw threshold line
+    final thresholdPaint = Paint()
+      ..color = Colors.red.withValues(alpha: 0.4)
+      ..strokeWidth = 1
+      ..style = PaintingStyle.stroke;
+    canvas.drawLine(
+      Offset(0, thresholdY),
+      Offset(size.width, thresholdY),
+      thresholdPaint,
+    );
+
+    // Calculate bar width based on number of samples to show
+    const maxBars = 150; // Show up to 150 bars (~3 seconds)
+    final samplesToShow = levels.length > maxBars ? maxBars : levels.length;
+    final startIndex = levels.length > maxBars ? levels.length - maxBars : 0;
+    final barWidth = size.width / maxBars;
+    final barSpacing = 1.0;
+
+    // Draw waveform bars
+    for (var i = 0; i < samplesToShow; i++) {
+      final level = levels[startIndex + i];
+      final barHeight = (level / 100.0) * size.height;
+      final x = i * barWidth;
+      final y = size.height - barHeight;
+
+      final isAboveThreshold = level >= threshold;
+      final paint = Paint()
+        ..color = isAboveThreshold
+            ? warningColor.withValues(alpha: 0.8)
+            : primaryColor.withValues(alpha: 0.7)
+        ..style = PaintingStyle.fill;
+
+      // Draw bar from bottom
+      final rect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(x, y, barWidth - barSpacing, barHeight),
+        const Radius.circular(1),
+      );
+      canvas.drawRRect(rect, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_WaveformPainter oldDelegate) {
+    return oldDelegate.levels != levels ||
+        oldDelegate.threshold != threshold;
+  }
 }

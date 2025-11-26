@@ -18,6 +18,7 @@ import 'control_client.dart' as client;
 import '../fcm/fcm_sender.dart';
 import '../fcm/fcm_service.dart';
 import '../background/background_service.dart';
+import '../webrtc/monitor_streaming_controller.dart';
 import 'package:uuid/uuid.dart';
 
 // -----------------------------------------------------------------------------
@@ -245,6 +246,13 @@ class ControlServerState {
   final List<String> trustedFingerprints;
   final String? fingerprint;
   final String? error;
+
+  bool get isRunning => status == ControlServerStatus.running;
+}
+
+bool _setEquals<T>(Set<T> a, Set<T> b) {
+  if (a.length != b.length) return false;
+  return a.containsAll(b);
 }
 
 class ControlServerController extends Notifier<ControlServerState> {
@@ -266,9 +274,19 @@ class ControlServerController extends Notifier<ControlServerState> {
     required List<TrustedPeer> trustedPeers,
   }) async {
     if (_starting) return;
-    _starting = true;
 
     final trustedFingerprints = trustedPeers.map((p) => p.certFingerprint).toList();
+
+    // Skip restart if already running with same configuration
+    if (state.isRunning &&
+        state.port == port &&
+        state.fingerprint == identity.certFingerprint &&
+        _setEquals(state.trustedFingerprints.toSet(), trustedFingerprints.toSet())) {
+      _logControl('Control server already running with same config, skipping restart');
+      return;
+    }
+
+    _starting = true;
 
     _logControl(
       'Starting control server port=$port '
@@ -294,6 +312,9 @@ class ControlServerController extends Notifier<ControlServerState> {
       // Listen for server events (new connections, etc.)
       _eventSub?.cancel();
       _eventSub = _server!.events.listen(_handleServerEvent);
+
+      // Set up streaming controller send callback
+      ref.read(monitorStreamingProvider.notifier).setSendCallback(_sendToConnection);
 
       final actualPort = _server!.boundPort ?? port;
       _logControl(
@@ -332,7 +353,20 @@ class ControlServerController extends Notifier<ControlServerState> {
       case server.ClientDisconnected(:final connectionId, :final reason):
         _logControl('Client disconnected: $connectionId reason=$reason');
         _connections.remove(connectionId);
+        // Clean up any streaming sessions for this connection
+        ref.read(monitorStreamingProvider.notifier).endSessionsForConnection(connectionId);
     }
+  }
+
+  /// Send a message to a specific connection.
+  Future<void> _sendToConnection(String connectionId, ControlMessage message) async {
+    final connection = _connections[connectionId];
+    if (connection == null) {
+      _logControl('Cannot send to unknown connection: $connectionId');
+      return;
+    }
+    _logControl('Sending ${message.type.name} to $connectionId');
+    connection.send(message);
   }
 
   void _listenToConnection(ControlConnection connection) {
@@ -351,10 +385,52 @@ class ControlServerController extends Notifier<ControlServerState> {
     switch (message) {
       case FcmTokenUpdateMessage(:final fcmToken, :final listenerId):
         _handleFcmTokenUpdate(listenerId, fcmToken);
+
+      // WebRTC signaling messages
+      case StartStreamRequestMessage(:final sessionId, :final mediaType):
+        _handleStreamRequest(connection.connectionId, sessionId, mediaType);
+
+      case WebRtcAnswerMessage(:final sessionId, :final sdp):
+        _handleWebRtcAnswer(sessionId, sdp);
+
+      case WebRtcIceMessage(:final sessionId, :final candidate):
+        _handleWebRtcIce(sessionId, candidate);
+
+      case EndStreamMessage(:final sessionId):
+        _handleEndStream(sessionId);
+
       default:
         // Other message types handled as needed
         break;
     }
+  }
+
+  void _handleStreamRequest(String connectionId, String sessionId, String mediaType) {
+    _logControl('Stream request: session=$sessionId media=$mediaType');
+    final streaming = ref.read(monitorStreamingProvider.notifier);
+    streaming.handleStreamRequest(
+      sessionId: sessionId,
+      connectionId: connectionId,
+      mediaType: mediaType,
+    );
+  }
+
+  void _handleWebRtcAnswer(String sessionId, String sdp) {
+    _logControl('WebRTC answer: session=$sessionId');
+    final streaming = ref.read(monitorStreamingProvider.notifier);
+    streaming.handleAnswer(sessionId: sessionId, sdp: sdp);
+  }
+
+  void _handleWebRtcIce(String sessionId, Map<String, dynamic> candidate) {
+    _logControl('WebRTC ICE: session=$sessionId');
+    final streaming = ref.read(monitorStreamingProvider.notifier);
+    streaming.handleIceCandidate(sessionId: sessionId, candidate: candidate);
+  }
+
+  void _handleEndStream(String sessionId) {
+    _logControl('End stream: session=$sessionId');
+    final streaming = ref.read(monitorStreamingProvider.notifier);
+    streaming.handleEndStream(sessionId: sessionId);
   }
 
   /// Handle FCM token update from a listener.
@@ -594,6 +670,7 @@ class ControlClientController extends Notifier<ControlClientState> {
   StreamSubscription<ControlMessage>? _messageSub;
   ListenerServiceManager? _listenerService;
   final _uuid = const Uuid();
+  bool _disposed = false;
 
   /// Stream controller for noise events - UI can subscribe to receive alerts.
   final _noiseEventController = StreamController<NoiseEventData>.broadcast();
@@ -609,6 +686,7 @@ class ControlClientController extends Notifier<ControlClientState> {
 
   @override
   ControlClientState build() {
+    _disposed = false;
     ref.onDispose(_shutdown);
 
     // Wire up FCM noise events to be processed through our handler
@@ -624,6 +702,7 @@ class ControlClientController extends Notifier<ControlClientState> {
     required DeviceIdentity identity,
   }) async {
     await disconnect();
+    _disposed = false; // Reset after disconnect cleanup
 
     final ip = advertisement.ip;
     if (ip == null) {
@@ -745,8 +824,11 @@ class ControlClientController extends Notifier<ControlClientState> {
     );
 
     // Check if already received via FCM
+    _logClient('Checking dedup for event: ${event.eventId}');
     final dedup = ref.read(noiseEventDeduplicationProvider.notifier);
-    if (!dedup.processEvent(event)) {
+    final isNew = dedup.processEvent(event);
+    _logClient('Dedup result: isNew=$isNew');
+    if (!isNew) {
       _logClient('Duplicate noise event ignored (already received via FCM)');
       return;
     }
@@ -770,13 +852,21 @@ class ControlClientController extends Notifier<ControlClientState> {
 
   /// Process a new (non-duplicate) noise event.
   void _processNewNoiseEvent(NoiseEventData event) {
+    _logClient('Processing noise event: ${event.eventId} disposed=$_disposed');
+
+    if (_disposed) {
+      _logClient('Noise event ignored: controller disposed');
+      return;
+    }
+
     // Record the noise event for this monitor
     ref.read(trustedMonitorsProvider.notifier).recordNoiseEvent(
       monitorId: event.monitorId,
       timestampMs: event.timestamp,
     );
 
-    // Emit to stream for UI listeners
+    // Emit to stream for UI listeners (guard against closed controller)
+    _logClient('Emitting noise event to stream');
     _noiseEventController.add(event);
 
     // Check listener settings to determine action
@@ -934,6 +1024,7 @@ class ControlClientController extends Notifier<ControlClientState> {
   Future<void> disconnect() => _shutdown();
 
   Future<void> _shutdown() async {
+    _disposed = true;
     _logClient('Disconnecting');
     _messageSub?.cancel();
     _messageSub = null;
@@ -952,9 +1043,9 @@ class ControlClientController extends Notifier<ControlClientState> {
     _connection = null;
     _client = null;
 
-    // Close event streams
-    _noiseEventController.close();
-    _webrtcSignalingController.close();
+    // Note: Don't close broadcast stream controllers - they can't be reused after close,
+    // and they don't hold resources that need cleanup. The _disposed flag guards against
+    // adding events after shutdown.
 
     if (state.status != ControlClientStatus.idle) {
       state = const ControlClientState.idle();

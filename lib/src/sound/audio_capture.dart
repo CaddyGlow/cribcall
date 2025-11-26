@@ -9,6 +9,7 @@ import '../domain/models.dart';
 import 'sound_detector.dart';
 
 typedef NoiseEventSink = FutureOr<void> Function(DetectedNoise event);
+typedef LevelSink = void Function(int level);
 
 /// Platform-agnostic audio capture shim. Platform code should implement
 /// [start] to stream PCM frames into the provided [SoundDetector].
@@ -16,11 +17,13 @@ abstract class AudioCaptureService {
   AudioCaptureService({
     required NoiseSettings settings,
     required NoiseEventSink onNoise,
+    LevelSink? onLevel,
     this.sampleRate = 16000,
     this.frameSize = 320,
   }) : detector = SoundDetector(
          settings: settings,
          onNoise: (event) => onNoise(event),
+         onLevel: onLevel,
          sampleRate: sampleRate,
          frameSize: frameSize,
        );
@@ -35,7 +38,11 @@ abstract class AudioCaptureService {
 
 /// No-op fallback for platforms without capture wired yet.
 class NoopAudioCaptureService extends AudioCaptureService {
-  NoopAudioCaptureService({required super.settings, required super.onNoise});
+  NoopAudioCaptureService({
+    required super.settings,
+    required super.onNoise,
+    super.onLevel,
+  });
 
   @override
   Future<void> start() async {}
@@ -44,12 +51,195 @@ class NoopAudioCaptureService extends AudioCaptureService {
   Future<void> stop() async {}
 }
 
+/// Debug audio capture that captures from the virtual mic (cribcall_virtual.monitor).
+/// Used for testing on Linux - captures real audio that WebRTC also streams.
+/// Call [injectTestNoise] to play a tone into the virtual sink.
+class DebugAudioCaptureService extends AudioCaptureService {
+  DebugAudioCaptureService({
+    required super.settings,
+    required super.onNoise,
+    super.onLevel,
+    super.sampleRate,
+    super.frameSize,
+  });
+
+  Process? _recordProcess;
+  StreamSubscription<List<int>>? _stdoutSub;
+  final _buffer = BytesBuilder(copy: false);
+  int _bytesPerFrame = 0;
+  Process? _toneProcess;
+
+  @override
+  Future<void> start() async {
+    if (_recordProcess != null) return;
+
+    _bytesPerFrame = frameSize * 2; // 16-bit = 2 bytes per sample
+
+    developer.log(
+      'Starting debug audio capture from cribcall_virtual.monitor',
+      name: 'audio_capture',
+    );
+
+    // Capture from the virtual mic monitor using pw-record or parec
+    final commands = [
+      [
+        'pw-record',
+        '--rate=$sampleRate',
+        '--channels=1',
+        '--format=s16',
+        '--target=cribcall_virtual.monitor',
+        '-',
+      ],
+      [
+        'parec',
+        '--rate=$sampleRate',
+        '--channels=1',
+        '--format=s16le',
+        '--raw',
+        '--device=cribcall_virtual.monitor',
+      ],
+    ];
+
+    for (final cmd in commands) {
+      try {
+        developer.log(
+          'Trying debug capture with: ${cmd.first}',
+          name: 'audio_capture',
+        );
+        _recordProcess = await Process.start(cmd.first, cmd.skip(1).toList());
+        developer.log(
+          'Started debug capture with ${cmd.first} (pid=${_recordProcess!.pid})',
+          name: 'audio_capture',
+        );
+        break;
+      } catch (e) {
+        developer.log(
+          '${cmd.first} not available: $e',
+          name: 'audio_capture',
+        );
+      }
+    }
+
+    if (_recordProcess == null) {
+      developer.log(
+        'No audio capture tool available - run scripts/setup-virtual-mic.sh first',
+        name: 'audio_capture',
+      );
+      return;
+    }
+
+    _stdoutSub = _recordProcess!.stdout.listen(
+      _onData,
+      onError: (Object e) {
+        developer.log('Debug capture stream error: $e', name: 'audio_capture');
+      },
+      onDone: () {
+        developer.log('Debug capture stream ended', name: 'audio_capture');
+      },
+    );
+
+    // Log stderr for debugging
+    _recordProcess!.stderr.transform(const SystemEncoding().decoder).listen((line) {
+      developer.log('Debug capture stderr: $line', name: 'audio_capture');
+    });
+
+    developer.log('Debug audio capture started', name: 'audio_capture');
+  }
+
+  void _onData(List<int> chunk) {
+    _buffer.add(chunk);
+    final bytes = Uint8List.fromList(_buffer.takeBytes());
+    var offset = 0;
+
+    while (offset + _bytesPerFrame <= bytes.length) {
+      final frameBytes = Uint8List.sublistView(bytes, offset, offset + _bytesPerFrame);
+      final samples = _pcmBytesToSamples(frameBytes);
+      final timestampMs = DateTime.now().millisecondsSinceEpoch;
+      detector.addFrame(samples, timestampMs: timestampMs);
+      offset += _bytesPerFrame;
+    }
+
+    // Keep remaining bytes for next chunk
+    if (offset < bytes.length) {
+      _buffer.add(bytes.sublist(offset));
+    }
+  }
+
+  List<double> _pcmBytesToSamples(Uint8List bytes) {
+    final samples = <double>[];
+    final data = ByteData.sublistView(bytes);
+    for (var i = 0; i < bytes.length; i += 2) {
+      final int16 = data.getInt16(i, Endian.little);
+      samples.add(int16 / 32768.0);
+    }
+    return samples;
+  }
+
+  /// Inject a test noise burst by playing a tone into the virtual sink.
+  /// This audio will be captured by both the waveform AND WebRTC.
+  Future<void> injectTestNoise({int durationMs = 1500}) async {
+    developer.log(
+      'Injecting test noise (~${durationMs}ms)',
+      name: 'audio_capture',
+    );
+    await _playTestTone(durationMs);
+  }
+
+  /// Play a test tone through the cribcall_virtual sink.
+  /// This audio flows through the virtual mic and is captured by both
+  /// the waveform (via pw-record) and WebRTC (via getUserMedia).
+  Future<void> _playTestTone(int durationMs) async {
+    // Kill any existing tone
+    _toneProcess?.kill();
+    _toneProcess = null;
+
+    try {
+      // Use pw-play with a generated tone file, or ffmpeg piped to pw-play
+      _toneProcess = await Process.start('bash', [
+        '-c',
+        'ffmpeg -f lavfi -i "sine=frequency=440:duration=${durationMs / 1000}" '
+            '-f wav -ar $sampleRate -ac 1 - 2>/dev/null | '
+            'pw-play --target=cribcall_virtual -',
+      ]);
+
+      developer.log(
+        'Playing test tone on cribcall_virtual sink',
+        name: 'audio_capture',
+      );
+
+      // Auto-kill after duration + buffer
+      Future.delayed(Duration(milliseconds: durationMs + 1000), () {
+        _toneProcess?.kill();
+        _toneProcess = null;
+      });
+    } catch (e) {
+      developer.log(
+        'Could not play test tone: $e',
+        name: 'audio_capture',
+      );
+    }
+  }
+
+  @override
+  Future<void> stop() async {
+    await _stdoutSub?.cancel();
+    _stdoutSub = null;
+    _recordProcess?.kill(ProcessSignal.sigterm);
+    _recordProcess = null;
+    _buffer.clear();
+    _toneProcess?.kill();
+    _toneProcess = null;
+    developer.log('Debug audio capture stopped', name: 'audio_capture');
+  }
+}
+
 /// Linux audio capture using PipeWire (pw-record) or PulseAudio (parec) subprocess.
 /// Streams signed 16-bit little-endian mono PCM at [sampleRate] Hz.
 class LinuxSubprocessAudioCaptureService extends AudioCaptureService {
   LinuxSubprocessAudioCaptureService({
     required super.settings,
     required super.onNoise,
+    super.onLevel,
     super.sampleRate,
     super.frameSize,
   });
@@ -177,6 +367,7 @@ class AndroidAudioCaptureService extends AudioCaptureService {
   AndroidAudioCaptureService({
     required super.settings,
     required super.onNoise,
+    super.onLevel,
     super.sampleRate,
     super.frameSize,
     MethodChannel? methodChannel,
