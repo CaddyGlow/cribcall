@@ -17,6 +17,8 @@ import 'pairing_server.dart';
 import 'control_client.dart' as client;
 import '../fcm/fcm_sender.dart';
 import '../fcm/fcm_service.dart';
+import '../background/background_service.dart';
+import 'package:uuid/uuid.dart';
 
 // -----------------------------------------------------------------------------
 // Pairing Server Controller (Monitor side - TLS only)
@@ -590,10 +592,28 @@ class ControlClientController extends Notifier<ControlClientState> {
   client.ControlClient? _client;
   ControlConnection? _connection;
   StreamSubscription<ControlMessage>? _messageSub;
+  ListenerServiceManager? _listenerService;
+  final _uuid = const Uuid();
+
+  /// Stream controller for noise events - UI can subscribe to receive alerts.
+  final _noiseEventController = StreamController<NoiseEventData>.broadcast();
+
+  /// Stream of noise events for UI to listen to.
+  Stream<NoiseEventData> get noiseEvents => _noiseEventController.stream;
+
+  /// Stream controller for WebRTC signaling messages.
+  final _webrtcSignalingController = StreamController<ControlMessage>.broadcast();
+
+  /// Stream of WebRTC signaling messages for UI/WebRTC layer.
+  Stream<ControlMessage> get webrtcSignaling => _webrtcSignalingController.stream;
 
   @override
   ControlClientState build() {
     ref.onDispose(_shutdown);
+
+    // Wire up FCM noise events to be processed through our handler
+    FcmService.instance.onNoiseEvent = _handleFcmNoiseEvent;
+
     return const ControlClientState.idle();
   }
 
@@ -667,6 +687,10 @@ class ControlClientController extends Notifier<ControlClientState> {
         peerFingerprint: _connection!.peerFingerprint,
       );
 
+      // Start foreground service to keep connection alive
+      _listenerService ??= createListenerServiceManager();
+      await _listenerService!.startListening(monitorName: monitor.monitorName);
+
       // Send FCM token to monitor (if available)
       await _sendFcmTokenToMonitor(identity.deviceId);
 
@@ -689,6 +713,19 @@ class ControlClientController extends Notifier<ControlClientState> {
     switch (message) {
       case NoiseEventMessage(:final monitorId, :final timestamp, :final peakLevel):
         _handleNoiseEvent(monitorId, timestamp, peakLevel);
+
+      // WebRTC signaling messages - forward to UI/WebRTC layer
+      case StartStreamResponseMessage():
+      case WebRtcOfferMessage():
+      case WebRtcAnswerMessage():
+      case WebRtcIceMessage():
+      case EndStreamMessage():
+        _webrtcSignalingController.add(message);
+
+      case PingMessage(:final timestamp):
+        // Respond to ping with pong
+        send(PongMessage(timestamp: timestamp));
+
       default:
         // Other message types handled as needed
         break;
@@ -714,13 +751,134 @@ class ControlClientController extends Notifier<ControlClientState> {
       return;
     }
 
+    _processNewNoiseEvent(event);
+  }
+
+  /// Handle noise event received via FCM (background/foreground).
+  void _handleFcmNoiseEvent(NoiseEventData event) {
+    _logClient('FCM noise event: monitorId=${event.monitorId} peakLevel=${event.peakLevel}');
+
+    // Check if already received via WebSocket
+    final dedup = ref.read(noiseEventDeduplicationProvider.notifier);
+    if (!dedup.processEvent(event)) {
+      _logClient('Duplicate noise event ignored (already received via WebSocket)');
+      return;
+    }
+
+    _processNewNoiseEvent(event);
+  }
+
+  /// Process a new (non-duplicate) noise event.
+  void _processNewNoiseEvent(NoiseEventData event) {
     // Record the noise event for this monitor
     ref.read(trustedMonitorsProvider.notifier).recordNoiseEvent(
-      monitorId: monitorId,
-      timestampMs: timestamp,
+      monitorId: event.monitorId,
+      timestampMs: event.timestamp,
     );
 
-    // TODO: Trigger UI notification / sound alert
+    // Emit to stream for UI listeners
+    _noiseEventController.add(event);
+
+    // Check listener settings to determine action
+    final listenerSettings = ref.read(listenerSettingsProvider).asData?.value;
+    final defaultAction = listenerSettings?.defaultAction ?? ListenerDefaultAction.notify;
+
+    _logClient('Noise event action: $defaultAction');
+
+    if (defaultAction == ListenerDefaultAction.autoOpenStream) {
+      // Auto-request WebRTC stream from monitor
+      _autoRequestStream(event.monitorId);
+    }
+  }
+
+  /// Automatically request WebRTC stream when noise event received.
+  Future<void> _autoRequestStream(String monitorId) async {
+    if (state.status != ControlClientStatus.connected) {
+      _logClient('Cannot auto-request stream: not connected');
+      return;
+    }
+
+    // Check if already streaming (avoid duplicate requests)
+    // For now, we send the request and let the monitor handle duplicates
+
+    _logClient('Auto-requesting audio stream for noise event');
+
+    try {
+      await requestStream(mediaType: 'audio');
+    } catch (e) {
+      _logClient('Auto-stream request failed: $e');
+    }
+  }
+
+  /// Request a WebRTC stream from the connected monitor.
+  /// [mediaType] can be "audio" or "audio_video".
+  Future<String> requestStream({String mediaType = 'audio'}) async {
+    if (state.status != ControlClientStatus.connected) {
+      throw StateError('Not connected to monitor');
+    }
+
+    final sessionId = _uuid.v4();
+    final message = StartStreamRequestMessage(
+      sessionId: sessionId,
+      mediaType: mediaType,
+    );
+
+    _logClient('Requesting stream: sessionId=$sessionId mediaType=$mediaType');
+    await send(message);
+
+    return sessionId;
+  }
+
+  /// End an active WebRTC stream session.
+  Future<void> endStream(String sessionId) async {
+    if (state.status != ControlClientStatus.connected) {
+      _logClient('Cannot end stream: not connected');
+      return;
+    }
+
+    final message = EndStreamMessage(sessionId: sessionId);
+    _logClient('Ending stream: sessionId=$sessionId');
+    await send(message);
+  }
+
+  /// Send WebRTC answer SDP to the monitor.
+  Future<void> sendWebRtcAnswer({
+    required String sessionId,
+    required String sdp,
+  }) async {
+    if (state.status != ControlClientStatus.connected) {
+      throw StateError('Not connected to monitor');
+    }
+
+    final message = WebRtcAnswerMessage(sessionId: sessionId, sdp: sdp);
+    _logClient('Sending WebRTC answer: sessionId=$sessionId');
+    await send(message);
+  }
+
+  /// Send WebRTC ICE candidate to the monitor.
+  Future<void> sendWebRtcIce({
+    required String sessionId,
+    required Map<String, dynamic> candidate,
+  }) async {
+    if (state.status != ControlClientStatus.connected) {
+      throw StateError('Not connected to monitor');
+    }
+
+    final message = WebRtcIceMessage(sessionId: sessionId, candidate: candidate);
+    _logClient('Sending WebRTC ICE: sessionId=$sessionId');
+    await send(message);
+  }
+
+  /// Pin the current stream to prevent auto-timeout.
+  Future<void> pinStream(String sessionId) async {
+    if (state.status != ControlClientStatus.connected) {
+      _logClient('Cannot pin stream: not connected');
+      return;
+    }
+
+    final message = PinStreamMessage(sessionId: sessionId);
+    _logClient('Pinning stream: sessionId=$sessionId');
+    await send(message);
   }
 
   /// Send FCM token to the connected monitor.
@@ -779,11 +937,25 @@ class ControlClientController extends Notifier<ControlClientState> {
     _logClient('Disconnecting');
     _messageSub?.cancel();
     _messageSub = null;
+
+    // Clear FCM callback to avoid handling events when not connected
+    FcmService.instance.onNoiseEvent = null;
+
+    // Stop foreground service
+    try {
+      await _listenerService?.stopListening();
+    } catch (_) {}
+
     try {
       await _connection?.close();
     } catch (_) {}
     _connection = null;
     _client = null;
+
+    // Close event streams
+    _noiseEventController.close();
+    _webrtcSignalingController.close();
+
     if (state.status != ControlClientStatus.idle) {
       state = const ControlClientState.idle();
     }

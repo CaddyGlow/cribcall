@@ -38,6 +38,10 @@ class MainActivity : FlutterActivity() {
     private val RECORD_AUDIO_PERMISSION_CODE = 1001
     private val POST_NOTIFICATIONS_PERMISSION_CODE = 1002
 
+    // Listener foreground service
+    private val listenerChannel = "cribcall/listener"
+    private val listenerLogTag = "cribcall_listener"
+
     // Service binding
     private var audioCaptureService: AudioCaptureService? = null
     private var serviceBound = false
@@ -154,6 +158,25 @@ class MainActivity : FlutterActivity() {
                 Log.i(audioLogTag, "Audio event channel disconnected")
             }
         })
+
+        // Listener foreground service channel
+        MethodChannel(messenger, listenerChannel).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "start" -> {
+                    val monitorName = call.argument<String>("monitorName") ?: "Monitor"
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !checkNotificationPermission()) {
+                        requestNotificationPermission()
+                    }
+                    startListenerService(monitorName)
+                    result.success(null)
+                }
+                "stop" -> {
+                    stopListenerService()
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
     }
 
     private fun bindAudioService() {
@@ -355,6 +378,28 @@ class MainActivity : FlutterActivity() {
         Log.i(audioLogTag, "Stopping audio capture foreground service")
         val intent = Intent(this, AudioCaptureService::class.java).apply {
             action = AudioCaptureService.ACTION_STOP
+        }
+        startService(intent)
+    }
+
+    // Listener foreground service methods
+    private fun startListenerService(monitorName: String) {
+        Log.i(listenerLogTag, "Starting listener foreground service for: $monitorName")
+        val intent = Intent(this, ListenerService::class.java).apply {
+            action = ListenerService.ACTION_START
+            putExtra("monitorName", monitorName)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+    }
+
+    private fun stopListenerService() {
+        Log.i(listenerLogTag, "Stopping listener foreground service")
+        val intent = Intent(this, ListenerService::class.java).apply {
+            action = ListenerService.ACTION_STOP
         }
         startService(intent)
     }
