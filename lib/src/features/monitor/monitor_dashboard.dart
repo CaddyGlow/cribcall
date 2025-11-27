@@ -45,12 +45,18 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
   }
 
   Future<void> _refreshAdvertisement() async {
+    _log('_refreshAdvertisement called, mounted=$mounted');
     if (!mounted) return;
     final monitoringEnabled = ref.read(monitoringStatusProvider);
     final identity = ref.read(identityProvider);
     final appSession = ref.read(appSessionProvider);
 
+    _log('_refreshAdvertisement: monitoring=$monitoringEnabled '
+        'identity.hasValue=${identity.hasValue} '
+        'appSession.hasValue=${appSession.hasValue}');
+
     if (!monitoringEnabled || !identity.hasValue || !appSession.hasValue) {
+      _log('_refreshAdvertisement: conditions not met, stopping');
       await _stopAdvertising();
       return;
     }
@@ -67,17 +73,24 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
       pairingPort: pairingPort,
     );
 
+    _log('_refreshAdvertisement: nextAd monitorId=${nextAd.monitorId} '
+        'controlPort=$controlPort pairingPort=$pairingPort '
+        'already advertising=$_advertising');
+
     if (_advertising &&
         _currentAdvertisement != null &&
         _adsEqual(_currentAdvertisement!, nextAd)) {
+      _log('_refreshAdvertisement: same ad, skipping');
       return;
     }
 
     await _stopAdvertising();
     try {
+      _log('_refreshAdvertisement: calling startAdvertise...');
       await _mdnsService.startAdvertise(nextAd);
       _currentAdvertisement = nextAd;
       _advertising = true;
+      _log('_refreshAdvertisement: SUCCESS, now advertising');
     } catch (e) {
       _log('startAdvertise failed: $e');
     }

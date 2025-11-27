@@ -68,7 +68,7 @@ void main() {
   });
 
   test('mdns browse provider deduplicates', () async {
-    final controller = StreamController<MdnsAdvertisement>();
+    final controller = StreamController<MdnsEvent>();
     final container = ProviderContainer(
       overrides: [
         mdnsServiceProvider.overrideWithValue(
@@ -86,24 +86,24 @@ void main() {
     });
 
     controller.add(
-      const MdnsAdvertisement(
+      const MdnsEvent.online(MdnsAdvertisement(
         monitorId: 'm1',
         monitorName: 'Nursery',
         monitorCertFingerprint: 'fp1',
         controlPort: kControlDefaultPort,
         pairingPort: kPairingDefaultPort,
         version: 1,
-      ),
+      )),
     );
     controller.add(
-      const MdnsAdvertisement(
+      const MdnsEvent.online(MdnsAdvertisement(
         monitorId: 'm1',
         monitorName: 'Nursery',
         monitorCertFingerprint: 'fp1',
         controlPort: kControlDefaultPort,
         pairingPort: kPairingDefaultPort,
         version: 1,
-      ),
+      )),
     );
     await controller.close();
 
@@ -177,10 +177,10 @@ void main() {
 
 class _FakeMdnsService implements MdnsService {
   _FakeMdnsService(this.stream);
-  final Stream<MdnsAdvertisement> stream;
+  final Stream<MdnsEvent> stream;
 
   @override
-  Stream<MdnsAdvertisement> browse() => stream;
+  Stream<MdnsEvent> browse() => stream;
 
   @override
   Future<void> startAdvertise(MdnsAdvertisement advertisement) async {}

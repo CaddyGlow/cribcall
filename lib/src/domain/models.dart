@@ -463,3 +463,22 @@ class MdnsAdvertisement {
     );
   }
 }
+
+/// Event emitted by mDNS browse stream indicating service online/offline status.
+class MdnsEvent {
+  const MdnsEvent({
+    required this.advertisement,
+    required this.isOnline,
+  });
+
+  final MdnsAdvertisement advertisement;
+  /// True when service is discovered/announced, false when service goes offline
+  /// (goodbye packet with TTL=0 or platform service lost callback).
+  final bool isOnline;
+
+  /// Convenience constructor for online events.
+  const MdnsEvent.online(this.advertisement) : isOnline = true;
+
+  /// Convenience constructor for offline events.
+  const MdnsEvent.offline(this.advertisement) : isOnline = false;
+}

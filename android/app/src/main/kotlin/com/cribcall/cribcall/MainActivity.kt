@@ -30,6 +30,8 @@ class MainActivity : FlutterActivity() {
     private var discoveryListener: NsdManager.DiscoveryListener? = null
     // Note: mDNS advertising (registrationListener) moved to AudioCaptureService
     private val logTag = "cribcall_mdns"
+    // Cache serviceName -> monitorId mapping for offline events
+    private val serviceNameToMonitorId = mutableMapOf<String, String>()
     private val deviceInfoChannel = "cribcall/device_info"
 
     // Audio capture via foreground service
@@ -151,8 +153,20 @@ class MainActivity : FlutterActivity() {
                         pendingMdnsParams = args
                         Log.i(audioLogTag, "Audio start with mDNS params: monitorId=${args["monitorId"]}")
                     }
-                    startAudioCaptureService()
-                    result.success(null)
+                    try {
+                        startAudioCaptureService()
+                        result.success(null)
+                    } catch (e: android.app.ForegroundServiceStartNotAllowedException) {
+                        Log.e(audioLogTag, "Cannot start foreground service from background: ${e.message}")
+                        result.error(
+                            "foreground_service_not_allowed",
+                            "Cannot start audio capture while app is in background. Please open the app first.",
+                            e.message
+                        )
+                    } catch (e: Exception) {
+                        Log.e(audioLogTag, "Failed to start audio capture service: ${e.message}")
+                        result.error("service_start_failed", e.message, null)
+                    }
                 }
                 "stop" -> {
                     stopAudioCaptureService()
@@ -324,26 +338,81 @@ class MainActivity : FlutterActivity() {
                             String(entry.value)
                         }
                         val versionValue = txt["version"]?.toIntOrNull() ?: 1
+                        val controlPort = txt["controlPort"]?.toIntOrNull() ?: resolved.port
+                        val pairingPort = txt["pairingPort"]?.toIntOrNull() ?: 48081
+                        val transport = txt["transport"] ?: "http-ws"
+                        val monitorId = txt["monitorId"] ?: resolved.serviceName
+                        val monitorName = txt["monitorName"] ?: resolved.serviceName
+
+                        // Cache serviceName -> monitorId for offline events
+                        serviceNameToMonitorId[resolved.serviceName] = monitorId
+
                         val payload = mapOf(
-                            "monitorId" to (txt["monitorId"] ?: resolved.serviceName),
-                            "monitorName" to (txt["monitorName"] ?: resolved.serviceName),
+                            "monitorId" to monitorId,
+                            "monitorName" to monitorName,
                             "monitorCertFingerprint" to (txt["monitorCertFingerprint"] ?: ""),
-                            "servicePort" to resolved.port,
+                            "controlPort" to controlPort,
+                            "pairingPort" to pairingPort,
                             "version" to versionValue,
+                            "transport" to transport,
                             "ip" to resolved.host?.hostAddress,
+                            "isOnline" to true,
                         )
                         Handler(Looper.getMainLooper()).post {
+                            val hasSink = mdnsEventSink != null
+                            Log.i(
+                                logTag,
+                                "Emitting ONLINE event for $monitorId, hasSink=$hasSink",
+                            )
                             mdnsEventSink?.success(payload)
                         }
                         Log.i(
                             logTag,
-                            "Service resolved ${payload["monitorId"]} ip=${payload["ip"]} port=${payload["servicePort"]}",
+                            "Service resolved $monitorId ip=${payload["ip"]} " +
+                            "controlPort=$controlPort pairingPort=$pairingPort transport=$transport",
                         )
                     }
                 })
             }
 
-            override fun onServiceLost(serviceInfo: NsdServiceInfo?) {}
+            override fun onServiceLost(serviceInfo: NsdServiceInfo?) {
+                if (serviceInfo == null) {
+                    Log.w(logTag, "onServiceLost called with null serviceInfo")
+                    return
+                }
+                // Look up cached monitorId, fall back to serviceName
+                val monitorId = serviceNameToMonitorId[serviceInfo.serviceName] ?: serviceInfo.serviceName
+                val wasCached = serviceNameToMonitorId.containsKey(serviceInfo.serviceName)
+                Log.i(
+                    logTag,
+                    "Service lost: serviceName=${serviceInfo.serviceName} " +
+                    "monitorId=$monitorId wasCached=$wasCached"
+                )
+
+                // Remove from cache
+                serviceNameToMonitorId.remove(serviceInfo.serviceName)
+
+                // Emit offline event
+                val payload = mapOf(
+                    "monitorId" to monitorId,
+                    "monitorName" to serviceInfo.serviceName,
+                    "monitorCertFingerprint" to "",
+                    "controlPort" to 48080,
+                    "pairingPort" to 48081,
+                    "version" to 1,
+                    "transport" to "http-ws",
+                    "ip" to (serviceInfo.host?.hostAddress ?: ""),
+                    "isOnline" to false,
+                )
+                Handler(Looper.getMainLooper()).post {
+                    val hasSink = mdnsEventSink != null
+                    Log.i(
+                        logTag,
+                        "Emitting OFFLINE event for $monitorId, hasSink=$hasSink"
+                    )
+                    mdnsEventSink?.success(payload)
+                }
+            }
         }
         discoveryListener = listener
         manager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, listener)

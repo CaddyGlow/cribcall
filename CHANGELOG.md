@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Task: plan-noise-subscriptions — Documented noise subscription/unsubscribe plan with leased FCM fallback when WebSocket is down, client mute switch, and pairing-bound token handling.
 - Task: linux-notifications-init — Added Linux initialization and notification details for local alerts so desktop noise and pairing notifications work without runtime errors.
 - Task: listener-unpair-on-remove — Added an mTLS /unpair endpoint that removes trusted listeners on the monitor, and the listener forget flow now attempts to unpair remotely before deleting local state (with tests).
 - Task: android-hostname-default — Resolve Android device names via platform channel (Settings/Build fallback) when the hostname is localhost so new installs don’t default to “localhost”.

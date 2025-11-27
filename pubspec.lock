@@ -496,14 +496,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "5.2.3"
-  multicast_dns:
-    dependency: "direct main"
-    description:
-      name: multicast_dns
-      sha256: de72ada5c3db6fdd6ad4ae99452fe05fb403c4bb37c67ceb255ddd37d2b5b1eb
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.3.3"
   node_preamble:
     dependency: transitive
     description:

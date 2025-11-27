@@ -786,7 +786,9 @@ class _SeenAdvertisement {
 final mdnsBrowseProvider = StreamProvider.autoDispose<List<MdnsAdvertisement>>((
   ref,
 ) {
+  debugPrint('[mdns_provider] mdnsBrowseProvider initializing...');
   final mdns = ref.watch(mdnsServiceProvider);
+  debugPrint('[mdns_provider] mdnsBrowseProvider got MdnsService: ${mdns.runtimeType}');
   final controller = StreamController<List<MdnsAdvertisement>>();
   final seen = <String, _SeenAdvertisement>{};
   const ttl = Duration(seconds: 45);
@@ -803,13 +805,42 @@ final mdnsBrowseProvider = StreamProvider.autoDispose<List<MdnsAdvertisement>>((
     emit();
   }
 
-  final subscription = mdns.browse().listen((event) {
-    if (event.ip != null) {
-      unawaited(
-        ref.read(trustedMonitorsProvider.notifier).updateLastKnownIp(event),
+  void remove(String monitorId) {
+    if (seen.remove(monitorId) != null) {
+      emit();
+    }
+  }
+
+  debugPrint('[mdns_provider] Subscribing to mdns.browse() stream...');
+  final browseStream = mdns.browse();
+  debugPrint('[mdns_provider] Got browse stream, now listening...');
+  final subscription = browseStream.listen((event) {
+    debugPrint(
+      '[mdns_provider] received: ${event.isOnline ? "ONLINE" : "OFFLINE"} '
+      'monitorId=${event.advertisement.monitorId} ip=${event.advertisement.ip} '
+      'seenCount=${seen.length}',
+    );
+    if (event.isOnline) {
+      if (event.advertisement.ip != null) {
+        unawaited(
+          ref.read(trustedMonitorsProvider.notifier).updateLastKnownIp(
+            event.advertisement,
+          ),
+        );
+      }
+      upsert(event.advertisement);
+      debugPrint(
+        '[mdns_provider] Upserted ${event.advertisement.monitorId}, seenCount=${seen.length}',
+      );
+    } else {
+      // Service went offline
+      final removed = seen.containsKey(event.advertisement.monitorId);
+      remove(event.advertisement.monitorId);
+      debugPrint(
+        '[mdns_provider] Removed ${event.advertisement.monitorId}, wasPresent=$removed, '
+        'seenCount=${seen.length}',
       );
     }
-    upsert(event);
   }, onError: controller.addError);
 
   final ticker = Timer.periodic(const Duration(seconds: 5), (_) {
