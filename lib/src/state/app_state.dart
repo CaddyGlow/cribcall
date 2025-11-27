@@ -9,6 +9,7 @@ import 'dart:io';
 
 import '../config/build_flags.dart';
 import '../domain/models.dart';
+import '../domain/noise_subscription.dart';
 import '../discovery/mdns_service.dart';
 import '../identity/device_identity.dart';
 import '../identity/identity_repository.dart';
@@ -21,6 +22,7 @@ import '../sound/audio_capture.dart';
 import '../storage/app_session_repository.dart';
 export '../storage/app_session_repository.dart' show AppSessionState;
 import '../storage/settings_repository.dart';
+import '../storage/noise_subscriptions_repository.dart';
 import '../storage/trusted_listeners_repository.dart';
 import '../storage/trusted_monitors_repository.dart';
 import '../control/control_service.dart';
@@ -36,6 +38,9 @@ final appSessionProvider =
     AsyncNotifierProvider<AppSessionController, AppSessionState>(
       AppSessionController.new,
     );
+
+const kNoiseSubscriptionDefaultLease = Duration(hours: 24);
+const kNoiseSubscriptionMaxLease = Duration(days: 7);
 
 /// Controller for app session state with persistence.
 class AppSessionController extends AsyncNotifier<AppSessionState> {
@@ -259,6 +264,11 @@ final listenerSettingsRepoProvider = Provider<ListenerSettingsRepository>((
 final trustedMonitorsRepoProvider = Provider<TrustedMonitorsRepository>((ref) {
   return TrustedMonitorsRepository();
 });
+final noiseSubscriptionsRepoProvider = Provider<NoiseSubscriptionsRepository>((
+  ref,
+) {
+  return NoiseSubscriptionsRepository();
+});
 final pakeEngineProvider = Provider<PakeEngine>((ref) {
   return X25519PakeEngine();
 });
@@ -274,6 +284,7 @@ final controlClientProvider =
     NotifierProvider<ControlClientController, ControlClientState>(
       ControlClientController.new,
     );
+
 /// Derived provider that only emits when the trusted listener FINGERPRINTS change.
 /// This prevents server restarts when only metadata (like FCM tokens) are updated.
 final _trustedListenerFingerprintsProvider = Provider<Set<String>?>((ref) {
@@ -326,18 +337,22 @@ final controlServerAutoStartProvider = Provider<void>((ref) {
     );
 
     // Start pairing server (TLS only, for new device pairing)
-    await ref.read(pairingServerProvider.notifier).start(
-      identity: deviceIdentity,
-      port: kPairingDefaultPort,
-      monitorName: session.deviceName,
-    );
+    await ref
+        .read(pairingServerProvider.notifier)
+        .start(
+          identity: deviceIdentity,
+          port: kPairingDefaultPort,
+          monitorName: session.deviceName,
+        );
 
     // Start control server (mTLS WebSocket, for trusted connections)
-    await ref.read(controlServerProvider.notifier).start(
-      identity: deviceIdentity,
-      port: kControlDefaultPort,
-      trustedPeers: peers,
-    );
+    await ref
+        .read(controlServerProvider.notifier)
+        .start(
+          identity: deviceIdentity,
+          port: kControlDefaultPort,
+          trustedPeers: peers,
+        );
   });
 });
 
@@ -362,8 +377,10 @@ class AudioCaptureState {
 
   final AudioCaptureStatus status;
   final String? error;
+
   /// Current audio level (0-100).
   final int level;
+
   /// Recent level history for waveform display.
   final List<int> levelHistory;
 
@@ -565,24 +582,180 @@ final audioCaptureAutoStartProvider = Provider<void>((ref) {
       name: 'audio_capture',
     );
 
-    await ref.read(audioCaptureProvider.notifier).start(
-      settings: settings.noise,
-      mdnsAdvertisement: mdnsAd,
-      onNoise: (event) {
-        developer.log(
-          'Noise detected: peak=${event.peakLevel} ts=${event.timestampMs}',
-          name: 'audio_capture',
+    await ref
+        .read(audioCaptureProvider.notifier)
+        .start(
+          settings: settings.noise,
+          mdnsAdvertisement: mdnsAd,
+          onNoise: (event) {
+            developer.log(
+              'Noise detected: peak=${event.peakLevel} ts=${event.timestampMs}',
+              name: 'audio_capture',
+            );
+            // Send noise event to connected listeners via control server
+            final server = ref.read(controlServerProvider.notifier);
+            server.broadcastNoiseEvent(
+              timestampMs: event.timestampMs,
+              peakLevel: event.peakLevel,
+            );
+          },
         );
-        // Send noise event to connected listeners via control server
-        final server = ref.read(controlServerProvider.notifier);
-        server.broadcastNoiseEvent(
-          timestampMs: event.timestampMs,
-          peakLevel: event.peakLevel,
-        );
-      },
-    );
   });
 });
+
+class NoiseSubscriptionsController
+    extends AsyncNotifier<List<NoiseSubscription>> {
+  @override
+  Future<List<NoiseSubscription>> build() async {
+    final repo = ref.read(noiseSubscriptionsRepoProvider);
+    return repo.load();
+  }
+
+  Future<({NoiseSubscription subscription, int acceptedLeaseSeconds})> upsert({
+    required TrustedPeer peer,
+    required String fcmToken,
+    required String platform,
+    int? leaseSeconds,
+  }) async {
+    final current = await _ensureValue();
+    final now = DateTime.now();
+    final accepted = _clampLeaseSeconds(leaseSeconds);
+    final expiresAt = now.add(Duration(seconds: accepted));
+
+    final subscription = NoiseSubscription(
+      deviceId: peer.deviceId,
+      certFingerprint: peer.certFingerprint,
+      fcmToken: fcmToken,
+      platform: platform,
+      expiresAtEpochSec: expiresAt.millisecondsSinceEpoch ~/ 1000,
+      createdAtEpochSec: now.millisecondsSinceEpoch ~/ 1000,
+      subscriptionId: noiseSubscriptionId(peer.deviceId, fcmToken),
+    );
+
+    final updated = [
+      // Only keep one active token per device; drop superseded tokens.
+      ...current.where((s) => s.deviceId != peer.deviceId),
+      subscription,
+    ];
+
+    state = AsyncData(updated);
+    await _save(updated);
+    developer.log(
+      'Upserted noise subscription device=${peer.deviceId} '
+      'fp=${_shortFingerprint(peer.certFingerprint)} '
+      'expiresAt=${expiresAt.toIso8601String()}',
+      name: 'noise_sub',
+    );
+
+    return (subscription: subscription, acceptedLeaseSeconds: accepted);
+  }
+
+  Future<NoiseSubscription?> unsubscribe({
+    required TrustedPeer peer,
+    String? fcmToken,
+    String? subscriptionId,
+  }) async {
+    if (fcmToken == null && subscriptionId == null) {
+      throw ArgumentError('fcmToken or subscriptionId is required');
+    }
+    final current = await _ensureValue();
+    NoiseSubscription? removed;
+    final updated = <NoiseSubscription>[];
+    for (final sub in current) {
+      final matchesDevice = sub.deviceId == peer.deviceId;
+      final matchesToken = fcmToken == null ? true : sub.fcmToken == fcmToken;
+      final matchesId = subscriptionId == null
+          ? true
+          : sub.subscriptionId == subscriptionId;
+      if (matchesDevice && matchesToken && matchesId) {
+        removed = sub;
+        continue;
+      }
+      updated.add(sub);
+    }
+
+    if (removed != null) {
+      state = AsyncData(updated);
+      await _save(updated);
+      developer.log(
+        'Unsubscribed noise token device=${peer.deviceId} '
+        'fp=${_shortFingerprint(peer.certFingerprint)}',
+        name: 'noise_sub',
+      );
+    }
+    return removed;
+  }
+
+  Future<void> clearForFingerprint(String fingerprint) async {
+    final current = await _ensureValue();
+    final updated = current
+        .where((s) => s.certFingerprint != fingerprint)
+        .toList();
+    if (updated.length == current.length) return;
+    state = AsyncData(updated);
+    await _save(updated);
+    developer.log(
+      'Cleared noise subscriptions for fp=${_shortFingerprint(fingerprint)}',
+      name: 'noise_sub',
+    );
+  }
+
+  Future<void> clearByTokens(Iterable<String> tokens) async {
+    final tokenSet = tokens.toSet();
+    if (tokenSet.isEmpty) return;
+    final current = await _ensureValue();
+    final updated = current
+        .where((s) => !tokenSet.contains(s.fcmToken))
+        .toList();
+    if (updated.length == current.length) return;
+    state = AsyncData(updated);
+    await _save(updated);
+    developer.log(
+      'Cleared ${current.length - updated.length} invalid noise tokens',
+      name: 'noise_sub',
+    );
+  }
+
+  Future<void> removeExpired({DateTime? now}) async {
+    final clock = now ?? DateTime.now();
+    final current = await _ensureValue();
+    final updated = current.where((s) => !s.isExpired(clock)).toList();
+    if (updated.length == current.length) return;
+    state = AsyncData(updated);
+    await _save(updated);
+  }
+
+  List<NoiseSubscription> active({DateTime? now}) {
+    final clock = now ?? DateTime.now();
+    final data = state.asData?.value ?? [];
+    return data.where((s) => !s.isExpired(clock)).toList();
+  }
+
+  Future<List<NoiseSubscription>> _ensureValue() async {
+    final current = state.asData?.value;
+    if (current != null) return current;
+    final repo = ref.read(noiseSubscriptionsRepoProvider);
+    final loaded = await repo.load();
+    state = AsyncData(loaded);
+    return loaded;
+  }
+
+  Future<void> _save(List<NoiseSubscription> updated) async {
+    await ref.read(noiseSubscriptionsRepoProvider).save(updated);
+  }
+
+  int _clampLeaseSeconds(int? leaseSeconds) {
+    if (leaseSeconds == null || leaseSeconds <= 0) {
+      return kNoiseSubscriptionDefaultLease.inSeconds;
+    }
+    return leaseSeconds.clamp(1, kNoiseSubscriptionMaxLease.inSeconds);
+  }
+}
+
+String _shortFingerprint(String fingerprint) {
+  if (fingerprint.length <= 12) return fingerprint;
+  return '${fingerprint.substring(0, 6)}...${fingerprint.substring(fingerprint.length - 4)}';
+}
 
 class TrustedListenersController extends AsyncNotifier<List<TrustedPeer>> {
   @override
@@ -601,11 +774,23 @@ class TrustedListenersController extends AsyncNotifier<List<TrustedPeer>> {
 
   Future<void> revoke(String deviceId) async {
     final current = await _ensureValue();
+    TrustedPeer? removed;
+    for (final listener in current) {
+      if (listener.deviceId == deviceId) {
+        removed = listener;
+        break;
+      }
+    }
     final updated = current
         .where((listener) => listener.deviceId != deviceId)
         .toList();
     state = AsyncData(updated);
     await ref.read(trustedListenersRepoProvider).save(updated);
+    if (removed != null) {
+      await ref
+          .read(noiseSubscriptionsProvider.notifier)
+          .clearForFingerprint(removed.certFingerprint);
+    }
   }
 
   /// Update FCM token for a listener (called when listener sends FCM_TOKEN_UPDATE).
@@ -624,10 +809,7 @@ class TrustedListenersController extends AsyncNotifier<List<TrustedPeer>> {
     updated[index] = current[index].copyWith(fcmToken: fcmToken);
     state = AsyncData(updated);
     await ref.read(trustedListenersRepoProvider).save(updated);
-    developer.log(
-      'Updated FCM token for listener $deviceId',
-      name: 'fcm',
-    );
+    developer.log('Updated FCM token for listener $deviceId', name: 'fcm');
   }
 
   /// Clear FCM token for listeners with matching token (called when token is invalid).
@@ -771,6 +953,11 @@ final trustedMonitorsProvider =
     AsyncNotifierProvider<TrustedMonitorsController, List<TrustedMonitor>>(
       TrustedMonitorsController.new,
     );
+final noiseSubscriptionsProvider =
+    AsyncNotifierProvider<
+      NoiseSubscriptionsController,
+      List<NoiseSubscription>
+    >(NoiseSubscriptionsController.new);
 final trustedListenersProvider =
     AsyncNotifierProvider<TrustedListenersController, List<TrustedPeer>>(
       TrustedListenersController.new,
@@ -788,7 +975,9 @@ final mdnsBrowseProvider = StreamProvider.autoDispose<List<MdnsAdvertisement>>((
 ) {
   debugPrint('[mdns_provider] mdnsBrowseProvider initializing...');
   final mdns = ref.watch(mdnsServiceProvider);
-  debugPrint('[mdns_provider] mdnsBrowseProvider got MdnsService: ${mdns.runtimeType}');
+  debugPrint(
+    '[mdns_provider] mdnsBrowseProvider got MdnsService: ${mdns.runtimeType}',
+  );
   final controller = StreamController<List<MdnsAdvertisement>>();
   final seen = <String, _SeenAdvertisement>{};
   const ttl = Duration(seconds: 45);
@@ -823,9 +1012,9 @@ final mdnsBrowseProvider = StreamProvider.autoDispose<List<MdnsAdvertisement>>((
     if (event.isOnline) {
       if (event.advertisement.ip != null) {
         unawaited(
-          ref.read(trustedMonitorsProvider.notifier).updateLastKnownIp(
-            event.advertisement,
-          ),
+          ref
+              .read(trustedMonitorsProvider.notifier)
+              .updateLastKnownIp(event.advertisement),
         );
       }
       upsert(event.advertisement);
@@ -948,18 +1137,14 @@ class NoiseEventDeduplicationController
   static const _maxEventIds = 100;
 
   @override
-  NoiseEventDeduplicationState build() =>
-      const NoiseEventDeduplicationState();
+  NoiseEventDeduplicationState build() => const NoiseEventDeduplicationState();
 
   /// Process a noise event. Returns true if new, false if duplicate.
   bool processEvent(NoiseEventData event) {
     final eventId = event.eventId;
 
     if (state.recentEventIds.contains(eventId)) {
-      developer.log(
-        'Duplicate noise event ignored: $eventId',
-        name: 'fcm',
-      );
+      developer.log('Duplicate noise event ignored: $eventId', name: 'fcm');
       return false;
     }
 
@@ -1000,7 +1185,8 @@ class NoiseEventDeduplicationController
   }
 }
 
-final noiseEventDeduplicationProvider = NotifierProvider<
-    NoiseEventDeduplicationController, NoiseEventDeduplicationState>(
-  NoiseEventDeduplicationController.new,
-);
+final noiseEventDeduplicationProvider =
+    NotifierProvider<
+      NoiseEventDeduplicationController,
+      NoiseEventDeduplicationState
+    >(NoiseEventDeduplicationController.new);

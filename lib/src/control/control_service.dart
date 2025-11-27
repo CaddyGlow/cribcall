@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:developer' as developer;
+import 'dart:io';
 
 import '../foundation/foundation_stub.dart'
     if (dart.library.ui) 'package:flutter/foundation.dart';
@@ -449,7 +450,11 @@ class ControlServerController extends Notifier<ControlServerState> {
     );
 
     try {
-      _server ??= server.ControlServer(onUnpairRequest: _handleUnpairRequest);
+      _server ??= server.ControlServer(
+        onUnpairRequest: _handleUnpairRequest,
+        onNoiseSubscribe: _handleNoiseSubscribeRequest,
+        onNoiseUnsubscribe: _handleNoiseUnsubscribeRequest,
+      );
 
       await _server!.start(
         port: port,
@@ -546,7 +551,13 @@ class ControlServerController extends Notifier<ControlServerState> {
     // Handle control messages
     switch (message) {
       case FcmTokenUpdateMessage(:final fcmToken, :final listenerId):
-        _handleFcmTokenUpdate(listenerId, fcmToken);
+        unawaited(
+          _handleFcmTokenUpdate(
+            connection: connection,
+            claimedListenerId: listenerId,
+            fcmToken: fcmToken,
+          ),
+        );
 
       // WebRTC signaling messages
       case StartStreamRequestMessage(:final sessionId, :final mediaType):
@@ -600,11 +611,51 @@ class ControlServerController extends Notifier<ControlServerState> {
   }
 
   /// Handle FCM token update from a listener.
-  Future<void> _handleFcmTokenUpdate(String listenerId, String fcmToken) async {
-    _logControl('FCM token update from listener=$listenerId');
+  /// Device identity is derived from the mTLS fingerprint to prevent spoofing
+  /// another listener's deviceId in the payload.
+  Future<void> _handleFcmTokenUpdate({
+    required ControlConnection connection,
+    required String fcmToken,
+    String? claimedListenerId,
+  }) async {
+    final listeners = await ref.read(trustedListenersProvider.future);
+    final peer = listeners.firstWhereOrNull(
+      (p) => p.certFingerprint == connection.peerFingerprint,
+    );
+    if (peer == null) {
+      _logControl(
+        'FCM token update rejected: fingerprint not trusted '
+        'fp=${_shortFingerprint(connection.peerFingerprint)} '
+        'remote=${connection.remoteAddress}',
+      );
+      return;
+    }
+
+    if (claimedListenerId != null && claimedListenerId != peer.deviceId) {
+      _logControl(
+        'FCM token update rejected: device mismatch '
+        'claimed=$claimedListenerId derived=${peer.deviceId} '
+        'fp=${_shortFingerprint(peer.certFingerprint)} '
+        'remote=${connection.remoteAddress}',
+      );
+      return;
+    }
+
+    _logControl(
+      'FCM token update from listener=${peer.deviceId} '
+      'fp=${_shortFingerprint(peer.certFingerprint)}',
+    );
     await ref
         .read(trustedListenersProvider.notifier)
-        .updateFcmToken(listenerId, fcmToken);
+        .updateFcmToken(peer.deviceId, fcmToken);
+    await ref
+        .read(noiseSubscriptionsProvider.notifier)
+        .upsert(
+          peer: peer,
+          fcmToken: fcmToken,
+          platform: 'ws',
+          leaseSeconds: null,
+        );
   }
 
   /// Handle an authenticated unpair request initiated by a listener.
@@ -629,8 +680,90 @@ class ControlServerController extends Notifier<ControlServerState> {
       '${_shortFingerprint(peer.certFingerprint)} (listenerId=$listenerId ignored)',
     );
     await ref.read(trustedListenersProvider.notifier).revoke(peer.deviceId);
+    await ref
+        .read(noiseSubscriptionsProvider.notifier)
+        .clearForFingerprint(peer.certFingerprint);
     await removeTrustedPeer(peer.certFingerprint);
     return true;
+  }
+
+  Future<server.NoiseSubscribeResult> _handleNoiseSubscribeRequest({
+    required String fingerprint,
+    required String fcmToken,
+    required String platform,
+    required int? leaseSeconds,
+    required String remoteAddress,
+  }) async {
+    final listeners = await ref.read(trustedListenersProvider.future);
+    final peer = listeners.firstWhereOrNull(
+      (p) => p.certFingerprint == fingerprint,
+    );
+    if (peer == null) {
+      throw StateError('Noise subscribe rejected: fingerprint not trusted');
+    }
+
+    final result = await ref
+        .read(noiseSubscriptionsProvider.notifier)
+        .upsert(
+          peer: peer,
+          fcmToken: fcmToken,
+          platform: platform,
+          leaseSeconds: leaseSeconds,
+        );
+
+    _logControl(
+      'Noise subscribe: device=${peer.deviceId} remote=$remoteAddress '
+      'expiresAt=${DateTime.fromMillisecondsSinceEpoch(result.subscription.expiresAtEpochSec * 1000, isUtc: true)}',
+    );
+
+    return (
+      deviceId: peer.deviceId,
+      subscriptionId: result.subscription.subscriptionId,
+      expiresAt: DateTime.fromMillisecondsSinceEpoch(
+        result.subscription.expiresAtEpochSec * 1000,
+        isUtc: true,
+      ),
+      acceptedLeaseSeconds: result.acceptedLeaseSeconds,
+    );
+  }
+
+  Future<server.NoiseUnsubscribeResult> _handleNoiseUnsubscribeRequest({
+    required String fingerprint,
+    String? fcmToken,
+    String? subscriptionId,
+    required String remoteAddress,
+  }) async {
+    final listeners = await ref.read(trustedListenersProvider.future);
+    final peer = listeners.firstWhereOrNull(
+      (p) => p.certFingerprint == fingerprint,
+    );
+    if (peer == null) {
+      throw StateError('Noise unsubscribe rejected: fingerprint not trusted');
+    }
+
+    final removed = await ref
+        .read(noiseSubscriptionsProvider.notifier)
+        .unsubscribe(
+          peer: peer,
+          fcmToken: fcmToken,
+          subscriptionId: subscriptionId,
+        );
+    _logControl(
+      'Noise unsubscribe: device=${peer.deviceId} '
+      'remote=$remoteAddress removed=${removed != null}',
+    );
+
+    return (
+      deviceId: peer.deviceId,
+      subscriptionId: subscriptionId ?? removed?.subscriptionId,
+      expiresAt: removed == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(
+              removed.expiresAtEpochSec * 1000,
+              isUtc: true,
+            ),
+      removed: removed != null,
+    );
   }
 
   /// Add a newly paired peer to the trusted list.
@@ -667,6 +800,9 @@ class ControlServerController extends Notifier<ControlServerState> {
       'Removing trusted peer: fingerprint=${_shortFingerprint(fingerprint)}',
     );
     await srv.removeTrustedPeer(fingerprint);
+    await ref
+        .read(noiseSubscriptionsProvider.notifier)
+        .clearForFingerprint(fingerprint);
 
     // Update state
     final newFingerprints = state.trustedFingerprints
@@ -733,13 +869,19 @@ class ControlServerController extends Notifier<ControlServerState> {
     required int timestamp,
     required int peakLevel,
   }) async {
-    // Get all trusted listeners with FCM tokens
-    final trustedListeners =
-        ref.read(trustedListenersProvider).asData?.value ?? [];
-    final fcmTokens = trustedListeners
-        .where((p) => p.fcmToken != null && p.fcmToken!.isNotEmpty)
-        .map((p) => p.fcmToken!)
-        .toList();
+    final subsController = ref.read(noiseSubscriptionsProvider.notifier);
+    await subsController.removeExpired();
+    final activeSubs = subsController.active();
+
+    // Prefer live WebSocket; only send FCM when no active connections.
+    if (_connections.isNotEmpty) {
+      _logControl(
+        'Skipping FCM noise send: ${_connections.length} active connections',
+      );
+      return;
+    }
+
+    final fcmTokens = activeSubs.map((s) => s.fcmToken).toSet().toList();
 
     if (fcmTokens.isEmpty) {
       _logControl('No FCM tokens available, skipping push');
@@ -772,6 +914,7 @@ class ControlServerController extends Notifier<ControlServerState> {
 
       // Clean up invalid tokens
       if (result.invalidTokens.isNotEmpty) {
+        await subsController.clearByTokens(result.invalidTokens);
         for (final token in result.invalidTokens) {
           await ref
               .read(trustedListenersProvider.notifier)
@@ -871,6 +1014,13 @@ class ControlClientController extends Notifier<ControlClientState> {
   ListenerServiceManager? _listenerService;
   final _uuid = const Uuid();
   bool _disposed = false;
+  String? _currentHost;
+  int? _currentPort;
+  String? _expectedFingerprint;
+  String? _activeSubscriptionId;
+  DateTime? _activeSubscriptionExpiry;
+  String? _lastSubscribedToken;
+  Timer? _leaseRenewTimer;
 
   /// Stream controller for noise events - UI can subscribe to receive alerts.
   final _noiseEventController = StreamController<NoiseEventData>.broadcast();
@@ -893,6 +1043,7 @@ class ControlClientController extends Notifier<ControlClientState> {
 
     // Wire up FCM noise events to be processed through our handler
     FcmService.instance.onNoiseEvent = _handleFcmNoiseEvent;
+    FcmService.instance.addTokenRefreshListener(_onTokenRefresh);
 
     return const ControlClientState.idle();
   }
@@ -905,6 +1056,7 @@ class ControlClientController extends Notifier<ControlClientState> {
   }) async {
     await disconnect();
     _disposed = false; // Reset after disconnect cleanup
+    _clearLeaseState();
 
     final ip = advertisement.ip;
     if (ip == null) {
@@ -916,6 +1068,10 @@ class ControlClientController extends Notifier<ControlClientState> {
       );
       return error;
     }
+
+    _currentHost = ip;
+    _currentPort = advertisement.controlPort;
+    _expectedFingerprint = monitor.certFingerprint;
 
     state = ControlClientState.connecting(
       monitorId: monitor.monitorId,
@@ -979,6 +1135,7 @@ class ControlClientController extends Notifier<ControlClientState> {
 
       // Send FCM token to monitor (if available)
       await _sendFcmTokenToMonitor(identity.deviceId);
+      await _subscribeNoiseLease();
 
       return null; // Success
     } catch (e) {
@@ -1099,6 +1256,118 @@ class ControlClientController extends Notifier<ControlClientState> {
       // Auto-request WebRTC stream from monitor
       _autoRequestStream(event.monitorId);
     }
+  }
+
+  void _onTokenRefresh(String token) {
+    if (_disposed) return;
+    _logClient('FCM token refreshed, renewing noise subscription');
+    unawaited(_subscribeNoiseLease(force: true));
+  }
+
+  Future<void> _subscribeNoiseLease({bool force = false}) async {
+    if (_currentHost == null ||
+        _currentPort == null ||
+        _expectedFingerprint == null) {
+      _logClient('Noise subscribe skipped: missing monitor address');
+      return;
+    }
+    final token = FcmService.instance.currentToken;
+    if (token == null || token.isEmpty) {
+      _logClient('Noise subscribe skipped: no FCM token');
+      return;
+    }
+    if (_client == null) {
+      _logClient('Noise subscribe skipped: client not initialized');
+      return;
+    }
+    final now = DateTime.now().toUtc();
+    if (!force &&
+        _activeSubscriptionExpiry != null &&
+        _activeSubscriptionExpiry!.isAfter(
+          now.add(const Duration(minutes: 5)),
+        ) &&
+        _lastSubscribedToken == token) {
+      _logClient('Noise subscription still valid, skipping renew');
+      return;
+    }
+
+    try {
+      final platform = _platformLabel();
+      final response = await _client!.subscribeNoise(
+        host: _currentHost!,
+        port: _currentPort!,
+        expectedFingerprint: _expectedFingerprint!,
+        fcmToken: token,
+        platform: platform,
+        leaseSeconds: null,
+      );
+      _activeSubscriptionId = response.subscriptionId;
+      _activeSubscriptionExpiry = response.expiresAt;
+      _lastSubscribedToken = token;
+      _scheduleLeaseRenewal(response.expiresAt);
+      _logClient(
+        'Noise subscription updated: subId=${response.subscriptionId} '
+        'expiresAt=${response.expiresAt.toIso8601String()} '
+        'lease=${response.acceptedLeaseSeconds}s',
+      );
+    } catch (e) {
+      _logClient('Noise subscribe failed: $e');
+    }
+  }
+
+  Future<void> _unsubscribeNoiseLease() async {
+    if (_currentHost == null ||
+        _currentPort == null ||
+        _expectedFingerprint == null) {
+      return;
+    }
+    if (_client == null) return;
+    final subId = _activeSubscriptionId;
+    final token = _lastSubscribedToken;
+    if (subId == null && token == null) return;
+    try {
+      await _client!.unsubscribeNoise(
+        host: _currentHost!,
+        port: _currentPort!,
+        expectedFingerprint: _expectedFingerprint!,
+        fcmToken: subId == null ? token : null,
+        subscriptionId: subId,
+      );
+      _logClient('Noise subscription cleared');
+    } catch (e) {
+      _logClient('Noise unsubscribe failed (ignored): $e');
+    }
+  }
+
+  void _scheduleLeaseRenewal(DateTime expiresAt) {
+    _leaseRenewTimer?.cancel();
+    final now = DateTime.now().toUtc();
+    final remaining = expiresAt.difference(now);
+    var renewSeconds = remaining.inSeconds ~/ 2;
+    if (renewSeconds < 1) renewSeconds = 1;
+    if (renewSeconds > 86400) renewSeconds = 86400;
+    final renewAfter = Duration(seconds: renewSeconds);
+    _leaseRenewTimer = Timer(renewAfter, () {
+      _logClient('Noise lease renewal timer fired');
+      unawaited(_subscribeNoiseLease(force: true));
+    });
+  }
+
+  void _clearLeaseState() {
+    _activeSubscriptionExpiry = null;
+    _activeSubscriptionId = null;
+    _lastSubscribedToken = null;
+    _leaseRenewTimer?.cancel();
+    _leaseRenewTimer = null;
+  }
+
+  String _platformLabel() {
+    if (Platform.isAndroid) return 'android';
+    if (Platform.isIOS) return 'ios';
+    if (Platform.isMacOS) return 'macos';
+    if (Platform.isWindows) return 'windows';
+    if (Platform.isLinux) return 'linux';
+    return 'unknown';
   }
 
   /// Automatically request WebRTC stream when noise event received.
@@ -1261,6 +1530,7 @@ class ControlClientController extends Notifier<ControlClientState> {
 
     // Clear FCM callback to avoid handling events when not connected
     FcmService.instance.onNoiseEvent = null;
+    FcmService.instance.removeTokenRefreshListener(_onTokenRefresh);
 
     // Stop foreground service
     try {
@@ -1272,6 +1542,8 @@ class ControlClientController extends Notifier<ControlClientState> {
     } catch (_) {}
     _connection = null;
     _client = null;
+    await _unsubscribeNoiseLease();
+    _clearLeaseState();
 
     // Note: Don't close broadcast stream controllers - they can't be reused after close,
     // and they don't hold resources that need cleanup. The _disposed flag guards against

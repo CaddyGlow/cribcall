@@ -106,10 +106,10 @@ class PairingServer {
 
     final context = await _buildSecurityContext(identity);
 
-    // Bind to both IPv4 and IPv6
+    // Try IPv6 first (dual-stack handles IPv4 on most systems), fall back to IPv4
     final bindAddresses = [
-      InternetAddress.anyIPv4,
       InternetAddress.anyIPv6,
+      InternetAddress.anyIPv4,
     ];
 
     for (final address in bindAddresses) {
@@ -140,6 +140,9 @@ class PairingServer {
           'Pairing server running on ${address.address}:${server.port} '
           'fingerprint=${_shortFingerprint(identity.certFingerprint)}',
         );
+
+        // IPv6 dual-stack succeeded, no need to try IPv4
+        break;
       } catch (e) {
         _log('Failed to bind pairing server on ${address.address}:$port: $e');
       }

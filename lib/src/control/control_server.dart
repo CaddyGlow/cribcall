@@ -13,10 +13,38 @@ import '../domain/models.dart';
 import '../identity/device_identity.dart';
 import '../identity/pem.dart';
 import '../identity/pkcs8.dart';
+import '../utils/canonical_json.dart';
 import 'control_connection.dart';
 
 typedef UnpairRequestHandler =
     Future<bool> Function(String fingerprint, String? listenerId);
+typedef NoiseSubscribeResult = ({
+  String deviceId,
+  String subscriptionId,
+  DateTime expiresAt,
+  int acceptedLeaseSeconds,
+});
+typedef NoiseUnsubscribeResult = ({
+  String deviceId,
+  String? subscriptionId,
+  DateTime? expiresAt,
+  bool removed,
+});
+typedef NoiseSubscribeHandler =
+    Future<NoiseSubscribeResult> Function({
+      required String fingerprint,
+      required String fcmToken,
+      required String platform,
+      required int? leaseSeconds,
+      required String remoteAddress,
+    });
+typedef NoiseUnsubscribeHandler =
+    Future<NoiseUnsubscribeResult> Function({
+      required String fingerprint,
+      String? fcmToken,
+      String? subscriptionId,
+      required String remoteAddress,
+    });
 
 // -----------------------------------------------------------------------------
 // Server Events
@@ -42,13 +70,22 @@ class ClientDisconnected extends ControlServerEvent {
 /// mTLS WebSocket server for control messages.
 /// Requires valid client certificate from trusted peer.
 class ControlServer {
-  ControlServer({this.bindAddress = '0.0.0.0', this.onUnpairRequest});
+  ControlServer({
+    this.bindAddress,
+    this.onUnpairRequest,
+    this.onNoiseSubscribe,
+    this.onNoiseUnsubscribe,
+  });
 
-  final String bindAddress;
+  /// Optional specific bind address. If null, tries IPv6 first, then IPv4.
+  final String? bindAddress;
   final UnpairRequestHandler? onUnpairRequest;
+  final NoiseSubscribeHandler? onNoiseSubscribe;
+  final NoiseUnsubscribeHandler? onNoiseUnsubscribe;
 
   HttpServer? _server;
   int? _boundPort;
+  String? _boundAddress;
   DeviceIdentity? _identity;
   late DateTime _startedAt;
 
@@ -93,32 +130,51 @@ class ControlServer {
   Future<void> _bindServer(int port, DeviceIdentity identity) async {
     final context = await _buildSecurityContext(identity);
 
-    _log(
-      'Binding control server on $bindAddress:$port '
-      'fingerprint=${_shortFingerprint(identity.certFingerprint)} '
-      'trustedPeers=${_trustedFingerprints.length}',
-    );
+    // If explicit bindAddress provided, use only that; otherwise try IPv6 first
+    final bindAddresses = bindAddress != null
+        ? [bindAddress!]
+        : [InternetAddress.anyIPv6.address, InternetAddress.anyIPv4.address];
 
-    _server = await HttpServer.bindSecure(
-      bindAddress,
-      port,
-      context,
-      requestClientCertificate: true,
-      shared: true, // Allow rebind for hot reload
-    );
-    _boundPort = _server!.port;
+    for (final address in bindAddresses) {
+      try {
+        _log(
+          'Binding control server on $address:$port '
+          'fingerprint=${_shortFingerprint(identity.certFingerprint)} '
+          'trustedPeers=${_trustedFingerprints.length}',
+        );
 
-    _server!.listen(
-      _handleRequest,
-      onError: (error, stack) {
-        _log('Control server error: $error');
-      },
-    );
+        _server = await HttpServer.bindSecure(
+          address,
+          port,
+          context,
+          requestClientCertificate: true,
+          shared: true, // Allow rebind for hot reload
+        );
+        _boundPort = _server!.port;
+        _boundAddress = address;
 
-    _log(
-      'Control server running on $bindAddress:${_server!.port} '
-      'mTLS enabled, trustedPeers=${_trustedFingerprints.length}',
-    );
+        _server!.listen(
+          _handleRequest,
+          onError: (error, stack) {
+            _log('Control server error: $error');
+          },
+        );
+
+        _log(
+          'Control server running on $address:${_server!.port} '
+          'mTLS enabled, trustedPeers=${_trustedFingerprints.length}',
+        );
+
+        // Bind succeeded, no need to try fallback
+        break;
+      } catch (e) {
+        _log('Failed to bind control server on $address:$port: $e');
+      }
+    }
+
+    if (_server == null) {
+      throw StateError('Failed to bind control server on any address');
+    }
   }
 
   Future<void> stop() async {
@@ -130,6 +186,7 @@ class ControlServer {
     await _server?.close(force: true);
     _server = null;
     _boundPort = null;
+    _boundAddress = null;
     _log('Control server stopped');
   }
 
@@ -242,6 +299,18 @@ class ControlServer {
         case '/unpair':
           if (request.method == 'POST') {
             await _handleUnpair(request);
+            return;
+          }
+          break;
+        case '/noise/subscribe':
+          if (request.method == 'POST') {
+            await _handleNoiseSubscribe(request);
+            return;
+          }
+          break;
+        case '/noise/unsubscribe':
+          if (request.method == 'POST') {
+            await _handleNoiseUnsubscribe(request);
             return;
           }
           break;
@@ -453,6 +522,233 @@ class ControlServer {
     await request.response.close();
   }
 
+  Future<void> _handleNoiseSubscribe(HttpRequest request) async {
+    if (onNoiseSubscribe == null) {
+      _writeCanonicalJson(request.response, HttpStatus.serviceUnavailable, {
+        'error': 'noise_subscribe_not_supported',
+        'message': 'Noise subscribe handler not configured on server',
+      });
+      return;
+    }
+
+    final remote = request.connectionInfo?.remoteAddress.address ?? 'unknown';
+    final clientCert = request.certificate;
+    if (clientCert == null) {
+      _log('Noise subscribe rejected: no client certificate');
+      _writeCanonicalJson(request.response, HttpStatus.unauthorized, {
+        'error': 'unauthenticated',
+        'message': 'Client certificate required',
+      });
+      return;
+    }
+
+    final fp = _fingerprintHex(clientCert.der);
+    if (!_trustedFingerprints.contains(fp)) {
+      _log(
+        'Noise subscribe rejected: untrusted fingerprint '
+        'fp=${_shortFingerprint(fp)} remote=$remote',
+      );
+      _writeCanonicalJson(request.response, HttpStatus.forbidden, {
+        'error': 'untrusted',
+        'message': 'Certificate not trusted',
+      });
+      return;
+    }
+
+    Map<String, dynamic> body;
+    try {
+      body = await _decodeJsonBody(request);
+    } catch (e) {
+      _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+        'error': 'invalid_json',
+        'message': '$e',
+      });
+      return;
+    }
+
+    final allowedKeys = {
+      'fcmToken',
+      'platform',
+      'leaseSeconds',
+      'deviceId',
+      'pairingId',
+      'subscriptionId',
+    };
+    final unknown = body.keys.where((k) => !allowedKeys.contains(k)).toList();
+    if (unknown.isNotEmpty) {
+      _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+        'error': 'unknown_fields',
+        'fields': unknown,
+      });
+      return;
+    }
+
+    if (body.containsKey('deviceId') || body.containsKey('pairingId')) {
+      _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+        'error': 'device_id_forbidden',
+        'message': 'Server derives deviceId from certificate',
+      });
+      return;
+    }
+
+    final fcmToken = body['fcmToken'];
+    final platform = body['platform'];
+    final leaseSeconds = body['leaseSeconds'];
+
+    if (fcmToken is! String || fcmToken.isEmpty) {
+      _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+        'error': 'invalid_fcm_token',
+        'message': 'fcmToken is required',
+      });
+      return;
+    }
+
+    if (platform is! String || platform.isEmpty) {
+      _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+        'error': 'invalid_platform',
+        'message': 'platform is required',
+      });
+      return;
+    }
+
+    if (leaseSeconds != null && leaseSeconds is! int) {
+      _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+        'error': 'invalid_lease',
+        'message': 'leaseSeconds must be an integer if provided',
+      });
+      return;
+    }
+
+    try {
+      final result = await onNoiseSubscribe!(
+        fingerprint: fp,
+        fcmToken: fcmToken,
+        platform: platform,
+        leaseSeconds: leaseSeconds as int?,
+        remoteAddress: remote,
+      );
+
+      _writeCanonicalJson(request.response, HttpStatus.ok, {
+        'subscriptionId': result.subscriptionId,
+        'deviceId': result.deviceId,
+        'expiresAt': result.expiresAt.toUtc().toIso8601String(),
+        'acceptedLeaseSeconds': result.acceptedLeaseSeconds,
+      });
+    } catch (e) {
+      _log('Noise subscribe error: $e');
+      _writeCanonicalJson(request.response, HttpStatus.internalServerError, {
+        'error': 'internal_error',
+        'message': '$e',
+      });
+    }
+  }
+
+  Future<void> _handleNoiseUnsubscribe(HttpRequest request) async {
+    if (onNoiseUnsubscribe == null) {
+      _writeCanonicalJson(request.response, HttpStatus.serviceUnavailable, {
+        'error': 'noise_unsubscribe_not_supported',
+        'message': 'Noise unsubscribe handler not configured on server',
+      });
+      return;
+    }
+
+    final remote = request.connectionInfo?.remoteAddress.address ?? 'unknown';
+    final clientCert = request.certificate;
+    if (clientCert == null) {
+      _log('Noise unsubscribe rejected: no client certificate');
+      _writeCanonicalJson(request.response, HttpStatus.unauthorized, {
+        'error': 'unauthenticated',
+        'message': 'Client certificate required',
+      });
+      return;
+    }
+
+    final fp = _fingerprintHex(clientCert.der);
+    if (!_trustedFingerprints.contains(fp)) {
+      _log(
+        'Noise unsubscribe rejected: untrusted fingerprint '
+        'fp=${_shortFingerprint(fp)} remote=$remote',
+      );
+      _writeCanonicalJson(request.response, HttpStatus.forbidden, {
+        'error': 'untrusted',
+        'message': 'Certificate not trusted',
+      });
+      return;
+    }
+
+    Map<String, dynamic> body;
+    try {
+      body = await _decodeJsonBody(request);
+    } catch (e) {
+      _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+        'error': 'invalid_json',
+        'message': '$e',
+      });
+      return;
+    }
+
+    final allowedKeys = {'fcmToken', 'subscriptionId', 'deviceId', 'pairingId'};
+    final unknown = body.keys.where((k) => !allowedKeys.contains(k)).toList();
+    if (unknown.isNotEmpty) {
+      _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+        'error': 'unknown_fields',
+        'fields': unknown,
+      });
+      return;
+    }
+
+    if (body.containsKey('deviceId') || body.containsKey('pairingId')) {
+      _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+        'error': 'device_id_forbidden',
+        'message': 'Server derives deviceId from certificate',
+      });
+      return;
+    }
+
+    final fcmToken = body['fcmToken'];
+    final subscriptionId = body['subscriptionId'];
+    if ((fcmToken == null || fcmToken is String) &&
+        (subscriptionId == null || subscriptionId is String)) {
+      if (fcmToken == null && subscriptionId == null) {
+        _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+          'error': 'missing_identifier',
+          'message': 'fcmToken or subscriptionId required',
+        });
+        return;
+      }
+    } else {
+      _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+        'error': 'invalid_identifier',
+        'message': 'fcmToken/subscriptionId must be strings if provided',
+      });
+      return;
+    }
+
+    try {
+      final result = await onNoiseUnsubscribe!(
+        fingerprint: fp,
+        fcmToken: fcmToken as String?,
+        subscriptionId: subscriptionId as String?,
+        remoteAddress: remote,
+      );
+
+      _writeCanonicalJson(request.response, HttpStatus.ok, {
+        'deviceId': result.deviceId,
+        'unsubscribed': result.removed,
+        if (result.subscriptionId != null)
+          'subscriptionId': result.subscriptionId,
+        if (result.expiresAt != null)
+          'expiresAt': result.expiresAt!.toUtc().toIso8601String(),
+      });
+    } catch (e) {
+      _log('Noise unsubscribe error: $e');
+      _writeCanonicalJson(request.response, HttpStatus.internalServerError, {
+        'error': 'internal_error',
+        'message': '$e',
+      });
+    }
+  }
+
   Future<void> _handleWebSocket(HttpRequest request) async {
     final remoteIp = request.connectionInfo?.remoteAddress.address ?? 'unknown';
     final remotePort = request.connectionInfo?.remotePort ?? 0;
@@ -527,6 +823,26 @@ void _log(String message) {
 String _fingerprintHex(List<int> bytes) {
   final digest = sha256.convert(bytes);
   return digest.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+}
+
+Future<Map<String, dynamic>> _decodeJsonBody(HttpRequest request) async {
+  final body = await utf8.decodeStream(request);
+  final data = jsonDecode(body);
+  if (data is! Map) throw const FormatException('Expected JSON object');
+  return data.cast<String, dynamic>();
+}
+
+void _writeCanonicalJson(
+  HttpResponse response,
+  int statusCode,
+  Map<String, dynamic> body,
+) {
+  response
+    ..statusCode = statusCode
+    ..headers.contentType = ContentType.json
+    ..headers.set('Cache-Control', 'no-store')
+    ..write(canonicalizeJson(body))
+    ..close();
 }
 
 String _shortFingerprint(String fingerprint) {

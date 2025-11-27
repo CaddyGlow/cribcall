@@ -202,6 +202,8 @@ Implementation note: current milestone ships the control channel over HTTP+WebSo
 - FR4.3: When noise exceeds threshold for ≥ minDuration:
   - Generate `NoiseEvent`.
   - Send `NOISE_EVENT` message on QUIC channel to connected listeners.
+  - If no QUIC/WebSocket connection is active, send a fallback push notification via FCM to the last subscribed token per listener device.
+  - Fallback push is only delivered to listeners that have an active noise subscription bound to their pinned client certificate.
 
 #### FR5 – Audio/Video Streaming (WebRTC)
 
@@ -225,6 +227,7 @@ Implementation note: current milestone ships the control channel over HTTP+WebSo
 
 - FR6.2: If monitoring stops due to OS, user is clearly informed when reopening the app.
 - FR6.3: Listener shows local notifications for noise events when app is backgrounded but running.
+  - Listener keeps a per-monitor mute toggle; when muted, incoming FCM noise notifications are suppressed locally but the subscription remains active.
 
 #### FR7 – Settings & Management
 
@@ -238,6 +241,10 @@ Implementation note: current milestone ships the control channel over HTTP+WebSo
   - Default action when `NOISE_EVENT` received (notify vs auto-open stream).
 
 - FR7.3: Monitor can list paired listeners and revoke them.
+- FR7.4: Noise subscription HTTP endpoints (monitor, local-only, mTLS+pinned):
+  - `POST /noise/subscribe` with canonical JSON body `{fcmToken, platform, leaseSeconds?}`; server derives `deviceId`/`pairingId` from client certificate and rejects spoofed IDs/unknown fields. Returns `{subscriptionId, deviceId, expiresAt, acceptedLeaseSeconds}`. Idempotent; newest token overwrites previous for the device. Lease is clamped to a default (e.g., 24h) and max cap; server stores per-device single active token and expires/cleans invalid tokens.
+  - `POST /noise/unsubscribe` with `{fcmToken? | subscriptionId?}`; derives device from certificate; idempotent even if not found. Returns `{deviceId, subscriptionId?, expiresAt?, unsubscribed}`.
+  - Endpoints are local-only control-surface; responses are canonical JSON; reject unauthenticated/untrusted certs and unknown fields.
 
 ---
 

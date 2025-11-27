@@ -11,6 +11,7 @@ import '../foundation/foundation_stub.dart'
 import '../identity/device_identity.dart';
 import '../identity/pem.dart';
 import '../identity/pkcs8.dart';
+import '../utils/canonical_json.dart';
 import 'control_connection.dart';
 import 'pairing_messages.dart';
 
@@ -47,6 +48,20 @@ class PairingResult {
   final String monitorCertFingerprint;
   final List<int> monitorCertificateDer;
 }
+
+typedef NoiseSubscribeResponse = ({
+  String subscriptionId,
+  String deviceId,
+  DateTime expiresAt,
+  int acceptedLeaseSeconds,
+});
+
+typedef NoiseUnsubscribeResponse = ({
+  String deviceId,
+  String? subscriptionId,
+  DateTime? expiresAt,
+  bool removed,
+});
 
 /// Exception thrown when certificate fingerprint doesn't match expected value.
 class CertificateMismatchException implements Exception {
@@ -103,8 +118,8 @@ class ControlClient {
       rethrow;
     }
 
-    // Upgrade to WebSocket
-    final uri = Uri(scheme: 'wss', host: host, port: port, path: '/control/ws');
+    // Upgrade to WebSocket (Uri constructor needs host without brackets)
+    final uri = Uri(scheme: 'wss', host: _stripBrackets(host), port: port, path: '/control/ws');
 
     _log('Upgrading to WebSocket $uri');
     final socket = await WebSocket.connect(
@@ -155,7 +170,7 @@ class ControlClient {
       listenerPublicKey: base64Encode(identity.publicKeyUncompressed),
     );
 
-    final initUri = Uri.https('$host:$pairingPort', '/pair/init');
+    final initUri = Uri.https('${_formatHost(host)}:$pairingPort', '/pair/init');
     _log('Sending pair init to $initUri');
 
     final initHttpRequest = await client.postUrl(initUri);
@@ -244,7 +259,7 @@ class ControlClient {
       authTag: authTag,
     );
 
-    final confirmUri = Uri.https('$host:$pairingPort', '/pair/confirm');
+    final confirmUri = Uri.https('${_formatHost(host)}:$pairingPort', '/pair/confirm');
     _log('Sending pair confirm to $confirmUri');
 
     final confirmHttpRequest = await client.postUrl(confirmUri);
@@ -362,7 +377,7 @@ class ControlClient {
     HttpClient? client;
     try {
       client = await _buildHttpClient(expectedFingerprint);
-      final uri = Uri.https('$host:$port', '/unpair');
+      final uri = Uri.https('${_formatHost(host)}:$port', '/unpair');
       final request = await client.postUrl(uri);
       request.headers.contentType = ContentType.json;
       request.write(jsonEncode({'listenerId': listenerId}));
@@ -389,13 +404,125 @@ class ControlClient {
     }
   }
 
+  /// Subscribe a noise fallback token via local HTTPS endpoint.
+  Future<NoiseSubscribeResponse> subscribeNoise({
+    required String host,
+    required int port,
+    required String expectedFingerprint,
+    required String fcmToken,
+    required String platform,
+    int? leaseSeconds,
+  }) async {
+    HttpClient? client;
+    try {
+      client = await _buildHttpClient(expectedFingerprint);
+      final uri = Uri.https('${_formatHost(host)}:$port', '/noise/subscribe');
+      final request = await client.postUrl(uri);
+      request.headers.contentType = ContentType.json;
+      final payload = <String, dynamic>{
+        'fcmToken': fcmToken,
+        'platform': platform,
+        if (leaseSeconds != null) 'leaseSeconds': leaseSeconds,
+      };
+      request.write(canonicalizeJson(payload));
+
+      final response = await request.close().timeout(
+        const Duration(seconds: 5),
+      );
+      final body = await utf8.decodeStream(response);
+
+      if (response.statusCode != HttpStatus.ok) {
+        throw HttpException(
+          'Noise subscribe failed (${response.statusCode}): $body',
+          uri: uri,
+        );
+      }
+
+      final data = jsonDecode(body);
+      if (data is! Map) {
+        throw const FormatException('Invalid subscribe response');
+      }
+      final deviceId = data['deviceId'] as String? ?? '';
+      final subId = data['subscriptionId'] as String? ?? '';
+      final expires = data['expiresAt'] as String?;
+      final accepted = data['acceptedLeaseSeconds'] as int? ?? 0;
+      if (expires == null || expires.isEmpty) {
+        throw const FormatException('Missing expiresAt in subscribe response');
+      }
+      return (
+        subscriptionId: subId,
+        deviceId: deviceId,
+        expiresAt: DateTime.parse(expires).toUtc(),
+        acceptedLeaseSeconds: accepted,
+      );
+    } finally {
+      client?.close(force: true);
+    }
+  }
+
+  /// Unsubscribe a noise fallback token via local HTTPS endpoint.
+  Future<NoiseUnsubscribeResponse> unsubscribeNoise({
+    required String host,
+    required int port,
+    required String expectedFingerprint,
+    String? fcmToken,
+    String? subscriptionId,
+  }) async {
+    if (fcmToken == null && subscriptionId == null) {
+      throw ArgumentError('fcmToken or subscriptionId required');
+    }
+
+    HttpClient? client;
+    try {
+      client = await _buildHttpClient(expectedFingerprint);
+      final uri = Uri.https('${_formatHost(host)}:$port', '/noise/unsubscribe');
+      final request = await client.postUrl(uri);
+      request.headers.contentType = ContentType.json;
+      final payload = <String, dynamic>{
+        if (fcmToken != null) 'fcmToken': fcmToken,
+        if (subscriptionId != null) 'subscriptionId': subscriptionId,
+      };
+      request.write(canonicalizeJson(payload));
+
+      final response = await request.close().timeout(
+        const Duration(seconds: 5),
+      );
+      final body = await utf8.decodeStream(response);
+      if (response.statusCode != HttpStatus.ok) {
+        throw HttpException(
+          'Noise unsubscribe failed (${response.statusCode}): $body',
+          uri: uri,
+        );
+      }
+
+      final data = jsonDecode(body);
+      if (data is! Map) {
+        throw const FormatException('Invalid unsubscribe response');
+      }
+      final deviceId = data['deviceId'] as String? ?? '';
+      final subId = data['subscriptionId'] as String?;
+      final expires = data['expiresAt'] as String?;
+      final removed = data['unsubscribed'] == true;
+      return (
+        deviceId: deviceId,
+        subscriptionId: subId,
+        expiresAt: expires != null && expires.isNotEmpty
+            ? DateTime.parse(expires).toUtc()
+            : null,
+        removed: removed,
+      );
+    } finally {
+      client?.close(force: true);
+    }
+  }
+
   Future<void> _healthCheck(
     HttpClient client,
     String host,
     int port,
     String expectedFingerprint,
   ) async {
-    final uri = Uri.https('$host:$port', '/health');
+    final uri = Uri.https('${_formatHost(host)}:$port', '/health');
     _log('Health check to $uri');
 
     final request = await client.getUrl(uri);
@@ -518,4 +645,22 @@ String _shortFp(String fp) {
 String _bytesToComparisonCode(List<int> bytes) {
   final value = (bytes[0] << 16) | (bytes[1] << 8) | bytes[2];
   return (value % 1000000).toString().padLeft(6, '0');
+}
+
+/// Wraps IPv6 addresses in brackets for URI authority strings.
+/// IPv4 addresses and hostnames are returned unchanged.
+String _formatHost(String host) {
+  // Already bracketed
+  if (host.startsWith('[') && host.endsWith(']')) return host;
+  // IPv6 address (contains colon but not a port separator pattern)
+  if (host.contains(':')) return '[$host]';
+  return host;
+}
+
+/// Strips brackets from IPv6 addresses for Uri constructor (which adds them).
+String _stripBrackets(String host) {
+  if (host.startsWith('[') && host.endsWith(']')) {
+    return host.substring(1, host.length - 1);
+  }
+  return host;
 }

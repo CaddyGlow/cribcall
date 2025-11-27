@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+ - Task: plan-noise-subscriptions — Implemented pinned-fingerprint noise subscribe/unsubscribe HTTP endpoints with canonical JSON, per-device leased subscription storage (single active token per device), FCM fallback gated to offline listeners, cleanup of superseded/invalid tokens, and listener-side HTTP subscription/renewal with lease timers.
+- Task: plan-noise-subscriptions — Bound monitor-side FCM token updates to the authenticated fingerprint (rejecting mismatched listenerId claims) so noise fallback tokens cannot be hijacked by spoofed device IDs.
 - Task: plan-noise-subscriptions — Documented noise subscription/unsubscribe plan with leased FCM fallback when WebSocket is down, client mute switch, and pairing-bound token handling.
 - Task: linux-notifications-init — Added Linux initialization and notification details for local alerts so desktop noise and pairing notifications work without runtime errors.
 - Task: listener-unpair-on-remove — Added an mTLS /unpair endpoint that removes trusted listeners on the monitor, and the listener forget flow now attempts to unpair remotely before deleting local state (with tests).

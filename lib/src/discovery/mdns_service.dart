@@ -10,7 +10,18 @@ import 'package:flutter/services.dart';
 import '../config/build_flags.dart';
 import '../domain/models.dart';
 
+/// Set to true to enable verbose mDNS trace logging.
+const _kMdnsTrace = false;
+
 void _mdnsLog(String message) {
+  developer.log(message, name: 'mdns');
+  debugPrint('[mdns] $message');
+}
+
+/// Trace-level logging for verbose mDNS debugging.
+/// Only logs when [_kMdnsTrace] is true.
+void _mdnsTrace(String message) {
+  if (!_kMdnsTrace) return;
   developer.log(message, name: 'mdns');
   debugPrint('[mdns] $message');
 }
@@ -50,7 +61,7 @@ class MethodChannelMdnsService implements MdnsService {
 
   @override
   Stream<MdnsEvent> browse() {
-    _mdnsLog('MethodChannelMdnsService.browse() starting platform stream');
+    _mdnsTrace('MethodChannelMdnsService.browse() starting platform stream');
     return _events
         .receiveBroadcastStream()
         .handleError(
@@ -60,7 +71,7 @@ class MethodChannelMdnsService implements MdnsService {
         .where((event) {
           final isMap = event is Map;
           if (!isMap) {
-            _mdnsLog('mDNS browse: ignoring non-Map event: ${event.runtimeType}');
+            _mdnsTrace('mDNS browse: ignoring non-Map event: ${event.runtimeType}');
           }
           return isMap;
         })
@@ -78,7 +89,7 @@ class MethodChannelMdnsService implements MdnsService {
 
   @override
   Future<void> startAdvertise(MdnsAdvertisement advertisement) async {
-    _mdnsLog(
+    _mdnsTrace(
       'MethodChannelMdnsService.startAdvertise() '
       'monitorId=${advertisement.monitorId} '
       'controlPort=${advertisement.controlPort} '
@@ -90,7 +101,7 @@ class MethodChannelMdnsService implements MdnsService {
 
   @override
   Future<void> stop() async {
-    _mdnsLog('MethodChannelMdnsService.stop()');
+    _mdnsTrace('MethodChannelMdnsService.stop()');
     await _method.invokeMethod('stop');
   }
 }
@@ -98,12 +109,16 @@ class MethodChannelMdnsService implements MdnsService {
 /// Desktop (Linux) using raw multicast sockets for continuous mDNS listening
 /// and avahi-publish-service for advertising.
 class DesktopMdnsService implements MdnsService {
-  RawDatagramSocket? _socket;
-  Process? _advertiseProcess;
-  StreamController<MdnsEvent>? _browseController;
-
   // Cache instanceName -> monitorId for goodbye packets
   final _instanceToMonitorId = <String, String>{};
+
+  // Static to survive provider recreation
+  static int? _avahiPid;
+  static Completer<void>? _advertiseLock;
+  // Static browse socket and controller to survive provider recreation
+  static RawDatagramSocket? _socket;
+  static StreamController<MdnsEvent>? _browseController;
+  static bool _browseStarted = false;
 
   static const _mdnsAddress = '224.0.0.251';
   static const _mdnsPort = 5353;
@@ -111,25 +126,37 @@ class DesktopMdnsService implements MdnsService {
 
   @override
   Stream<MdnsEvent> browse() {
-    _mdnsLog('DesktopMdnsService.browse() called - starting raw socket continuous mode');
+    _mdnsTrace('DesktopMdnsService.browse() called, browseStarted=$_browseStarted');
+
+    // Reuse existing controller if available (survives provider recreation)
+    if (_browseController != null && !_browseController!.isClosed) {
+      _mdnsTrace('Reusing existing browse stream');
+      return _browseController!.stream;
+    }
+
+    _mdnsTrace('Creating new browse stream');
     final controller = StreamController<MdnsEvent>.broadcast(
       onListen: () {
-        _mdnsLog('mDNS browse stream: first listener attached');
+        _mdnsTrace('mDNS browse stream: first listener attached');
       },
       onCancel: () {
-        _mdnsLog('mDNS browse stream: all listeners cancelled');
-        _socket?.close();
-        _socket = null;
-        _browseController = null;
+        // Don't close socket on cancel - keep listening for mDNS events
+        // The socket will be reused when browse() is called again
+        _mdnsTrace('mDNS browse stream: all listeners cancelled (socket kept alive)');
       },
     );
     _browseController = controller;
 
-    // Track seen services to avoid duplicates within a time window
-    final seenServices = <String, DateTime>{};
-    const dedupeWindow = Duration(seconds: 30);
-
-    _startListening(controller, seenServices, dedupeWindow);
+    // Only start listening once (static flag survives provider recreation)
+    if (!_browseStarted) {
+      _browseStarted = true;
+      // Track seen services to avoid duplicates within a time window
+      final seenServices = <String, DateTime>{};
+      const dedupeWindow = Duration(seconds: 30);
+      _startListening(controller, seenServices, dedupeWindow);
+    } else {
+      _mdnsTrace('Socket already listening, reusing');
+    }
 
     return controller.stream;
   }
@@ -139,25 +166,25 @@ class DesktopMdnsService implements MdnsService {
     Map<String, DateTime> seenServices,
     Duration dedupeWindow,
   ) async {
-    _mdnsLog('_startListening() called');
+    _mdnsTrace('_startListening() called');
     try {
       // Bind to mDNS port with reuseAddress and reusePort
-      _mdnsLog('Binding to 0.0.0.0:$_mdnsPort with reuseAddress/reusePort');
+      _mdnsTrace('Binding to 0.0.0.0:$_mdnsPort with reuseAddress/reusePort');
       _socket = await RawDatagramSocket.bind(
         InternetAddress.anyIPv4,
         _mdnsPort,
         reuseAddress: true,
         reusePort: true,
       );
-      _mdnsLog('Socket bound successfully');
+      _mdnsTrace('Socket bound successfully');
 
       // Join multicast group
       final mdnsGroup = InternetAddress(_mdnsAddress);
-      _mdnsLog('Joining multicast group $_mdnsAddress');
+      _mdnsTrace('Joining multicast group $_mdnsAddress');
       _socket!.joinMulticast(mdnsGroup);
       _socket!.multicastLoopback = true;
 
-      _mdnsLog('SUCCESS: Joined mDNS multicast group $_mdnsAddress:$_mdnsPort');
+      _mdnsLog('Joined mDNS multicast group $_mdnsAddress:$_mdnsPort');
 
       // Send initial query for our service type
       _sendQuery();
@@ -165,14 +192,14 @@ class DesktopMdnsService implements MdnsService {
       // Also send periodic queries to catch services that don't announce
       Timer.periodic(const Duration(seconds: 30), (timer) {
         if (_socket == null || controller.isClosed) {
-          _mdnsLog('Stopping periodic query timer');
+          _mdnsTrace('Stopping periodic query timer');
           timer.cancel();
           return;
         }
         _sendQuery();
       });
 
-      _mdnsLog('Starting socket listen loop');
+      _mdnsTrace('Starting socket listen loop');
       _socket!.listen(
         (event) {
           if (event == RawSocketEvent.read) {
@@ -192,10 +219,10 @@ class DesktopMdnsService implements MdnsService {
           _mdnsLog('mDNS socket error: $error');
         },
         onDone: () {
-          _mdnsLog('mDNS socket closed');
+          _mdnsTrace('mDNS socket closed');
         },
       );
-      _mdnsLog('Socket listen loop started');
+      _mdnsTrace('Socket listen loop started');
     } catch (e, stack) {
       _mdnsLog('FAILED to start mDNS listener: $e\n$stack');
       // Don't close controller, allow retry
@@ -209,7 +236,7 @@ class DesktopMdnsService implements MdnsService {
       // Build a DNS query for PTR record of _baby-monitor._tcp.local
       final query = _buildPtrQuery(_serviceType);
       _socket!.send(query, InternetAddress(_mdnsAddress), _mdnsPort);
-      _mdnsLog('Sent mDNS query for $_serviceType');
+      _mdnsTrace('Sent mDNS query for $_serviceType');
     } catch (e) {
       _mdnsLog('Failed to send mDNS query: $e');
     }
@@ -262,14 +289,14 @@ class DesktopMdnsService implements MdnsService {
       final parsed = _MdnsParser(data);
       final records = parsed.parse();
 
-      // Log all record types for debugging
+      // Log all record types for debugging (trace level)
       final recordSummary = records
           .map((r) => '${r.type.name}:${r.name}(ttl=${r.ttl})')
           .join(', ');
       if (records.any((r) =>
           r.name.toLowerCase().contains('_baby-monitor') ||
           r.name.toLowerCase().contains('cribcall'))) {
-        _mdnsLog('mDNS packet from ${source.address}: $recordSummary');
+        _mdnsTrace('mDNS packet from ${source.address}: $recordSummary');
       }
 
       // Find PTR records for our service type
@@ -282,7 +309,7 @@ class DesktopMdnsService implements MdnsService {
 
           // Check if this is a goodbye packet (TTL=0 on PTR record)
           final isGoodbye = record.ttl == 0;
-          _mdnsLog(
+          _mdnsTrace(
             'mDNS PTR record: instance=$instanceName ttl=${record.ttl} '
             'isGoodbye=$isGoodbye',
           );
@@ -316,19 +343,13 @@ class DesktopMdnsService implements MdnsService {
             final fingerprint = attrs['monitorCertFingerprint'] ?? '';
             final ip = aRecord?.aAddress ?? source.address;
 
-            _mdnsLog(
-              'mDNS GOODBYE (offline) instance=$instanceName '
-              'monitorId=$monitorId cachedId=$cachedMonitorId ip=$ip '
-              'controllerClosed=${controller.isClosed}',
-            );
-
             // Remove from caches
             _instanceToMonitorId.remove(instanceName);
             final keyPrefix = '$monitorId:';
             seenServices.removeWhere((key, _) => key.startsWith(keyPrefix));
 
             if (!controller.isClosed) {
-              _mdnsLog('Emitting OFFLINE MdnsEvent for $monitorId');
+              _mdnsLog('OFFLINE monitor=$monitorId ip=$ip');
               controller.add(MdnsEvent.offline(MdnsAdvertisement(
                 monitorId: monitorId,
                 monitorName: monitorName,
@@ -386,15 +407,11 @@ class DesktopMdnsService implements MdnsService {
             (_, time) => now.difference(time) > dedupeWindow,
           );
 
-          _mdnsLog(
-            'mDNS ONLINE monitor=$monitorId instance=$instanceName ip=$ip '
-            'controlPort=$controlPort pairingPort=$pairingPort '
-            'transport=$transport fp=${_shortFingerprint(fingerprint)} '
-            'controllerClosed=${controller.isClosed}',
-          );
-
           if (!controller.isClosed) {
-            _mdnsLog('Emitting ONLINE MdnsEvent for $monitorId');
+            _mdnsLog(
+              'ONLINE monitor=$monitorId ip=$ip port=$controlPort '
+              'fp=${_shortFingerprint(fingerprint)}',
+            );
             controller.add(MdnsEvent.online(MdnsAdvertisement(
               monitorId: monitorId,
               monitorName: monitorName,
@@ -410,66 +427,113 @@ class DesktopMdnsService implements MdnsService {
       }
     } catch (e) {
       // Ignore malformed packets
-      _mdnsLog('mDNS parse error: $e');
+      _mdnsTrace('mDNS parse error: $e');
     }
   }
 
   @override
   Future<void> startAdvertise(MdnsAdvertisement advertisement) async {
-    _mdnsLog('DesktopMdnsService.startAdvertise() called for '
+    _mdnsTrace('DesktopMdnsService.startAdvertise() called for '
         'monitorId=${advertisement.monitorId}');
 
-    // Stop any existing advertisement first
-    if (_advertiseProcess != null) {
-      _mdnsLog('Killing existing avahi-publish-service PID ${_advertiseProcess!.pid}');
-      _advertiseProcess!.kill(ProcessSignal.sigterm);
-      _advertiseProcess = null;
+    // Wait for any in-progress advertise operation to complete
+    if (_advertiseLock != null) {
+      _mdnsTrace('Waiting for previous startAdvertise to complete...');
+      await _advertiseLock!.future;
     }
 
-    // Use avahi-publish-service if available.
+    // Acquire lock
+    _advertiseLock = Completer<void>();
+
     try {
-      final serviceName = '${advertisement.monitorName}-${advertisement.monitorId}';
-      final args = [
-        serviceName,
-        '_baby-monitor._tcp',
-        advertisement.controlPort.toString(),
-        'monitorId=${advertisement.monitorId}',
-        'monitorName=${advertisement.monitorName}',
-        'monitorCertFingerprint=${advertisement.monitorCertFingerprint}',
-        'controlPort=${advertisement.controlPort}',
-        'pairingPort=${advertisement.pairingPort}',
-        'version=${advertisement.version}',
-        'transport=${advertisement.transport}',
-      ];
-      _mdnsLog('Starting avahi-publish-service with args: $args');
-      _advertiseProcess = await Process.start('avahi-publish-service', args);
-      _mdnsLog('avahi-publish-service started with PID ${_advertiseProcess!.pid}');
+      // Kill any existing avahi process first (use static PID to survive provider recreation)
+      await _killAvahiProcess();
 
-      // Log stdout/stderr for debugging
-      _advertiseProcess!.stdout.transform(utf8.decoder).listen(
-        (data) => _mdnsLog('avahi stdout: $data'),
-      );
-      _advertiseProcess!.stderr.transform(utf8.decoder).listen(
-        (data) => _mdnsLog('avahi stderr: $data'),
-      );
-      _advertiseProcess!.exitCode.then((code) {
-        _mdnsLog('avahi-publish-service exited with code $code');
-      });
-    } catch (e, stack) {
-      _mdnsLog('avahi-publish-service unavailable or failed: $e\n$stack');
-      // Ignore if avahi is unavailable.
+      // Use avahi-publish-service if available.
+      try {
+        final serviceName = '${advertisement.monitorName}-${advertisement.monitorId}';
+        final args = [
+          serviceName,
+          '_baby-monitor._tcp',
+          advertisement.controlPort.toString(),
+          'monitorId=${advertisement.monitorId}',
+          'monitorName=${advertisement.monitorName}',
+          'monitorCertFingerprint=${advertisement.monitorCertFingerprint}',
+          'controlPort=${advertisement.controlPort}',
+          'pairingPort=${advertisement.pairingPort}',
+          'version=${advertisement.version}',
+          'transport=${advertisement.transport}',
+        ];
+        _mdnsTrace('Starting avahi-publish-service with args: $args');
+        final process = await Process.start('avahi-publish-service', args);
+        _avahiPid = process.pid;
+        _mdnsLog('Advertising via avahi PID $_avahiPid');
+
+        // Log stdout/stderr for debugging
+        process.stdout.transform(utf8.decoder).listen(
+          (data) => _mdnsTrace('avahi stdout: $data'),
+        );
+        process.stderr.transform(utf8.decoder).listen(
+          (data) => _mdnsTrace('avahi stderr: $data'),
+        );
+        process.exitCode.then((code) {
+          _mdnsTrace('avahi-publish-service PID ${process.pid} exited with code $code');
+          // Clear the PID if it matches (process ended naturally or was killed)
+          if (_avahiPid == process.pid) {
+            _avahiPid = null;
+          }
+        });
+      } catch (e, stack) {
+        _mdnsLog('avahi-publish-service unavailable or failed: $e\n$stack');
+        // Ignore if avahi is unavailable.
+      }
+    } finally {
+      // Release lock
+      _advertiseLock!.complete();
+      _advertiseLock = null;
     }
+  }
+
+  /// Kill the avahi-publish-service process if running.
+  static Future<void> _killAvahiProcess() async {
+    if (_avahiPid == null) {
+      _mdnsTrace('No avahi process to kill');
+      return;
+    }
+
+    _mdnsTrace('Killing avahi-publish-service PID $_avahiPid');
+    try {
+      // Use Process.killPid with SIGTERM first, then SIGKILL if needed
+      Process.killPid(_avahiPid!, ProcessSignal.sigterm);
+
+      // Wait a bit for graceful shutdown
+      await Future.delayed(const Duration(milliseconds: 100));
+
+      // Check if still running and force kill
+      try {
+        // If killPid with signal 0 succeeds, process is still alive
+        final stillAlive = Process.killPid(_avahiPid!, ProcessSignal.sigcont);
+        if (stillAlive) {
+          _mdnsTrace('Process still alive, sending SIGKILL');
+          Process.killPid(_avahiPid!, ProcessSignal.sigkill);
+        }
+      } catch (_) {
+        // Process already dead, good
+      }
+
+      _mdnsTrace('Killed avahi-publish-service PID $_avahiPid');
+    } catch (e) {
+      _mdnsLog('Error killing avahi process: $e');
+    }
+    _avahiPid = null;
   }
 
   @override
   Future<void> stop() async {
-    _mdnsLog('Stopping desktop mDNS advertise/browse');
-    _socket?.close();
-    _socket = null;
-    _browseController?.close();
-    _browseController = null;
-    _advertiseProcess?.kill(ProcessSignal.sigterm);
-    _advertiseProcess = null;
+    _mdnsTrace('DesktopMdnsService.stop() called - stopping advertising only');
+    // Only stop advertising, NOT the browse socket.
+    // The browse socket is managed by the stream lifecycle (onCancel in browse()).
+    await _killAvahiProcess();
   }
 }
 

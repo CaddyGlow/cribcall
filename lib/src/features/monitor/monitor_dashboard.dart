@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:developer' as developer;
 
 import 'package:flutter/material.dart';
@@ -30,6 +31,8 @@ class MonitorDashboard extends ConsumerStatefulWidget {
 class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
   MdnsAdvertisement? _currentAdvertisement;
   bool _advertising = false;
+  bool _refreshInProgress = false;
+  Timer? _refreshDebounce;
   late final MdnsService _mdnsService;
 
   @override
@@ -40,13 +43,36 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
 
   @override
   void dispose() {
+    _refreshDebounce?.cancel();
     _stopAdvertising();
     super.dispose();
   }
 
+  /// Schedule a debounced refresh to avoid multiple rapid calls.
+  void _scheduleRefresh() {
+    _refreshDebounce?.cancel();
+    _refreshDebounce = Timer(const Duration(milliseconds: 100), () {
+      _refreshAdvertisement();
+    });
+  }
+
   Future<void> _refreshAdvertisement() async {
-    _log('_refreshAdvertisement called, mounted=$mounted');
+    _log('_refreshAdvertisement called, mounted=$mounted, inProgress=$_refreshInProgress');
     if (!mounted) return;
+    if (_refreshInProgress) {
+      _log('_refreshAdvertisement: already in progress, scheduling retry');
+      _scheduleRefresh();
+      return;
+    }
+    _refreshInProgress = true;
+    try {
+      await _doRefreshAdvertisement();
+    } finally {
+      _refreshInProgress = false;
+    }
+  }
+
+  Future<void> _doRefreshAdvertisement() async {
     final monitoringEnabled = ref.read(monitoringStatusProvider);
     final identity = ref.read(identityProvider);
     final appSession = ref.read(appSessionProvider);
@@ -126,14 +152,15 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
     final monitoringForAd = ref.watch(monitoringStatusProvider);
 
     // Refresh advertisement when dependencies change (for non-Android platforms)
+    // Use _scheduleRefresh to debounce multiple rapid changes
     ref.listen<AsyncValue<DeviceIdentity>>(identityProvider, (prev, next) {
-      _refreshAdvertisement();
+      _scheduleRefresh();
     });
     ref.listen<AsyncValue<AppSessionState>>(appSessionProvider, (prev, next) {
-      _refreshAdvertisement();
+      _scheduleRefresh();
     });
     ref.listen<bool>(monitoringStatusProvider, (prev, next) {
-      _refreshAdvertisement();
+      _scheduleRefresh();
     });
 
     // Schedule initial advertisement for non-Android platforms
@@ -142,7 +169,7 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
         monitoringForAd &&
         !_advertising) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        _refreshAdvertisement();
+        _scheduleRefresh();
       });
     }
 
