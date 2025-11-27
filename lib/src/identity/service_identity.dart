@@ -23,12 +23,16 @@ class ServiceIdentityBuilder {
   MonitorQrPayload buildQrPayload({
     required DeviceIdentity identity,
     required String monitorName,
+    List<String>? ips,
+    String? pairingToken,
   }) {
     return MonitorQrPayload(
       monitorId: identity.deviceId,
       monitorName: monitorName,
       monitorCertFingerprint: identity.certFingerprint,
       monitorPublicKey: base64Encode(identity.publicKey.bytes),
+      ips: ips,
+      pairingToken: pairingToken,
       service: QrServiceInfo(
         protocol: serviceProtocol,
         version: serviceVersion,
@@ -42,10 +46,14 @@ class ServiceIdentityBuilder {
   String qrPayloadString({
     required DeviceIdentity identity,
     required String monitorName,
+    List<String>? ips,
+    String? pairingToken,
   }) {
     final payload = buildQrPayload(
       identity: identity,
       monitorName: monitorName,
+      ips: ips,
+      pairingToken: pairingToken,
     );
     return canonicalizeJson(payload.toJson());
   }

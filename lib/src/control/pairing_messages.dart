@@ -118,10 +118,20 @@ class PairConfirmRequest {
   String toJsonString() => jsonEncode(toJson());
 }
 
+/// Status for PIN-based pairing confirmation
+enum PairConfirmStatus {
+  /// Pairing accepted by monitor user
+  accepted,
+  /// Pairing rejected by monitor user or timed out
+  rejected,
+  /// Waiting for monitor user to accept/reject
+  pending,
+}
+
 /// POST /pair/confirm response body
 class PairConfirmResponse {
   const PairConfirmResponse({
-    required this.accepted,
+    required this.status,
     this.monitorId,
     this.monitorName,
     this.monitorCertFingerprint,
@@ -129,15 +139,23 @@ class PairConfirmResponse {
     this.reason,
   });
 
-  final bool accepted;
+  final PairConfirmStatus status;
   final String? monitorId;
   final String? monitorName;
   final String? monitorCertFingerprint;
   final List<int>? monitorCertificateDer;
   final String? reason;
 
+  /// Legacy compatibility: returns true only if status is accepted
+  bool get accepted => status == PairConfirmStatus.accepted;
+
+  /// Returns true if status is pending (waiting for monitor user)
+  bool get isPending => status == PairConfirmStatus.pending;
+
   Map<String, dynamic> toJson() => {
-        'accepted': accepted,
+        'status': status.name,
+        // Legacy field for backward compatibility
+        'accepted': status == PairConfirmStatus.accepted,
         if (monitorId != null) 'monitorId': monitorId,
         if (monitorName != null) 'monitorName': monitorName,
         if (monitorCertFingerprint != null)
@@ -149,8 +167,18 @@ class PairConfirmResponse {
 
   factory PairConfirmResponse.fromJson(Map<String, dynamic> json) {
     final certDerB64 = json['monitorCertificateDer'] as String?;
+    // Support both new 'status' field and legacy 'accepted' field
+    PairConfirmStatus status;
+    if (json.containsKey('status')) {
+      status = PairConfirmStatus.values.byName(json['status'] as String);
+    } else {
+      // Legacy: only accepted or rejected
+      status = (json['accepted'] as bool)
+          ? PairConfirmStatus.accepted
+          : PairConfirmStatus.rejected;
+    }
     return PairConfirmResponse(
-      accepted: json['accepted'] as bool,
+      status: status,
       monitorId: json['monitorId'] as String?,
       monitorName: json['monitorName'] as String?,
       monitorCertFingerprint: json['monitorCertFingerprint'] as String?,
@@ -170,7 +198,7 @@ class PairConfirmResponse {
     required List<int> monitorCertificateDer,
   }) {
     return PairConfirmResponse(
-      accepted: true,
+      status: PairConfirmStatus.accepted,
       monitorId: monitorId,
       monitorName: monitorName,
       monitorCertFingerprint: monitorCertFingerprint,
@@ -180,7 +208,12 @@ class PairConfirmResponse {
 
   /// Create a rejected pairing response
   factory PairConfirmResponse.rejected(String reason) {
-    return PairConfirmResponse(accepted: false, reason: reason);
+    return PairConfirmResponse(status: PairConfirmStatus.rejected, reason: reason);
+  }
+
+  /// Create a pending response (waiting for monitor user to accept)
+  factory PairConfirmResponse.pending() {
+    return const PairConfirmResponse(status: PairConfirmStatus.pending);
   }
 }
 
@@ -207,4 +240,115 @@ class PairErrorResponse {
   }
 
   String toJsonString() => jsonEncode(toJson());
+}
+
+/// POST /pair/token request body
+///
+/// Used for QR code pairing with one-time token.
+/// The listener sends the token from the QR code along with its identity.
+/// If the token is valid, pairing completes immediately without user confirmation.
+class PairTokenRequest {
+  const PairTokenRequest({
+    required this.pairingToken,
+    required this.listenerId,
+    required this.listenerName,
+    required this.listenerCertFingerprint,
+    required this.listenerCertificateDer,
+  });
+
+  /// One-time pairing token from QR code (base64url encoded 32 bytes)
+  final String pairingToken;
+  final String listenerId;
+  final String listenerName;
+  final String listenerCertFingerprint;
+  final List<int> listenerCertificateDer;
+
+  Map<String, dynamic> toJson() => {
+        'pairingToken': pairingToken,
+        'listenerId': listenerId,
+        'listenerName': listenerName,
+        'listenerCertFingerprint': listenerCertFingerprint,
+        'listenerCertificateDer': base64Encode(listenerCertificateDer),
+      };
+
+  factory PairTokenRequest.fromJson(Map<String, dynamic> json) {
+    return PairTokenRequest(
+      pairingToken: json['pairingToken'] as String,
+      listenerId: json['listenerId'] as String,
+      listenerName: json['listenerName'] as String,
+      listenerCertFingerprint: json['listenerCertFingerprint'] as String,
+      listenerCertificateDer:
+          base64Decode(json['listenerCertificateDer'] as String),
+    );
+  }
+
+  String toJsonString() => jsonEncode(toJson());
+}
+
+/// POST /pair/token response body
+///
+/// Response for QR code token-based pairing.
+class PairTokenResponse {
+  const PairTokenResponse({
+    required this.accepted,
+    this.monitorId,
+    this.monitorName,
+    this.monitorCertFingerprint,
+    this.monitorCertificateDer,
+    this.reason,
+  });
+
+  final bool accepted;
+  final String? monitorId;
+  final String? monitorName;
+  final String? monitorCertFingerprint;
+  final List<int>? monitorCertificateDer;
+  final String? reason;
+
+  Map<String, dynamic> toJson() => {
+        'accepted': accepted,
+        if (monitorId != null) 'monitorId': monitorId,
+        if (monitorName != null) 'monitorName': monitorName,
+        if (monitorCertFingerprint != null)
+          'monitorCertFingerprint': monitorCertFingerprint,
+        if (monitorCertificateDer != null)
+          'monitorCertificateDer': base64Encode(monitorCertificateDer!),
+        if (reason != null) 'reason': reason,
+      };
+
+  factory PairTokenResponse.fromJson(Map<String, dynamic> json) {
+    final certDerB64 = json['monitorCertificateDer'] as String?;
+    return PairTokenResponse(
+      accepted: json['accepted'] as bool,
+      monitorId: json['monitorId'] as String?,
+      monitorName: json['monitorName'] as String?,
+      monitorCertFingerprint: json['monitorCertFingerprint'] as String?,
+      monitorCertificateDer:
+          certDerB64 != null ? base64Decode(certDerB64) : null,
+      reason: json['reason'] as String?,
+    );
+  }
+
+  String toJsonString() => jsonEncode(toJson());
+
+  /// Create a successful token pairing response
+  factory PairTokenResponse.accepted({
+    required String monitorId,
+    required String monitorName,
+    required String monitorCertFingerprint,
+    required List<int> monitorCertificateDer,
+  }) {
+    return PairTokenResponse(
+      accepted: true,
+      monitorId: monitorId,
+      monitorName: monitorName,
+      monitorCertFingerprint: monitorCertFingerprint,
+      monitorCertificateDer: monitorCertificateDer,
+    );
+  }
+
+  /// Create a rejected token pairing response
+  factory PairTokenResponse.rejected(String reason) {
+    return PairTokenResponse(accepted: false, reason: reason);
+  }
 }

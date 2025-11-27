@@ -108,6 +108,7 @@ class PairingController extends Notifier<PairingSessionState?> {
 
   /// Confirms pairing after user has verified the comparison codes match.
   ///
+  /// Uses polling to wait for monitor user to accept.
   /// Returns null on success, or error message on failure.
   Future<String?> confirmPairing({
     required DeviceIdentity listenerIdentity,
@@ -130,13 +131,14 @@ class PairingController extends Notifier<PairingSessionState?> {
       return 'Monitor IP address unknown';
     }
 
-    _logPairing('Confirming pairing session=${current.sessionId}...');
+    _logPairing('Confirming pairing session=${current.sessionId} (with polling)...');
 
     try {
       final client = _pairingClient ?? PairingClient();
       _pairingClient = client;
 
-      final response = await client.confirmPairing(
+      // Use polling to wait for monitor user acceptance
+      final response = await client.confirmPairingWithPolling(
         host: ip,
         port: current.advertisement.pairingPort,
         expectedFingerprint: current.advertisement.monitorCertFingerprint,
@@ -183,6 +185,85 @@ class PairingController extends Notifier<PairingSessionState?> {
     } catch (e, stack) {
       _logPairing('confirmPairing error: $e\n$stack');
       return 'Connection error: $e';
+    }
+  }
+
+  /// Pairs using a one-time token from QR code (token-based pairing).
+  ///
+  /// This is a single-step pairing that completes immediately if the token
+  /// is valid. No comparison code or user confirmation needed.
+  ///
+  /// Returns null on success, or error message on failure.
+  Future<String?> pairWithToken({
+    required MonitorQrPayload payload,
+    required DeviceIdentity listenerIdentity,
+    required String listenerName,
+  }) async {
+    final token = payload.pairingToken;
+    if (token == null || token.isEmpty) {
+      _logPairing('pairWithToken failed: no token in payload');
+      return 'No pairing token in QR code';
+    }
+
+    final ip = payload.ips?.firstOrNull;
+    if (ip == null) {
+      _logPairing('pairWithToken failed: no IP in payload');
+      return 'No IP address in QR code';
+    }
+
+    _logPairing(
+      'Token pairing to:\n'
+      '  monitor=${payload.monitorId}\n'
+      '  name=${payload.monitorName}\n'
+      '  ip=$ip:${payload.service.pairingPort}\n'
+      '  fingerprint=${_shortFingerprint(payload.monitorCertFingerprint)}',
+    );
+
+    try {
+      _pairingClient = PairingClient();
+      final response = await _pairingClient!.pairWithToken(
+        host: ip,
+        port: payload.service.pairingPort,
+        expectedFingerprint: payload.monitorCertFingerprint,
+        pairingToken: token,
+        listenerIdentity: listenerIdentity,
+        listenerName: listenerName,
+      );
+
+      if (!response.accepted) {
+        _logPairing('Token pairing rejected: ${response.reason}');
+        return response.reason ?? 'Pairing rejected';
+      }
+
+      // Pairing accepted - persist trusted monitor
+      _logPairing(
+        'Token pairing accepted:\n'
+        '  monitorId=${response.monitorId}\n'
+        '  monitorName=${response.monitorName}\n'
+        '  fingerprint=${_shortFingerprint(response.monitorCertFingerprint ?? '')}',
+      );
+
+      await ref.read(trustedMonitorsProvider.notifier).addMonitor(
+        MonitorQrPayload(
+          monitorId: response.monitorId ?? payload.monitorId,
+          monitorName: response.monitorName ?? payload.monitorName,
+          monitorCertFingerprint:
+              response.monitorCertFingerprint ?? payload.monitorCertFingerprint,
+          service: payload.service,
+          ips: payload.ips,
+        ),
+        lastKnownIp: ip,
+        certificateDer: response.monitorCertificateDer,
+      );
+
+      _logPairing('Token pairing completed successfully');
+      return null; // Success
+    } catch (e, stack) {
+      _logPairing('pairWithToken error: $e\n$stack');
+      return 'Connection error: $e';
+    } finally {
+      _pairingClient?.close();
+      _pairingClient = null;
     }
   }
 

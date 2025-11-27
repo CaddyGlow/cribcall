@@ -108,29 +108,35 @@ class _ListenerPinPageState extends ConsumerState<ListenerPinPage> {
 
     setState(() {
       _confirming = true;
-      _status = 'Confirming pairing...';
+      _status = 'Waiting for monitor to accept...';
     });
 
     _logPairingPage('Confirming pairing...');
+
+    // confirmPairing uses confirmPairingWithPolling internally, which polls
+    // for up to 60 seconds waiting for monitor acceptance
     final error = await ref
         .read(pairingSessionProvider.notifier)
         .confirmPairing(listenerIdentity: identity.requireValue);
 
     if (!mounted) return;
 
-    if (error != null) {
-      _logPairingPage('Pairing confirmation failed: $error');
-      setState(() {
-        _confirming = false;
-        _status = error;
-      });
-    } else {
+    if (error == null) {
+      // Success
       _logPairingPage('Pairing confirmed successfully');
       Navigator.of(context).pop();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Pairing successful')),
       );
+      return;
     }
+
+    // Failed
+    _logPairingPage('Pairing confirmation failed: $error');
+    setState(() {
+      _confirming = false;
+      _status = error;
+    });
   }
 
   void _cancelPairing() {
@@ -225,15 +231,27 @@ class _ListenerPinPageState extends ConsumerState<ListenerPinPage> {
             ),
             const SizedBox(height: 16),
             if (_confirming)
-              const Row(
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                  const Row(
+                    children: [
+                      SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      SizedBox(width: 12),
+                      Text('Waiting for monitor to accept...'),
+                    ],
                   ),
-                  SizedBox(width: 12),
-                  Text('Confirming pairing...'),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Please tap "Accept" on the monitor device',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: AppColors.muted,
+                    ),
+                  ),
                 ],
               )
             else

@@ -1,307 +1,755 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../domain/models.dart';
+import '../../identity/device_identity.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
 import '../listener/listener_dashboard.dart';
 import '../monitor/monitor_dashboard.dart';
 
-class RoleSelectionPage extends ConsumerWidget {
+const List<int> kMonitorMinDurationOptionsMs = [100, 200, 300, 500, 800];
+const List<int> kMonitorCooldownOptionsSec = [3, 5, 8, 10, 15, 30];
+
+List<DropdownMenuItem<int>> monitorDropdownItems({
+  required int selected,
+  required List<int> baseOptions,
+  required String suffix,
+}) {
+  final options = <int>{...baseOptions, selected}.toList()..sort();
+
+  return options
+      .map(
+        (value) => DropdownMenuItem<int>(
+          value: value,
+          child: Text(
+            '$value$suffix${baseOptions.contains(value) ? '' : ' (custom)'}',
+          ),
+        ),
+      )
+      .toList();
+}
+
+class RoleSelectionPage extends ConsumerStatefulWidget {
   const RoleSelectionPage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final selectedRole = ref.watch(roleProvider);
+  ConsumerState<RoleSelectionPage> createState() => _RoleSelectionPageState();
+}
+
+class _RoleSelectionPageState extends ConsumerState<RoleSelectionPage> {
+  int _selectedIndex = 0;
+  bool _sessionRestored = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _restoreSession();
+  }
+
+  Future<void> _restoreSession() async {
+    // Wait for session to load
+    final session = await ref.read(appSessionProvider.future);
+
+    if (!mounted) return;
+
+    setState(() {
+      // Restore tab selection based on last role
+      if (session.lastRole == DeviceRole.listener) {
+        _selectedIndex = 1;
+      } else {
+        _selectedIndex = 0;
+      }
+      _sessionRestored = true;
+    });
+
+    // Restore monitoring status
+    ref
+        .read(monitoringStatusProvider.notifier)
+        .restoreFromSession(session.monitoringEnabled);
+
+    // Restore role
+    if (session.lastRole != null) {
+      ref.read(roleProvider.notifier).restoreFromSession(session.lastRole);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final identityAsync = ref.watch(identityProvider);
+    // Keep roleProvider in sync for other parts of the app
+    final currentRole = _selectedIndex == 0
+        ? DeviceRole.monitor
+        : DeviceRole.listener;
+
+    // Update role provider when tab changes (only after session is restored)
+    if (_sessionRestored) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final role = ref.read(roleProvider);
+        if (role != currentRole) {
+          ref.read(roleProvider.notifier).select(currentRole);
+        }
+      });
+    }
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('CribCall'),
-        actions: const [
-          Padding(
-            padding: EdgeInsets.only(right: 12),
-            child: Chip(label: Text('LAN only • Control + WebRTC')),
+        actions: [
+          // Device fingerprint chip
+          identityAsync.when(
+            data: (identity) =>
+                _FingerprintChip(fingerprint: identity.certFingerprint),
+            loading: () => const Padding(
+              padding: EdgeInsets.only(right: 8),
+              child: Chip(label: Text('...')),
+            ),
+            error: (_, __) => const SizedBox.shrink(),
+          ),
+          // Settings button
+          IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'Settings',
+            onPressed: () => _showSettingsSheet(context, ref, currentRole),
+          ),
+          const SizedBox(width: 4),
+        ],
+      ),
+      body: IndexedStack(
+        index: _selectedIndex,
+        children: const [
+          SingleChildScrollView(
+            padding: EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+            child: MonitorDashboard(),
+          ),
+          SingleChildScrollView(
+            padding: EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+            child: ListenerDashboard(),
           ),
         ],
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _HeroBanner(role: selectedRole),
-            const SizedBox(height: 18),
-            _RoleSwitcher(selectedRole: selectedRole),
-            const SizedBox(height: 18),
-            AnimatedSwitcher(
-              duration: const Duration(milliseconds: 250),
-              child: selectedRole == null
-                  ? _RoleCards(
-                      onSelect: (role) {
-                        ref.read(roleProvider.notifier).select(role);
-                      },
-                    )
-                  : selectedRole == DeviceRole.monitor
-                  ? const MonitorDashboard()
-                  : const ListenerDashboard(),
-            ),
-          ],
-        ),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _selectedIndex,
+        onDestinationSelected: (index) {
+          setState(() {
+            _selectedIndex = index;
+          });
+        },
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.sensors_outlined),
+            selectedIcon: Icon(Icons.sensors),
+            label: 'Monitor',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.hearing_outlined),
+            selectedIcon: Icon(Icons.hearing),
+            label: 'Listener',
+          ),
+        ],
       ),
     );
   }
 }
 
-class _HeroBanner extends StatelessWidget {
-  const _HeroBanner({required this.role});
+/// Fingerprint chip that shows short fingerprint and copies full on tap.
+class _FingerprintChip extends StatelessWidget {
+  const _FingerprintChip({required this.fingerprint});
 
-  final DeviceRole? role;
+  final String fingerprint;
+
+  String get _shortFingerprint {
+    if (fingerprint.length <= 8) return fingerprint;
+    return '${fingerprint.substring(0, 4)}...${fingerprint.substring(fingerprint.length - 4)}';
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [Color(0xFF3B82F6), Color(0xFF60A5FA)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Local-first baby monitor',
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-              color: Colors.white70,
-              fontWeight: FontWeight.w600,
+    return Padding(
+      padding: const EdgeInsets.only(right: 4),
+      child: ActionChip(
+        avatar: const Icon(Icons.fingerprint, size: 18),
+        label: Text(_shortFingerprint),
+        tooltip: 'Tap to copy fingerprint',
+        onPressed: () {
+          Clipboard.setData(ClipboardData(text: fingerprint));
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Fingerprint copied to clipboard'),
+              duration: Duration(seconds: 2),
             ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            role == null
-                ? 'Choose monitor or listener to get started.'
-                : 'You are setting up the ${role!.name} role.',
-            style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-              color: Colors.white,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-          const SizedBox(height: 10),
-          const Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              _HeroPill(text: 'Pinned cert fingerprints'),
-              _HeroPill(text: 'RFC 8785 transcripts'),
-              _HeroPill(text: 'HTTP+WS control channel'),
-            ],
-          ),
-        ],
+          );
+        },
       ),
     );
   }
 }
 
-class _RoleSwitcher extends ConsumerWidget {
-  const _RoleSwitcher({required this.selectedRole});
+/// Shows the settings bottom sheet.
+void _showSettingsSheet(
+  BuildContext context,
+  WidgetRef ref,
+  DeviceRole selectedRole,
+) {
+  showModalBottomSheet(
+    context: context,
+    showDragHandle: true,
+    isScrollControlled: true,
+    builder: (context) => _SettingsSheet(selectedRole: selectedRole),
+  );
+}
 
-  final DeviceRole? selectedRole;
+/// Main settings sheet with tabs for monitor/listener/general settings.
+class _SettingsSheet extends ConsumerWidget {
+  const _SettingsSheet({required this.selectedRole});
+
+  final DeviceRole selectedRole;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final chips = DeviceRole.values.map<Widget>((role) {
-      final isSelected = selectedRole == role;
-      return ChoiceChip(
-        label: Text(
-          role == DeviceRole.monitor ? 'Monitor device' : 'Listener device',
-        ),
-        selected: isSelected,
-        onSelected: (_) {
-          ref.read(roleProvider.notifier).select(role);
-        },
-      );
-    }).toList();
+    final identityAsync = ref.watch(identityProvider);
 
-    if (selectedRole != null) {
-      chips.add(
-        ActionChip(
-          label: const Text('Reset'),
-          onPressed: () => ref.read(roleProvider.notifier).reset(),
-        ),
-      );
-    }
-
-    return Wrap(spacing: 10, runSpacing: 10, children: chips);
-  }
-}
-
-class _RoleCards extends StatelessWidget {
-  const _RoleCards({required this.onSelect});
-
-  final void Function(DeviceRole) onSelect;
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final isWide = constraints.maxWidth > 760;
-        final children = [
-          _RoleCard(
-            title: 'Monitor',
-            subtitle:
-                'Lives in the nursery. Captures audio, detects noise, and advertises itself.',
-            icon: Icons.sensors,
-            highlights: const [
-              'Runs control server over HTTP+WS',
-              'Sound detection with cooldown',
-              'Shows QR or PIN for pairing',
-            ],
-            buttonLabel: 'Use as Monitor',
-            onTap: () => onSelect(DeviceRole.monitor),
-          ),
-          _RoleCard(
-            title: 'Listener',
-            subtitle:
-                'Stays with the parent. Discovers monitors, validates pinned certs, and opens audio streams.',
-            icon: Icons.hearing,
-            highlights: const [
-              'Scan QR or LAN for monitors',
-              'Receives NOISE_EVENT alerts',
-              'Starts audio streams',
-            ],
-            buttonLabel: 'Use as Listener',
-            onTap: () => onSelect(DeviceRole.listener),
-          ),
-        ];
-
-        return isWide
-            ? Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: children
-                    .map(
-                      (child) => Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.only(right: 14),
-                          child: child,
-                        ),
+    return DraggableScrollableSheet(
+      initialChildSize: 0.6,
+      minChildSize: 0.4,
+      maxChildSize: 0.9,
+      expand: false,
+      builder: (context, scrollController) {
+        return DefaultTabController(
+          length: 3,
+          initialIndex: selectedRole == DeviceRole.listener ? 1 : 0,
+          child: Column(
+            children: [
+              // Header
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: AppColors.primary.withValues(alpha: 0.1),
+                        shape: BoxShape.circle,
                       ),
-                    )
-                    .toList(),
-              )
-            : Column(
-                children: children
-                    .map(
-                      (child) => Padding(
-                        padding: const EdgeInsets.only(bottom: 14),
-                        child: child,
+                      child: const Icon(
+                        Icons.settings,
+                        color: AppColors.primary,
+                        size: 20,
                       ),
-                    )
-                    .toList(),
-              );
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Settings',
+                            style: Theme.of(context).textTheme.titleMedium
+                                ?.copyWith(fontWeight: FontWeight.w800),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            'Configure monitor and listener behavior',
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(color: AppColors.muted),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 16),
+
+              // Tabs
+              const TabBar(
+                tabs: [
+                  Tab(text: 'Monitor'),
+                  Tab(text: 'Listener'),
+                  Tab(text: 'General'),
+                ],
+              ),
+
+              // Tab content
+              Expanded(
+                child: TabBarView(
+                  children: [
+                    _MonitorSettingsTab(scrollController: scrollController),
+                    _ListenerSettingsTab(scrollController: scrollController),
+                    _GeneralSettingsTab(
+                      scrollController: scrollController,
+                      identityAsync: identityAsync,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
       },
     );
   }
 }
 
-class _RoleCard extends StatelessWidget {
-  const _RoleCard({
-    required this.title,
-    required this.subtitle,
-    required this.icon,
-    required this.highlights,
-    required this.buttonLabel,
-    required this.onTap,
-  });
+/// Monitor settings tab content.
+class _MonitorSettingsTab extends ConsumerWidget {
+  const _MonitorSettingsTab({required this.scrollController});
 
-  final String title;
-  final String subtitle;
-  final IconData icon;
-  final List<String> highlights;
-  final String buttonLabel;
-  final VoidCallback onTap;
+  final ScrollController scrollController;
 
   @override
-  Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: AppColors.primary.withValues(alpha: 0.1),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(icon, color: AppColors.primary),
+  Widget build(BuildContext context, WidgetRef ref) {
+    final settingsAsync = ref.watch(monitorSettingsProvider);
+    final appSession = ref.watch(appSessionProvider);
+    final deviceName = appSession.asData?.value.deviceName ?? 'Device';
+    final displayName = appSession.asData?.value.displayName ?? deviceName;
+
+    return settingsAsync.when(
+      data: (settings) => ListView(
+        controller: scrollController,
+        padding: const EdgeInsets.all(16),
+        children: [
+          _SettingsTile(
+            icon: Icons.label,
+            title: 'Device name',
+            subtitle: displayName,
+            onTap: () => _showNameDialog(context, ref, deviceName),
+          ),
+          const SizedBox(height: 12),
+          _SettingsTile(
+            icon: Icons.volume_up,
+            title: 'Noise threshold',
+            subtitle: '${settings.noise.threshold}%',
+            trailing: SizedBox(
+              width: 150,
+              child: Slider(
+                value: settings.noise.threshold.toDouble().clamp(10, 100),
+                min: 10,
+                max: 100,
+                divisions: 18,
+                onChanged: (value) {
+                  ref
+                      .read(monitorSettingsProvider.notifier)
+                      .setThreshold(value.round());
+                },
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          _SettingsTile(
+            icon: Icons.timer,
+            title: 'Min duration',
+            subtitle: '${settings.noise.minDurationMs}ms',
+            trailing: DropdownButton<int>(
+              value: settings.noise.minDurationMs,
+              underline: const SizedBox.shrink(),
+              onChanged: (value) {
+                if (value != null) {
+                  ref
+                      .read(monitorSettingsProvider.notifier)
+                      .setMinDurationMs(value);
+                }
+              },
+              items: monitorDropdownItems(
+                selected: settings.noise.minDurationMs,
+                baseOptions: kMonitorMinDurationOptionsMs,
+                suffix: 'ms',
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          _SettingsTile(
+            icon: Icons.hourglass_empty,
+            title: 'Cooldown',
+            subtitle: '${settings.noise.cooldownSeconds}s between alerts',
+            trailing: DropdownButton<int>(
+              value: settings.noise.cooldownSeconds,
+              underline: const SizedBox.shrink(),
+              onChanged: (value) {
+                if (value != null) {
+                  ref
+                      .read(monitorSettingsProvider.notifier)
+                      .setCooldownSeconds(value);
+                }
+              },
+              items: monitorDropdownItems(
+                selected: settings.noise.cooldownSeconds,
+                baseOptions: kMonitorCooldownOptionsSec,
+                suffix: 's',
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          _SettingsTile(
+            icon: Icons.stream,
+            title: 'Auto-stream on noise',
+            subtitle: settings.autoStreamType == AutoStreamType.none
+                ? 'Disabled'
+                : settings.autoStreamType == AutoStreamType.audio
+                ? 'Audio only'
+                : 'Audio + Video',
+            trailing: DropdownButton<AutoStreamType>(
+              value: settings.autoStreamType,
+              underline: const SizedBox.shrink(),
+              onChanged: (value) {
+                if (value != null) {
+                  ref
+                      .read(monitorSettingsProvider.notifier)
+                      .setAutoStreamType(value);
+                }
+              },
+              items: const [
+                DropdownMenuItem(
+                  value: AutoStreamType.none,
+                  child: Text('Off'),
                 ),
-                const SizedBox(width: 10),
-                Text(
-                  title,
-                  style: Theme.of(
-                    context,
-                  ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+                DropdownMenuItem(
+                  value: AutoStreamType.audio,
+                  child: Text('Audio'),
+                ),
+                DropdownMenuItem(
+                  value: AutoStreamType.audioVideo,
+                  child: Text('A+V'),
                 ),
               ],
             ),
-            const SizedBox(height: 10),
-            Text(
-              subtitle,
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
-            ),
-            const SizedBox(height: 12),
-            ...highlights.map(
-              (h) => Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.check_circle,
-                      color: AppColors.success,
-                      size: 18,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(child: Text(h)),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            FilledButton(onPressed: onTap, child: Text(buttonLabel)),
-          ],
-        ),
+          ),
+        ],
       ),
+      loading: () => const Center(child: CircularProgressIndicator()),
+      error: (e, _) => Center(child: Text('Error: $e')),
+    );
+  }
+
+  Future<void> _showNameDialog(
+    BuildContext context,
+    WidgetRef ref,
+    String currentName,
+  ) async {
+    final controller = TextEditingController(text: currentName);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Device Name'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Name',
+            hintText: 'e.g., Nursery Monitor',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (result != null && result.isNotEmpty) {
+      ref.read(appSessionProvider.notifier).setDeviceName(result);
+    }
+  }
+}
+
+/// Listener settings tab content.
+class _ListenerSettingsTab extends ConsumerWidget {
+  const _ListenerSettingsTab({required this.scrollController});
+
+  final ScrollController scrollController;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final settingsAsync = ref.watch(listenerSettingsProvider);
+
+    return settingsAsync.when(
+      data: (settings) => ListView(
+        controller: scrollController,
+        padding: const EdgeInsets.all(16),
+        children: [
+          _SettingsTile(
+            icon: Icons.notifications,
+            title: 'Notifications',
+            subtitle: settings.notificationsEnabled ? 'Enabled' : 'Disabled',
+            trailing: Switch(
+              value: settings.notificationsEnabled,
+              onChanged: (_) {
+                ref
+                    .read(listenerSettingsProvider.notifier)
+                    .toggleNotifications();
+              },
+            ),
+          ),
+          const SizedBox(height: 12),
+          _SettingsTile(
+            icon: Icons.touch_app,
+            title: 'Default action on noise',
+            subtitle: settings.defaultAction == ListenerDefaultAction.notify
+                ? 'Show notification'
+                : 'Auto-open stream',
+            trailing: DropdownButton<ListenerDefaultAction>(
+              value: settings.defaultAction,
+              underline: const SizedBox.shrink(),
+              onChanged: (value) {
+                if (value != null) {
+                  ref
+                      .read(listenerSettingsProvider.notifier)
+                      .setDefaultAction(value);
+                }
+              },
+              items: const [
+                DropdownMenuItem(
+                  value: ListenerDefaultAction.notify,
+                  child: Text('Notify'),
+                ),
+                DropdownMenuItem(
+                  value: ListenerDefaultAction.autoOpenStream,
+                  child: Text('Auto-open'),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+      loading: () => const Center(child: CircularProgressIndicator()),
+      error: (e, _) => Center(child: Text('Error: $e')),
     );
   }
 }
 
-class _HeroPill extends StatelessWidget {
-  const _HeroPill({required this.text});
+/// General settings tab content.
+class _GeneralSettingsTab extends ConsumerWidget {
+  const _GeneralSettingsTab({
+    required this.scrollController,
+    required this.identityAsync,
+  });
 
-  final String text;
+  final ScrollController scrollController;
+  final AsyncValue<DeviceIdentity> identityAsync;
+
+  Future<void> _confirmRegenerateIdentity(
+    BuildContext context,
+    WidgetRef ref,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Regenerate Identity?'),
+        content: const Text(
+          'This will create a new device ID and certificate. '
+          'All paired devices will need to re-pair with this device.\n\n'
+          'This action cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Regenerate'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    try {
+      await ref.read(identityProvider.notifier).regenerate();
+
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Identity regenerated. All pairings must be redone.'),
+          duration: Duration(seconds: 4),
+        ),
+      );
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to regenerate identity: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return ListView(
+      controller: scrollController,
+      padding: const EdgeInsets.all(16),
+      children: [
+        // Device identity section
+        Text(
+          'Device Identity',
+          style: Theme.of(context).textTheme.titleSmall?.copyWith(
+            fontWeight: FontWeight.w700,
+            color: AppColors.muted,
+          ),
+        ),
+        const SizedBox(height: 12),
+        identityAsync.when(
+          data: (identity) => Column(
+            children: [
+              _SettingsTile(
+                icon: Icons.perm_identity,
+                title: 'Device ID',
+                subtitle: identity.deviceId,
+                onTap: () {
+                  Clipboard.setData(ClipboardData(text: identity.deviceId));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Device ID copied'),
+                      duration: Duration(seconds: 2),
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(height: 12),
+              _SettingsTile(
+                icon: Icons.fingerprint,
+                title: 'Certificate Fingerprint',
+                subtitle: identity.certFingerprint,
+                onTap: () {
+                  Clipboard.setData(
+                    ClipboardData(text: identity.certFingerprint),
+                  );
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Fingerprint copied'),
+                      duration: Duration(seconds: 2),
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(height: 12),
+              _SettingsTile(
+                icon: Icons.refresh,
+                title: 'Regenerate Identity',
+                subtitle: 'Create new device ID and certificate',
+                trailing: const Icon(
+                  Icons.warning_amber,
+                  color: Colors.orange,
+                  size: 20,
+                ),
+                onTap: () => _confirmRegenerateIdentity(context, ref),
+              ),
+            ],
+          ),
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (e, _) => Text('Error: $e'),
+        ),
+        const SizedBox(height: 24),
+        // About section
+        Text(
+          'About',
+          style: Theme.of(context).textTheme.titleSmall?.copyWith(
+            fontWeight: FontWeight.w700,
+            color: AppColors.muted,
+          ),
+        ),
+        const SizedBox(height: 12),
+        const _SettingsTile(
+          icon: Icons.info,
+          title: 'Version',
+          subtitle: '1.0.0',
+        ),
+        const SizedBox(height: 12),
+        const _SettingsTile(
+          icon: Icons.security,
+          title: 'Security',
+          subtitle: 'LAN-only, mTLS, pinned certificates',
+        ),
+      ],
+    );
+  }
+}
+
+/// Reusable settings tile widget.
+class _SettingsTile extends StatelessWidget {
+  const _SettingsTile({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    this.trailing,
+    this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final Widget? trailing;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.14),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(
-        text,
-        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-          color: Colors.white,
-          fontWeight: FontWeight.w700,
+    return Material(
+      color: AppColors.surface,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.grey.shade200),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: AppColors.primary.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Icon(icon, color: AppColors.primary, size: 18),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      style: Theme.of(
+                        context,
+                      ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              if (trailing != null) ...[
+                const SizedBox(width: 8),
+                trailing!,
+              ] else if (onTap != null) ...[
+                const SizedBox(width: 8),
+                Icon(Icons.chevron_right, color: AppColors.muted, size: 20),
+              ],
+            ],
+          ),
         ),
       ),
     );

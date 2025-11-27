@@ -9,6 +9,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 abstract class IdentityStore {
   Future<Map<String, dynamic>?> read();
   Future<void> write(Map<String, dynamic> data);
+  Future<void> delete();
 
   factory IdentityStore.create({String? overrideDirectoryPath}) {
     if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
@@ -50,6 +51,15 @@ class FileIdentityStore implements IdentityStore {
     final file = await _file();
     await file.writeAsString(jsonEncode(data));
     debugPrint('[identity_store] wrote identity to ${file.path}');
+  }
+
+  @override
+  Future<void> delete() async {
+    final file = await _file();
+    if (await file.exists()) {
+      await file.delete();
+      debugPrint('[identity_store] deleted identity from ${file.path}');
+    }
   }
 }
 
@@ -98,6 +108,24 @@ class SecureIdentityStore implements IdentityStore {
       debugPrint('[identity_store] SecureIdentityStore.write() completed');
     } catch (e) {
       debugPrint('[identity_store] SecureIdentityStore.write() error: $e');
+      rethrow;
+    }
+  }
+
+  @override
+  Future<void> delete() async {
+    debugPrint('[identity_store] SecureIdentityStore.delete() starting');
+    try {
+      await _storage.delete(key: _key).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {
+          debugPrint('[identity_store] SecureIdentityStore.delete() TIMEOUT');
+          throw TimeoutException('SecureStorage delete timeout');
+        },
+      );
+      debugPrint('[identity_store] SecureIdentityStore.delete() completed');
+    } catch (e) {
+      debugPrint('[identity_store] SecureIdentityStore.delete() error: $e');
       rethrow;
     }
   }

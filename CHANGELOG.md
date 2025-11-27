@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- Task: linux-notifications-init — Added Linux initialization and notification details for local alerts so desktop noise and pairing notifications work without runtime errors.
+- Task: listener-unpair-on-remove — Added an mTLS /unpair endpoint that removes trusted listeners on the monitor, and the listener forget flow now attempts to unpair remotely before deleting local state (with tests).
+- Task: android-hostname-default — Resolve Android device names via platform channel (Settings/Build fallback) when the hostname is localhost so new installs don’t default to “localhost”.
+- Task: monitor-settings-dropdown — Allow persisted/custom min-duration and cooldown values in the monitor settings dropdowns (including the 800ms/8s defaults) so opening the sheet no longer hits a dropdown assertion.
 - Task: plan-control-stream — Exposed a public FileIdentityStore.file helper so the debug shell can surface the on-disk identity path on desktop, fixing the debug_shell build error.
 - Task: mtls-http-control — Switched HTTP control transport to mandatory mTLS, removed the custom nonce header handshake, pinned fingerprints via TLS, and removed the insecure HTTP fallback for pairing/health.
 - Task: listener-qr-fallback — Handle missing/unsupported cameras in the listener QR flow with a friendly fallback plus manual QR JSON entry (validated parser + tests) so pairing works without mobile_scanner.

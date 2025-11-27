@@ -44,8 +44,10 @@ class NoiseSettings {
   };
 
   factory NoiseSettings.fromJson(Map<String, dynamic> json) {
+    // Clamp threshold to valid slider range (10-100)
+    final rawThreshold = json['threshold'] as int;
     return NoiseSettings(
-      threshold: json['threshold'] as int,
+      threshold: rawThreshold.clamp(10, 100),
       minDurationMs: json['minDurationMs'] as int,
       cooldownSeconds: json['cooldownSeconds'] as int,
     );
@@ -54,32 +56,27 @@ class NoiseSettings {
 
 class MonitorSettings {
   static const defaults = MonitorSettings(
-    name: 'Nursery',
     noise: NoiseSettings.defaults,
     autoStreamType: AutoStreamType.audio,
     autoStreamDurationSec: 15,
   );
 
   const MonitorSettings({
-    required this.name,
     required this.noise,
     required this.autoStreamType,
     required this.autoStreamDurationSec,
   });
 
-  final String name;
   final NoiseSettings noise;
   final AutoStreamType autoStreamType;
   final int autoStreamDurationSec;
 
   MonitorSettings copyWith({
-    String? name,
     NoiseSettings? noise,
     AutoStreamType? autoStreamType,
     int? autoStreamDurationSec,
   }) {
     return MonitorSettings(
-      name: name ?? this.name,
       noise: noise ?? this.noise,
       autoStreamType: autoStreamType ?? this.autoStreamType,
       autoStreamDurationSec:
@@ -88,7 +85,6 @@ class MonitorSettings {
   }
 
   Map<String, dynamic> toJson() => {
-    'name': name,
     'noise': noise.toJson(),
     'autoStreamType': autoStreamType.name,
     'autoStreamDurationSec': autoStreamDurationSec,
@@ -96,7 +92,6 @@ class MonitorSettings {
 
   factory MonitorSettings.fromJson(Map<String, dynamic> json) {
     return MonitorSettings(
-      name: json['name'] as String,
       noise: NoiseSettings.fromJson(
         (json['noise'] as Map).cast<String, dynamic>(),
       ),
@@ -230,7 +225,9 @@ class TrustedMonitor {
     this.serviceVersion = 1,
     this.transport = kTransportHttpWs,
     this.lastKnownIp,
+    this.knownIps,
     this.lastNoiseEpochMs,
+    this.lastSeenEpochMs,
     required this.addedAtEpochSec,
     this.certificateDer,
   });
@@ -244,12 +241,49 @@ class TrustedMonitor {
   final int pairingPort;
   final int serviceVersion;
   final String transport;
+  /// The last IP address where we successfully connected to this monitor.
   final String? lastKnownIp;
+  /// List of IP addresses from the QR code pairing payload.
+  final List<String>? knownIps;
   final int? lastNoiseEpochMs;
+  /// Timestamp (ms since epoch) when the monitor was last seen online via mDNS.
+  final int? lastSeenEpochMs;
   final int addedAtEpochSec;
   /// Full certificate DER bytes for TLS-level mTLS validation.
   /// Optional for backward compatibility with existing stored monitors.
   final List<int>? certificateDer;
+
+  TrustedMonitor copyWith({
+    String? monitorId,
+    String? monitorName,
+    String? certFingerprint,
+    int? controlPort,
+    int? pairingPort,
+    int? serviceVersion,
+    String? transport,
+    String? lastKnownIp,
+    List<String>? knownIps,
+    int? lastNoiseEpochMs,
+    int? lastSeenEpochMs,
+    int? addedAtEpochSec,
+    List<int>? certificateDer,
+  }) {
+    return TrustedMonitor(
+      monitorId: monitorId ?? this.monitorId,
+      monitorName: monitorName ?? this.monitorName,
+      certFingerprint: certFingerprint ?? this.certFingerprint,
+      controlPort: controlPort ?? this.controlPort,
+      pairingPort: pairingPort ?? this.pairingPort,
+      serviceVersion: serviceVersion ?? this.serviceVersion,
+      transport: transport ?? this.transport,
+      lastKnownIp: lastKnownIp ?? this.lastKnownIp,
+      knownIps: knownIps ?? this.knownIps,
+      lastNoiseEpochMs: lastNoiseEpochMs ?? this.lastNoiseEpochMs,
+      lastSeenEpochMs: lastSeenEpochMs ?? this.lastSeenEpochMs,
+      addedAtEpochSec: addedAtEpochSec ?? this.addedAtEpochSec,
+      certificateDer: certificateDer ?? this.certificateDer,
+    );
+  }
 
   Map<String, dynamic> toJson() => {
     'monitorId': monitorId,
@@ -260,7 +294,9 @@ class TrustedMonitor {
     'serviceVersion': serviceVersion,
     'transport': transport,
     if (lastKnownIp != null) 'lastKnownIp': lastKnownIp,
+    if (knownIps != null && knownIps!.isNotEmpty) 'knownIps': knownIps,
     if (lastNoiseEpochMs != null) 'lastNoiseEpochMs': lastNoiseEpochMs,
+    if (lastSeenEpochMs != null) 'lastSeenEpochMs': lastSeenEpochMs,
     'addedAtEpochSec': addedAtEpochSec,
     if (certificateDer != null) 'certificateDer': base64Encode(certificateDer!),
   };
@@ -277,7 +313,9 @@ class TrustedMonitor {
       serviceVersion: json['serviceVersion'] as int? ?? 1,
       transport: json['transport'] as String? ?? kTransportHttpWs,
       lastKnownIp: json['lastKnownIp'] as String?,
+      knownIps: (json['knownIps'] as List<dynamic>?)?.cast<String>(),
       lastNoiseEpochMs: json['lastNoiseEpochMs'] as int?,
+      lastSeenEpochMs: json['lastSeenEpochMs'] as int?,
       addedAtEpochSec: json['addedAtEpochSec'] as int,
       certificateDer: certDerB64 != null ? base64Decode(certDerB64) : null,
     );
@@ -328,6 +366,8 @@ class MonitorQrPayload {
     required this.monitorCertFingerprint,
     required this.service,
     this.monitorPublicKey,
+    this.ips,
+    this.pairingToken,
   });
 
   final String monitorId;
@@ -335,8 +375,16 @@ class MonitorQrPayload {
   final String monitorCertFingerprint;
   final String? monitorPublicKey;
   final QrServiceInfo service;
+  /// List of IP addresses where the monitor can be reached.
+  final List<String>? ips;
+  /// One-time pairing token for QR code pairing (bypasses PIN verification).
+  /// Base64url encoded 32-byte random token.
+  final String? pairingToken;
 
   static const String payloadType = 'monitor_pair_v1';
+
+  /// Returns true if this payload contains a one-time pairing token.
+  bool get hasToken => pairingToken != null && pairingToken!.isNotEmpty;
 
   Map<String, dynamic> toJson() => {
     'type': payloadType,
@@ -344,6 +392,8 @@ class MonitorQrPayload {
     'monitorName': monitorName,
     'monitorCertFingerprint': monitorCertFingerprint,
     if (monitorPublicKey != null) 'monitorPublicKey': monitorPublicKey,
+    if (ips != null && ips!.isNotEmpty) 'ips': ips,
+    if (pairingToken != null) 'pairingToken': pairingToken,
     'service': service.toJson(),
   };
 
@@ -356,6 +406,8 @@ class MonitorQrPayload {
       monitorName: json['monitorName'] as String,
       monitorCertFingerprint: json['monitorCertFingerprint'] as String,
       monitorPublicKey: json['monitorPublicKey'] as String?,
+      ips: (json['ips'] as List<dynamic>?)?.cast<String>(),
+      pairingToken: json['pairingToken'] as String?,
       service: QrServiceInfo.fromJson(
         (json['service'] as Map).cast<String, dynamic>(),
       ),

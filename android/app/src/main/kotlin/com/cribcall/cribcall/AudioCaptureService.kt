@@ -10,6 +10,8 @@ import android.content.Intent
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
 import android.os.Binder
 import android.os.Build
 import android.os.Handler
@@ -34,11 +36,25 @@ class AudioCaptureService : Service() {
     var onAudioData: ((ByteArray) -> Unit)? = null
     private var packetCount = 0
 
+    // mDNS advertising
+    private var nsdManager: NsdManager? = null
+    private var registrationListener: NsdManager.RegistrationListener? = null
+    private val mdnsLogTag = "cribcall_mdns_svc"
+    private val serviceType = "_baby-monitor._tcp."
+
     companion object {
         const val CHANNEL_ID = "cribcall_monitoring"
         const val NOTIFICATION_ID = 1001
         const val ACTION_START = "com.cribcall.START_CAPTURE"
         const val ACTION_STOP = "com.cribcall.STOP_CAPTURE"
+
+        // mDNS extras
+        const val EXTRA_MONITOR_ID = "monitorId"
+        const val EXTRA_MONITOR_NAME = "monitorName"
+        const val EXTRA_MONITOR_CERT_FINGERPRINT = "monitorCertFingerprint"
+        const val EXTRA_CONTROL_PORT = "controlPort"
+        const val EXTRA_PAIRING_PORT = "pairingPort"
+        const val EXTRA_VERSION = "version"
     }
 
     inner class LocalBinder : Binder() {
@@ -52,16 +68,32 @@ class AudioCaptureService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        nsdManager = getSystemService(Context.NSD_SERVICE) as NsdManager
         Log.i(logTag, "AudioCaptureService created")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                startForegroundWithNotification()
+                val monitorName = intent.getStringExtra(EXTRA_MONITOR_NAME) ?: "Monitor"
+                startForegroundWithNotification(monitorName)
                 startAudioCapture()
+
+                // Start mDNS advertising if parameters provided
+                val monitorId = intent.getStringExtra(EXTRA_MONITOR_ID)
+                if (monitorId != null) {
+                    startMdnsAdvertise(
+                        monitorId = monitorId,
+                        monitorName = monitorName,
+                        monitorCertFingerprint = intent.getStringExtra(EXTRA_MONITOR_CERT_FINGERPRINT) ?: "",
+                        controlPort = intent.getIntExtra(EXTRA_CONTROL_PORT, 48080),
+                        pairingPort = intent.getIntExtra(EXTRA_PAIRING_PORT, 48081),
+                        version = intent.getIntExtra(EXTRA_VERSION, 1)
+                    )
+                }
             }
             ACTION_STOP -> {
+                stopMdnsAdvertise()
                 stopAudioCapture()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -71,6 +103,7 @@ class AudioCaptureService : Service() {
     }
 
     override fun onDestroy() {
+        stopMdnsAdvertise()
         stopAudioCapture()
         Log.i(logTag, "AudioCaptureService destroyed")
         super.onDestroy()
@@ -92,7 +125,7 @@ class AudioCaptureService : Service() {
         }
     }
 
-    private fun startForegroundWithNotification() {
+    private fun startForegroundWithNotification(monitorName: String) {
         val notificationIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
@@ -120,7 +153,7 @@ class AudioCaptureService : Service() {
             Notification.Builder(this)
         }.apply {
             setContentTitle("CribCall Monitoring")
-            setContentText("Listening for sounds...")
+            setContentText("$monitorName - Listening for sounds...")
             setSmallIcon(android.R.drawable.ic_btn_speak_now)
             setContentIntent(pendingIntent)
             setOngoing(true)
@@ -144,7 +177,7 @@ class AudioCaptureService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
-        Log.i(logTag, "Foreground notification started")
+        Log.i(logTag, "Foreground notification started for $monitorName")
     }
 
     private fun startAudioCapture() {
@@ -234,4 +267,65 @@ class AudioCaptureService : Service() {
     }
 
     fun isCapturing(): Boolean = isRecording
+
+    // mDNS advertising methods
+    private fun startMdnsAdvertise(
+        monitorId: String,
+        monitorName: String,
+        monitorCertFingerprint: String,
+        controlPort: Int,
+        pairingPort: Int,
+        version: Int
+    ) {
+        val manager = nsdManager ?: return
+        stopMdnsAdvertise() // Stop any existing registration
+
+        val info = NsdServiceInfo().apply {
+            serviceName = "$monitorName-$monitorId"
+            serviceType = this@AudioCaptureService.serviceType
+            port = controlPort
+            setAttribute("monitorId", monitorId)
+            setAttribute("monitorName", monitorName)
+            setAttribute("monitorCertFingerprint", monitorCertFingerprint)
+            setAttribute("controlPort", controlPort.toString())
+            setAttribute("pairingPort", pairingPort.toString())
+            setAttribute("version", version.toString())
+        }
+
+        Log.i(mdnsLogTag, "Starting NSD advertise name=${info.serviceName} port=${info.port} monitorId=$monitorId")
+
+        val listener = object : NsdManager.RegistrationListener {
+            override fun onServiceRegistered(serviceInfo: NsdServiceInfo?) {
+                Log.i(mdnsLogTag, "Advertise registered ${serviceInfo?.serviceName ?: "unknown"}")
+            }
+
+            override fun onRegistrationFailed(serviceInfo: NsdServiceInfo?, errorCode: Int) {
+                Log.w(mdnsLogTag, "Advertise failed $errorCode for ${serviceInfo?.serviceName}")
+            }
+
+            override fun onServiceUnregistered(serviceInfo: NsdServiceInfo?) {
+                Log.i(mdnsLogTag, "Advertise unregistered ${serviceInfo?.serviceName}")
+            }
+
+            override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo?, errorCode: Int) {
+                Log.w(mdnsLogTag, "Advertise unregistration failed $errorCode")
+            }
+        }
+
+        registrationListener = listener
+        manager.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
+    }
+
+    private fun stopMdnsAdvertise() {
+        val manager = nsdManager ?: return
+        registrationListener?.let { listener ->
+            try {
+                manager.unregisterService(listener)
+                Log.i(mdnsLogTag, "Stopped NSD advertise")
+            } catch (e: Exception) {
+                Log.w(mdnsLogTag, "Failed to unregister service: ${e.message}")
+            }
+        }
+        registrationListener = null
+    }
 }

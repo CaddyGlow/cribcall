@@ -15,6 +15,9 @@ import '../identity/pem.dart';
 import '../identity/pkcs8.dart';
 import 'control_connection.dart';
 
+typedef UnpairRequestHandler =
+    Future<bool> Function(String fingerprint, String? listenerId);
+
 // -----------------------------------------------------------------------------
 // Server Events
 // -----------------------------------------------------------------------------
@@ -39,9 +42,10 @@ class ClientDisconnected extends ControlServerEvent {
 /// mTLS WebSocket server for control messages.
 /// Requires valid client certificate from trusted peer.
 class ControlServer {
-  ControlServer({this.bindAddress = '0.0.0.0'});
+  ControlServer({this.bindAddress = '0.0.0.0', this.onUnpairRequest});
 
   final String bindAddress;
+  final UnpairRequestHandler? onUnpairRequest;
 
   HttpServer? _server;
   int? _boundPort;
@@ -155,7 +159,9 @@ class ControlServer {
     if (!_trustedFingerprints.contains(fingerprint)) return;
 
     _trustedFingerprints.remove(fingerprint);
-    _trustedCertificates.removeWhere((cert) => _fingerprintHex(cert) == fingerprint);
+    _trustedCertificates.removeWhere(
+      (cert) => _fingerprintHex(cert) == fingerprint,
+    );
     _log(
       'Removed trusted peer ${_shortFingerprint(fingerprint)}, '
       'total=${_trustedFingerprints.length}',
@@ -164,7 +170,9 @@ class ControlServer {
     // Close any existing connections from this peer
     for (final conn in List.of(_connections)) {
       if (conn.peerFingerprint == fingerprint) {
-        _log('Closing connection from removed peer ${_shortFingerprint(fingerprint)}');
+        _log(
+          'Closing connection from removed peer ${_shortFingerprint(fingerprint)}',
+        );
         await conn.close();
       }
     }
@@ -219,7 +227,9 @@ class ControlServer {
   Future<void> _handleRequest(HttpRequest request) async {
     final remoteIp = request.connectionInfo?.remoteAddress.address ?? 'unknown';
     final remotePort = request.connectionInfo?.remotePort ?? 0;
-    _log('Incoming ${request.method} ${request.uri.path} from $remoteIp:$remotePort');
+    _log(
+      'Incoming ${request.method} ${request.uri.path} from $remoteIp:$remotePort',
+    );
 
     try {
       switch (request.uri.path) {
@@ -229,6 +239,12 @@ class ControlServer {
         case '/test':
           await _handleTest(request);
           return;
+        case '/unpair':
+          if (request.method == 'POST') {
+            await _handleUnpair(request);
+            return;
+          }
+          break;
         case '/control/ws':
           if (WebSocketTransformer.isUpgradeRequest(request)) {
             await _handleWebSocket(request);
@@ -264,7 +280,9 @@ class ControlServer {
         'clientFp=${_shortFingerprint(clientFp)} trusted=$trusted',
       );
     } else {
-      _log('Health from ${request.connectionInfo?.remoteAddress.address} (no client cert)');
+      _log(
+        'Health from ${request.connectionInfo?.remoteAddress.address} (no client cert)',
+      );
     }
 
     final body = jsonEncode({
@@ -294,10 +312,12 @@ class ControlServer {
       request.response
         ..statusCode = HttpStatus.unauthorized
         ..headers.contentType = ContentType.json
-        ..write(jsonEncode({
-          'error': 'client_certificate_required',
-          'message': 'This endpoint requires mTLS authentication',
-        }));
+        ..write(
+          jsonEncode({
+            'error': 'client_certificate_required',
+            'message': 'This endpoint requires mTLS authentication',
+          }),
+        );
       await request.response.close();
       return;
     }
@@ -309,11 +329,13 @@ class ControlServer {
       request.response
         ..statusCode = HttpStatus.forbidden
         ..headers.contentType = ContentType.json
-        ..write(jsonEncode({
-          'error': 'certificate_not_trusted',
-          'message': 'Client certificate not in trusted list',
-          'fingerprint': fp,
-        }));
+        ..write(
+          jsonEncode({
+            'error': 'certificate_not_trusted',
+            'message': 'Client certificate not in trusted list',
+            'fingerprint': fp,
+          }),
+        );
       await request.response.close();
       return;
     }
@@ -322,13 +344,112 @@ class ControlServer {
     request.response
       ..statusCode = HttpStatus.ok
       ..headers.contentType = ContentType.json
-      ..write(jsonEncode({
-        'status': 'ok',
-        'message': 'mTLS authentication successful',
-        'clientSubject': clientCert.subject,
-        'clientFingerprint': fp,
-        'trusted': true,
-      }));
+      ..write(
+        jsonEncode({
+          'status': 'ok',
+          'message': 'mTLS authentication successful',
+          'clientSubject': clientCert.subject,
+          'clientFingerprint': fp,
+          'trusted': true,
+        }),
+      );
+    await request.response.close();
+  }
+
+  Future<void> _handleUnpair(HttpRequest request) async {
+    final clientCert = request.certificate;
+    if (clientCert == null) {
+      _log('Unpair rejected: no client certificate');
+      request.response
+        ..statusCode = HttpStatus.unauthorized
+        ..headers.contentType = ContentType.json
+        ..write(
+          jsonEncode({
+            'error': 'client_certificate_required',
+            'message': 'This endpoint requires mTLS authentication',
+          }),
+        );
+      await request.response.close();
+      return;
+    }
+
+    final fp = _fingerprintHex(clientCert.der);
+    final trusted = _trustedFingerprints.contains(fp);
+    if (!trusted) {
+      _log('Unpair rejected: untrusted certificate ${_shortFingerprint(fp)}');
+      request.response
+        ..statusCode = HttpStatus.forbidden
+        ..headers.contentType = ContentType.json
+        ..write(
+          jsonEncode({
+            'error': 'certificate_not_trusted',
+            'message': 'Client certificate not in trusted list',
+            'fingerprint': fp,
+          }),
+        );
+      await request.response.close();
+      return;
+    }
+
+    String? listenerId;
+    try {
+      final bodyStr = await utf8.decodeStream(request);
+      if (bodyStr.trim().isNotEmpty) {
+        final payload = jsonDecode(bodyStr);
+        if (payload is Map && payload['listenerId'] is String) {
+          listenerId = payload['listenerId'] as String;
+        }
+      }
+    } catch (e) {
+      _log('Unpair rejected: invalid body ($e)');
+      request.response
+        ..statusCode = HttpStatus.badRequest
+        ..headers.contentType = ContentType.json
+        ..write(
+          jsonEncode({
+            'error': 'invalid_body',
+            'message': 'Body must be JSON with optional listenerId',
+          }),
+        );
+      await request.response.close();
+      return;
+    }
+
+    final handler = onUnpairRequest;
+    if (handler == null) {
+      _log('Unpair handler not configured');
+      request.response
+        ..statusCode = HttpStatus.serviceUnavailable
+        ..headers.contentType = ContentType.json
+        ..write(
+          jsonEncode({
+            'error': 'unpair_not_supported',
+            'message': 'Unpair handler not configured on server',
+          }),
+        );
+      await request.response.close();
+      return;
+    }
+
+    final unpaired = await handler(fp, listenerId);
+    _log(
+      'Unpair request from ${request.connectionInfo?.remoteAddress.address} '
+      'clientFp=${_shortFingerprint(fp)} listenerId=$listenerId '
+      'unpaired=$unpaired',
+    );
+
+    request.response
+      ..statusCode = HttpStatus.ok
+      ..headers.contentType = ContentType.json
+      ..headers.set('Cache-Control', 'no-store')
+      ..write(
+        jsonEncode({
+          'status': 'ok',
+          'unpaired': unpaired,
+          if (listenerId != null) 'listenerId': listenerId,
+          if (!unpaired) 'reason': 'listener_not_found',
+        }),
+      );
     await request.response.close();
   }
 
@@ -338,7 +459,9 @@ class ControlServer {
 
     final clientCert = request.certificate;
     if (clientCert == null) {
-      _log('WebSocket rejected from $remoteIp:$remotePort: no client certificate');
+      _log(
+        'WebSocket rejected from $remoteIp:$remotePort: no client certificate',
+      );
       request.response
         ..statusCode = HttpStatus.unauthorized
         ..write('client certificate required');
@@ -387,10 +510,9 @@ class ControlServer {
       },
       onDone: () {
         _connections.remove(connection);
-        _eventsController.add(ClientDisconnected(
-          connectionId: connectionId,
-          reason: null,
-        ));
+        _eventsController.add(
+          ClientDisconnected(connectionId: connectionId, reason: null),
+        );
         _log('Connection closed: $connectionId');
       },
     );

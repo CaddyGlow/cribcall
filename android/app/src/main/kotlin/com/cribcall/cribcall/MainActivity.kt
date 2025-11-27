@@ -16,6 +16,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -26,9 +27,10 @@ class MainActivity : FlutterActivity() {
     private var mdnsEventSink: EventChannel.EventSink? = null
     private val serviceType = "_baby-monitor._tcp."
     private var nsdManager: NsdManager? = null
-    private var registrationListener: NsdManager.RegistrationListener? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
+    // Note: mDNS advertising (registrationListener) moved to AudioCaptureService
     private val logTag = "cribcall_mdns"
+    private val deviceInfoChannel = "cribcall/device_info"
 
     // Audio capture via foreground service
     private val audioChannel = "cribcall/audio"
@@ -50,6 +52,9 @@ class MainActivity : FlutterActivity() {
     // Service binding
     private var audioCaptureService: AudioCaptureService? = null
     private var serviceBound = false
+
+    // Pending mDNS params to pass to AudioCaptureService
+    private var pendingMdnsParams: Map<*, *>? = null
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -83,19 +88,23 @@ class MainActivity : FlutterActivity() {
         // Bind to audio service early
         bindAudioService()
 
+        // mDNS channel - advertising is now handled by AudioCaptureService
+        // This channel only handles discovery for listeners
         MethodChannel(messenger, mdnsChannel).setMethodCallHandler { call, result ->
             when (call.method) {
                 "startAdvertise" -> {
+                    // mDNS advertising is now handled by AudioCaptureService
+                    // Store params for when audio capture starts
                     val args = call.arguments as? Map<*, *>
-                    if (args == null) {
-                        result.error("invalid_args", "Missing advertisement", null)
-                        return@setMethodCallHandler
+                    if (args != null) {
+                        pendingMdnsParams = args
+                        Log.i(logTag, "Stored mDNS params for AudioCaptureService")
                     }
-                    startAdvertise(args)
                     result.success(null)
                 }
                 "stop" -> {
                     stopMdns()
+                    pendingMdnsParams = null
                     result.success(null)
                 }
                 else -> result.notImplemented()
@@ -114,6 +123,15 @@ class MainActivity : FlutterActivity() {
             }
         })
 
+        MethodChannel(messenger, deviceInfoChannel).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "getDeviceName" -> {
+                    result.success(resolveDeviceName())
+                }
+                else -> result.notImplemented()
+            }
+        }
+
         // Audio capture channels (now using foreground service)
         MethodChannel(messenger, audioChannel).setMethodCallHandler { call, result ->
             when (call.method) {
@@ -126,6 +144,12 @@ class MainActivity : FlutterActivity() {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !checkNotificationPermission()) {
                         requestNotificationPermission()
                         // Continue anyway - notification permission is not strictly required
+                    }
+                    // Get mDNS params if provided directly in the start call
+                    val args = call.arguments as? Map<*, *>
+                    if (args != null && args.isNotEmpty()) {
+                        pendingMdnsParams = args
+                        Log.i(audioLogTag, "Audio start with mDNS params: monitorId=${args["monitorId"]}")
                     }
                     startAudioCaptureService()
                     result.success(null)
@@ -227,52 +251,38 @@ class MainActivity : FlutterActivity() {
         bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
     }
 
-    private fun startAdvertise(args: Map<*, *>) {
-        val manager = nsdManager ?: return
-        val info = NsdServiceInfo().apply {
-            serviceName =
-                "${args["monitorName"] as? String ?: "monitor"}-${args["monitorId"] as? String ?: "id"}"
-            serviceType = this@MainActivity.serviceType
-            port = (args["controlPort"] as? Int) ?: (args["servicePort"] as? Int) ?: 48080
-            setAttribute("monitorId", args["monitorId"]?.toString() ?: "")
-            setAttribute("monitorName", args["monitorName"]?.toString() ?: "")
-            setAttribute(
-                "monitorCertFingerprint",
-                args["monitorCertFingerprint"]?.toString() ?: "",
-            )
-            setAttribute("version", (args["version"] ?: "1").toString())
-        }
-        Log.i(
-            logTag,
-            "Starting NSD advertise name=${info.serviceName} port=${info.port} monitorId=${args["monitorId"]}",
-        )
-        val listener = object : NsdManager.RegistrationListener {
-            override fun onServiceRegistered(serviceInfo: NsdServiceInfo?) {
-                registrationListener = this
-                Log.i(
-                    logTag,
-                    "Advertise registered ${serviceInfo?.serviceName ?: "unknown"}",
-                )
+    private fun resolveDeviceName(): String {
+        val resolver = applicationContext.contentResolver
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1) {
+            val globalName = Settings.Global.getString(resolver, Settings.Global.DEVICE_NAME)
+            if (!globalName.isNullOrBlank()) {
+                return globalName.trim()
             }
+        }
 
-            override fun onRegistrationFailed(
-                serviceInfo: NsdServiceInfo?,
-                errorCode: Int,
-            ) {
-                Log.w(logTag, "Advertise failed $errorCode for ${serviceInfo?.serviceName}")
+        val manufacturer = Build.MANUFACTURER?.trim().orEmpty()
+        val model = Build.MODEL?.trim().orEmpty()
+        if (manufacturer.isNotEmpty() && model.isNotEmpty()) {
+            val combined = if (model.startsWith(manufacturer, ignoreCase = true)) {
+                model
+            } else {
+                manufacturer.replaceFirstChar { it.uppercase() } + " " + model
             }
-            override fun onServiceUnregistered(serviceInfo: NsdServiceInfo?) {
-                Log.i(logTag, "Advertise unregistered ${serviceInfo?.serviceName}")
+            if (combined.isNotBlank()) {
+                return combined.trim()
             }
-            override fun onUnregistrationFailed(
-                serviceInfo: NsdServiceInfo?,
-                errorCode: Int,
-            ) {
-                Log.w(logTag, "Advertise unregistration failed $errorCode")
-            }
+        } else if (model.isNotEmpty()) {
+            return model
+        } else if (manufacturer.isNotEmpty()) {
+            return manufacturer.replaceFirstChar { it.uppercase() }
         }
-        registrationListener = listener
-        manager.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
+
+        val device = Build.DEVICE?.trim().orEmpty()
+        if (device.isNotEmpty()) {
+            return device
+        }
+
+        return "Android device"
     }
 
     private fun startDiscovery() {
@@ -353,18 +363,9 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun stopMdns() {
-        Log.i(logTag, "Stopping NSD advertise/discovery")
+        Log.i(logTag, "Stopping NSD discovery")
         stopDiscovery()
-        nsdManager?.let { mgr ->
-            registrationListener?.let {
-                try {
-                    mgr.unregisterService(it)
-                } catch (e: Exception) {
-                    Log.w(logTag, "Failed to unregister service: ${e.message}")
-                }
-            }
-        }
-        registrationListener = null
+        // Note: mDNS advertising is stopped by AudioCaptureService
     }
 
     // Audio permission methods
@@ -409,6 +410,17 @@ class MainActivity : FlutterActivity() {
         Log.i(audioLogTag, "Starting audio capture foreground service")
         val intent = Intent(this, AudioCaptureService::class.java).apply {
             action = AudioCaptureService.ACTION_START
+
+            // Pass mDNS params if available
+            pendingMdnsParams?.let { params ->
+                putExtra(AudioCaptureService.EXTRA_MONITOR_ID, params["monitorId"]?.toString())
+                putExtra(AudioCaptureService.EXTRA_MONITOR_NAME, params["monitorName"]?.toString() ?: "Monitor")
+                putExtra(AudioCaptureService.EXTRA_MONITOR_CERT_FINGERPRINT, params["monitorCertFingerprint"]?.toString() ?: "")
+                putExtra(AudioCaptureService.EXTRA_CONTROL_PORT, (params["controlPort"] as? Int) ?: 48080)
+                putExtra(AudioCaptureService.EXTRA_PAIRING_PORT, (params["pairingPort"] as? Int) ?: 48081)
+                putExtra(AudioCaptureService.EXTRA_VERSION, (params["version"] as? Int) ?: 1)
+                Log.i(audioLogTag, "Passing mDNS params to AudioCaptureService: monitorId=${params["monitorId"]}")
+            }
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)

@@ -4,11 +4,13 @@ import 'dart:developer' as developer;
 import '../foundation/foundation_stub.dart'
     if (dart.library.ui) 'package:flutter/foundation.dart';
 
+import 'package:collection/collection.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../config/build_flags.dart';
 import '../domain/models.dart';
 import '../identity/device_identity.dart';
+import '../notifications/notification_service.dart';
 import '../state/app_state.dart';
 import 'control_connection.dart';
 import 'control_messages.dart';
@@ -31,11 +33,16 @@ enum PairingServerStatus { stopped, starting, running, error }
 class ActivePairingSession {
   const ActivePairingSession({
     required this.sessionId,
+    required this.listenerName,
     required this.comparisonCode,
     required this.expiresAt,
   });
 
   final String sessionId;
+
+  /// Name of the device requesting to pair.
+  final String listenerName;
+
   /// 6-digit comparison code to display to the user
   final String comparisonCode;
   final DateTime expiresAt;
@@ -55,19 +62,42 @@ class PairingServerState {
   const PairingServerState.stopped()
     : this._(status: PairingServerStatus.stopped);
 
-  const PairingServerState.starting({required int port, required String fingerprint})
-    : this._(status: PairingServerStatus.starting, port: port, fingerprint: fingerprint);
+  const PairingServerState.starting({
+    required int port,
+    required String fingerprint,
+  }) : this._(
+         status: PairingServerStatus.starting,
+         port: port,
+         fingerprint: fingerprint,
+       );
 
-  const PairingServerState.running({required int port, required String fingerprint, ActivePairingSession? activeSession})
-    : this._(status: PairingServerStatus.running, port: port, fingerprint: fingerprint, activeSession: activeSession);
+  const PairingServerState.running({
+    required int port,
+    required String fingerprint,
+    ActivePairingSession? activeSession,
+  }) : this._(
+         status: PairingServerStatus.running,
+         port: port,
+         fingerprint: fingerprint,
+         activeSession: activeSession,
+       );
 
-  const PairingServerState.error({required String error, int? port, String? fingerprint})
-    : this._(status: PairingServerStatus.error, port: port, fingerprint: fingerprint, error: error);
+  const PairingServerState.error({
+    required String error,
+    int? port,
+    String? fingerprint,
+  }) : this._(
+         status: PairingServerStatus.error,
+         port: port,
+         fingerprint: fingerprint,
+         error: error,
+       );
 
   final PairingServerStatus status;
   final int? port;
   final String? fingerprint;
   final String? error;
+
   /// Active pairing session awaiting user confirmation (if any)
   final ActivePairingSession? activeSession;
 
@@ -115,6 +145,8 @@ class PairingServerController extends Notifier<PairingServerState> {
       _server ??= PairingServer(
         onPairingComplete: _onPairingComplete,
         onSessionCreated: _onSessionCreated,
+        onSessionRejected: _onSessionRejected,
+        onSessionConfirmed: _onSessionConfirmed,
       );
 
       await _server!.start(
@@ -145,17 +177,46 @@ class PairingServerController extends Notifier<PairingServerState> {
     }
   }
 
-  void _onSessionCreated(String sessionId, String comparisonCode, DateTime expiresAt) {
+  void _onSessionCreated(
+    String sessionId,
+    String listenerName,
+    String comparisonCode,
+    DateTime expiresAt,
+  ) {
     _logPairing(
       'Pairing session created: sessionId=$sessionId '
-      'comparisonCode=$comparisonCode expiresAt=$expiresAt',
+      'listenerName=$listenerName comparisonCode=$comparisonCode '
+      'expiresAt=$expiresAt',
     );
-    // Update state with active session
-    state = state.copyWithSession(ActivePairingSession(
-      sessionId: sessionId,
+
+    // Show system notification for pairing request
+    NotificationService.instance.showPairingRequest(
+      listenerName: listenerName,
       comparisonCode: comparisonCode,
-      expiresAt: expiresAt,
-    ));
+    );
+
+    // Update state with active session
+    state = state.copyWithSession(
+      ActivePairingSession(
+        sessionId: sessionId,
+        listenerName: listenerName,
+        comparisonCode: comparisonCode,
+        expiresAt: expiresAt,
+      ),
+    );
+  }
+
+  void _onSessionConfirmed(String sessionId) {
+    _logPairing('Pairing session confirmed by monitor: sessionId=$sessionId');
+    // Cancel notification - user has responded via the app
+    NotificationService.instance.cancelPairingRequest();
+  }
+
+  void _onSessionRejected(String sessionId) {
+    _logPairing('Pairing session rejected by monitor: sessionId=$sessionId');
+    // Cancel notification and clear the session from UI
+    NotificationService.instance.cancelPairingRequest();
+    state = state.copyWithSession(null);
   }
 
   void _onPairingComplete(TrustedPeer peer) {
@@ -164,15 +225,65 @@ class PairingServerController extends Notifier<PairingServerState> {
       'name=${peer.name} '
       'fingerprint=${_shortFingerprint(peer.certFingerprint)}',
     );
-    // Clear active session and persist trusted listener
+    // Cancel notification and clear active session, persist trusted listener
+    NotificationService.instance.cancelPairingRequest();
     state = state.copyWithSession(null);
     ref.read(trustedListenersProvider.notifier).addListener(peer);
   }
 
+  /// Monitor user confirms the pairing request.
+  /// Returns true if the session was successfully confirmed.
+  bool confirmSession(String sessionId) {
+    final srv = _server;
+    if (srv == null) {
+      _logPairing('Cannot confirm session: server not running');
+      return false;
+    }
+    return srv.confirmSession(sessionId);
+  }
+
+  /// Monitor user rejects the pairing request.
+  /// Returns true if the session was successfully rejected.
+  bool rejectSession(String sessionId) {
+    final srv = _server;
+    if (srv == null) {
+      _logPairing('Cannot reject session: server not running');
+      return false;
+    }
+    return srv.rejectSession(sessionId);
+  }
+
   /// Clears the active pairing session (e.g., if user cancels or session expires)
   void clearSession() {
+    final session = state.activeSession;
+    if (session != null) {
+      // Also reject it on the server side
+      _server?.rejectSession(session.sessionId);
+    }
+    // Cancel notification
+    NotificationService.instance.cancelPairingRequest();
     state = state.copyWithSession(null);
   }
+
+  /// Generate a new one-time pairing token for QR code flow.
+  /// Invalidates any previous token.
+  /// Returns null if server is not running.
+  String? generatePairingToken() {
+    final srv = _server;
+    if (srv == null) {
+      _logPairing('Cannot generate pairing token: server not running');
+      return null;
+    }
+    return srv.generatePairingToken();
+  }
+
+  /// Invalidate the current pairing token.
+  void invalidatePairingToken() {
+    _server?.invalidateToken();
+  }
+
+  /// Check if the server has a valid pairing token.
+  bool get hasValidPairingToken => _server?.hasValidToken ?? false;
 
   Future<void> stop() => _shutdown();
 
@@ -200,7 +311,9 @@ class ControlServerState {
     this.port,
     this.trustedFingerprints = const [],
     this.fingerprint,
+    this.deviceId,
     this.error,
+    this.activeConnectionsCount = 0,
   });
 
   const ControlServerState.stopped()
@@ -210,22 +323,28 @@ class ControlServerState {
     required int port,
     required List<String> trustedFingerprints,
     required String fingerprint,
+    required String deviceId,
   }) : this._(
          status: ControlServerStatus.starting,
          port: port,
          trustedFingerprints: trustedFingerprints,
          fingerprint: fingerprint,
+         deviceId: deviceId,
        );
 
   const ControlServerState.running({
     required int port,
     required List<String> trustedFingerprints,
     required String fingerprint,
+    required String deviceId,
+    int activeConnectionsCount = 0,
   }) : this._(
          status: ControlServerStatus.running,
          port: port,
          trustedFingerprints: trustedFingerprints,
          fingerprint: fingerprint,
+         deviceId: deviceId,
+         activeConnectionsCount: activeConnectionsCount,
        );
 
   const ControlServerState.error({
@@ -233,11 +352,13 @@ class ControlServerState {
     int? port,
     List<String> trustedFingerprints = const [],
     String? fingerprint,
+    String? deviceId,
   }) : this._(
          status: ControlServerStatus.error,
          port: port,
          trustedFingerprints: trustedFingerprints,
          fingerprint: fingerprint,
+         deviceId: deviceId,
          error: error,
        );
 
@@ -245,9 +366,28 @@ class ControlServerState {
   final int? port;
   final List<String> trustedFingerprints;
   final String? fingerprint;
+
+  /// Device UUID used for monitor identification.
+  final String? deviceId;
   final String? error;
 
+  /// Number of currently connected listeners.
+  final int activeConnectionsCount;
+
   bool get isRunning => status == ControlServerStatus.running;
+
+  /// Creates a copy with updated connection count.
+  ControlServerState copyWithConnectionCount(int count) {
+    return ControlServerState._(
+      status: status,
+      port: port,
+      trustedFingerprints: trustedFingerprints,
+      fingerprint: fingerprint,
+      deviceId: deviceId,
+      error: error,
+      activeConnectionsCount: count,
+    );
+  }
 }
 
 bool _setEquals<T>(Set<T> a, Set<T> b) {
@@ -275,14 +415,21 @@ class ControlServerController extends Notifier<ControlServerState> {
   }) async {
     if (_starting) return;
 
-    final trustedFingerprints = trustedPeers.map((p) => p.certFingerprint).toList();
+    final trustedFingerprints = trustedPeers
+        .map((p) => p.certFingerprint)
+        .toList();
 
     // Skip restart if already running with same configuration
     if (state.isRunning &&
         state.port == port &&
         state.fingerprint == identity.certFingerprint &&
-        _setEquals(state.trustedFingerprints.toSet(), trustedFingerprints.toSet())) {
-      _logControl('Control server already running with same config, skipping restart');
+        _setEquals(
+          state.trustedFingerprints.toSet(),
+          trustedFingerprints.toSet(),
+        )) {
+      _logControl(
+        'Control server already running with same config, skipping restart',
+      );
       return;
     }
 
@@ -298,10 +445,11 @@ class ControlServerController extends Notifier<ControlServerState> {
       port: port,
       trustedFingerprints: trustedFingerprints,
       fingerprint: identity.certFingerprint,
+      deviceId: identity.deviceId,
     );
 
     try {
-      _server ??= server.ControlServer();
+      _server ??= server.ControlServer(onUnpairRequest: _handleUnpairRequest);
 
       await _server!.start(
         port: port,
@@ -314,7 +462,9 @@ class ControlServerController extends Notifier<ControlServerState> {
       _eventSub = _server!.events.listen(_handleServerEvent);
 
       // Set up streaming controller send callback
-      ref.read(monitorStreamingProvider.notifier).setSendCallback(_sendToConnection);
+      ref
+          .read(monitorStreamingProvider.notifier)
+          .setSendCallback(_sendToConnection);
 
       final actualPort = _server!.boundPort ?? port;
       _logControl(
@@ -327,6 +477,7 @@ class ControlServerController extends Notifier<ControlServerState> {
         port: actualPort,
         trustedFingerprints: trustedFingerprints,
         fingerprint: identity.certFingerprint,
+        deviceId: identity.deviceId,
       );
     } catch (e) {
       _logControl('Control server start failed: $e');
@@ -335,6 +486,7 @@ class ControlServerController extends Notifier<ControlServerState> {
         port: port,
         trustedFingerprints: trustedFingerprints,
         fingerprint: identity.certFingerprint,
+        deviceId: identity.deviceId,
       );
     } finally {
       _starting = false;
@@ -350,16 +502,25 @@ class ControlServerController extends Notifier<ControlServerState> {
         );
         _connections[connection.connectionId] = connection;
         _listenToConnection(connection);
+        // Update connection count in state
+        state = state.copyWithConnectionCount(_connections.length);
       case server.ClientDisconnected(:final connectionId, :final reason):
         _logControl('Client disconnected: $connectionId reason=$reason');
         _connections.remove(connectionId);
         // Clean up any streaming sessions for this connection
-        ref.read(monitorStreamingProvider.notifier).endSessionsForConnection(connectionId);
+        ref
+            .read(monitorStreamingProvider.notifier)
+            .endSessionsForConnection(connectionId);
+        // Update connection count in state
+        state = state.copyWithConnectionCount(_connections.length);
     }
   }
 
   /// Send a message to a specific connection.
-  Future<void> _sendToConnection(String connectionId, ControlMessage message) async {
+  Future<void> _sendToConnection(
+    String connectionId,
+    ControlMessage message,
+  ) async {
     final connection = _connections[connectionId];
     if (connection == null) {
       _logControl('Cannot send to unknown connection: $connectionId');
@@ -372,7 +533,8 @@ class ControlServerController extends Notifier<ControlServerState> {
   void _listenToConnection(ControlConnection connection) {
     connection.messages.listen(
       (message) => _handleMessage(connection, message),
-      onError: (e) => _logControl('Connection error ${connection.connectionId}: $e'),
+      onError: (e) =>
+          _logControl('Connection error ${connection.connectionId}: $e'),
       onDone: () => _connections.remove(connection.connectionId),
     );
   }
@@ -405,7 +567,11 @@ class ControlServerController extends Notifier<ControlServerState> {
     }
   }
 
-  void _handleStreamRequest(String connectionId, String sessionId, String mediaType) {
+  void _handleStreamRequest(
+    String connectionId,
+    String sessionId,
+    String mediaType,
+  ) {
     _logControl('Stream request: session=$sessionId media=$mediaType');
     final streaming = ref.read(monitorStreamingProvider.notifier);
     streaming.handleStreamRequest(
@@ -436,10 +602,35 @@ class ControlServerController extends Notifier<ControlServerState> {
   /// Handle FCM token update from a listener.
   Future<void> _handleFcmTokenUpdate(String listenerId, String fcmToken) async {
     _logControl('FCM token update from listener=$listenerId');
-    await ref.read(trustedListenersProvider.notifier).updateFcmToken(
-      listenerId,
-      fcmToken,
+    await ref
+        .read(trustedListenersProvider.notifier)
+        .updateFcmToken(listenerId, fcmToken);
+  }
+
+  /// Handle an authenticated unpair request initiated by a listener.
+  Future<bool> _handleUnpairRequest(
+    String fingerprint,
+    String? listenerId,
+  ) async {
+    final listeners = await ref.read(trustedListenersProvider.future);
+    final peer = listeners.firstWhereOrNull(
+      (p) => p.certFingerprint == fingerprint,
     );
+    if (peer == null) {
+      _logControl(
+        'Unpair request ignored: listener fingerprint not found '
+        'fingerprint=${_shortFingerprint(fingerprint)} listenerId=$listenerId',
+      );
+      return false;
+    }
+
+    _logControl(
+      'Unpairing listener ${peer.deviceId} via fingerprint '
+      '${_shortFingerprint(peer.certFingerprint)} (listenerId=$listenerId ignored)',
+    );
+    await ref.read(trustedListenersProvider.notifier).revoke(peer.deviceId);
+    await removeTrustedPeer(peer.certFingerprint);
+    return true;
   }
 
   /// Add a newly paired peer to the trusted list.
@@ -455,11 +646,15 @@ class ControlServerController extends Notifier<ControlServerState> {
     await srv.addTrustedPeer(peer);
 
     // Update state with new trusted list
-    final newFingerprints = [...state.trustedFingerprints, peer.certFingerprint];
+    final newFingerprints = [
+      ...state.trustedFingerprints,
+      peer.certFingerprint,
+    ];
     state = ControlServerState.running(
       port: state.port ?? kControlDefaultPort,
       trustedFingerprints: newFingerprints,
       fingerprint: state.fingerprint ?? '',
+      deviceId: state.deviceId ?? '',
     );
   }
 
@@ -468,7 +663,9 @@ class ControlServerController extends Notifier<ControlServerState> {
     final srv = _server;
     if (srv == null) return;
 
-    _logControl('Removing trusted peer: fingerprint=${_shortFingerprint(fingerprint)}');
+    _logControl(
+      'Removing trusted peer: fingerprint=${_shortFingerprint(fingerprint)}',
+    );
     await srv.removeTrustedPeer(fingerprint);
 
     // Update state
@@ -479,12 +676,15 @@ class ControlServerController extends Notifier<ControlServerState> {
       port: state.port ?? kControlDefaultPort,
       trustedFingerprints: newFingerprints,
       fingerprint: state.fingerprint ?? '',
+      deviceId: state.deviceId ?? '',
     );
   }
 
   /// Broadcast a message to all connected clients.
   Future<void> broadcast(ControlMessage message) async {
-    _logControl('Broadcasting ${message.type.name} to ${_connections.length} clients');
+    _logControl(
+      'Broadcasting ${message.type.name} to ${_connections.length} clients',
+    );
     for (final conn in _connections.values) {
       try {
         await conn.send(message);
@@ -509,7 +709,7 @@ class ControlServerController extends Notifier<ControlServerState> {
     required int timestampMs,
     required int peakLevel,
   }) async {
-    final monitorId = state.fingerprint ?? '';
+    final monitorId = state.deviceId ?? '';
     final message = NoiseEventMessage(
       monitorId: monitorId,
       timestamp: timestampMs,
@@ -547,8 +747,8 @@ class ControlServerController extends Notifier<ControlServerState> {
     }
 
     // Get monitor name for notification
-    final monitorSettings = ref.read(monitorSettingsProvider).asData?.value;
-    final monitorName = monitorSettings?.name ?? 'Monitor';
+    final appSession = ref.read(appSessionProvider).asData?.value;
+    final monitorName = appSession?.deviceName ?? 'Monitor';
 
     try {
       _fcmSender ??= FcmSender();
@@ -679,10 +879,12 @@ class ControlClientController extends Notifier<ControlClientState> {
   Stream<NoiseEventData> get noiseEvents => _noiseEventController.stream;
 
   /// Stream controller for WebRTC signaling messages.
-  final _webrtcSignalingController = StreamController<ControlMessage>.broadcast();
+  final _webrtcSignalingController =
+      StreamController<ControlMessage>.broadcast();
 
   /// Stream of WebRTC signaling messages for UI/WebRTC layer.
-  Stream<ControlMessage> get webrtcSignaling => _webrtcSignalingController.stream;
+  Stream<ControlMessage> get webrtcSignaling =>
+      _webrtcSignalingController.stream;
 
   @override
   ControlClientState build() {
@@ -766,6 +968,11 @@ class ControlClientController extends Notifier<ControlClientState> {
         peerFingerprint: _connection!.peerFingerprint,
       );
 
+      // Persist connection for session restore
+      ref
+          .read(appSessionProvider.notifier)
+          .setLastConnectedMonitorId(monitor.monitorId);
+
       // Start foreground service to keep connection alive
       _listenerService ??= createListenerServiceManager();
       await _listenerService!.startListening(monitorName: monitor.monitorName);
@@ -790,7 +997,11 @@ class ControlClientController extends Notifier<ControlClientState> {
     _logClient('Received ${message.type.name}');
 
     switch (message) {
-      case NoiseEventMessage(:final monitorId, :final timestamp, :final peakLevel):
+      case NoiseEventMessage(
+        :final monitorId,
+        :final timestamp,
+        :final peakLevel,
+      ):
         _handleNoiseEvent(monitorId, timestamp, peakLevel);
 
       // WebRTC signaling messages - forward to UI/WebRTC layer
@@ -813,7 +1024,9 @@ class ControlClientController extends Notifier<ControlClientState> {
 
   /// Handle incoming noise event with deduplication.
   void _handleNoiseEvent(String monitorId, int timestamp, int peakLevel) {
-    _logClient('Noise event: monitorId=$monitorId peakLevel=$peakLevel timestamp=$timestamp');
+    _logClient(
+      'Noise event: monitorId=$monitorId peakLevel=$peakLevel timestamp=$timestamp',
+    );
 
     // Create event data for deduplication
     final event = NoiseEventData(
@@ -838,12 +1051,16 @@ class ControlClientController extends Notifier<ControlClientState> {
 
   /// Handle noise event received via FCM (background/foreground).
   void _handleFcmNoiseEvent(NoiseEventData event) {
-    _logClient('FCM noise event: monitorId=${event.monitorId} peakLevel=${event.peakLevel}');
+    _logClient(
+      'FCM noise event: monitorId=${event.monitorId} peakLevel=${event.peakLevel}',
+    );
 
     // Check if already received via WebSocket
     final dedup = ref.read(noiseEventDeduplicationProvider.notifier);
     if (!dedup.processEvent(event)) {
-      _logClient('Duplicate noise event ignored (already received via WebSocket)');
+      _logClient(
+        'Duplicate noise event ignored (already received via WebSocket)',
+      );
       return;
     }
 
@@ -860,10 +1077,12 @@ class ControlClientController extends Notifier<ControlClientState> {
     }
 
     // Record the noise event for this monitor
-    ref.read(trustedMonitorsProvider.notifier).recordNoiseEvent(
-      monitorId: event.monitorId,
-      timestampMs: event.timestamp,
-    );
+    ref
+        .read(trustedMonitorsProvider.notifier)
+        .recordNoiseEvent(
+          monitorId: event.monitorId,
+          timestampMs: event.timestamp,
+        );
 
     // Emit to stream for UI listeners (guard against closed controller)
     _logClient('Emitting noise event to stream');
@@ -871,7 +1090,8 @@ class ControlClientController extends Notifier<ControlClientState> {
 
     // Check listener settings to determine action
     final listenerSettings = ref.read(listenerSettingsProvider).asData?.value;
-    final defaultAction = listenerSettings?.defaultAction ?? ListenerDefaultAction.notify;
+    final defaultAction =
+        listenerSettings?.defaultAction ?? ListenerDefaultAction.notify;
 
     _logClient('Noise event action: $defaultAction');
 
@@ -954,7 +1174,10 @@ class ControlClientController extends Notifier<ControlClientState> {
       throw StateError('Not connected to monitor');
     }
 
-    final message = WebRtcIceMessage(sessionId: sessionId, candidate: candidate);
+    final message = WebRtcIceMessage(
+      sessionId: sessionId,
+      candidate: candidate,
+    );
     _logClient('Sending WebRTC ICE: sessionId=$sessionId');
     await send(message);
   }
@@ -1022,6 +1245,13 @@ class ControlClientController extends Notifier<ControlClientState> {
   }
 
   Future<void> disconnect() => _shutdown();
+
+  /// Disconnect and clear persisted session (explicit user disconnect).
+  Future<void> disconnectAndClearSession() async {
+    await _shutdown();
+    // Clear persisted connection so we don't auto-reconnect on next launch
+    ref.read(appSessionProvider.notifier).setLastConnectedMonitorId(null);
+  }
 
   Future<void> _shutdown() async {
     _disposed = true;

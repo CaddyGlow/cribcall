@@ -1,24 +1,25 @@
-import 'dart:convert';
 import 'dart:developer' as developer;
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:qr_flutter/qr_flutter.dart';
 
 import '../../config/build_flags.dart';
 import '../../control/control_service.dart';
-import '../../domain/models.dart';
 import '../../discovery/mdns_service.dart';
+import '../../domain/models.dart';
 import '../../identity/device_identity.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
+import '../../utils/network_utils.dart';
+import '../shared/widgets/widgets.dart';
+import 'widgets/widgets.dart';
 
-void _logMonitorDashboard(String message) {
+void _log(String message) {
   developer.log(message, name: 'monitor_dashboard');
   debugPrint('[monitor_dashboard] $message');
 }
 
+/// Refactored Monitor Dashboard using shared components.
 class MonitorDashboard extends ConsumerStatefulWidget {
   const MonitorDashboard({super.key});
 
@@ -47,20 +48,9 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
     if (!mounted) return;
     final monitoringEnabled = ref.read(monitoringStatusProvider);
     final identity = ref.read(identityProvider);
-    final settings = ref.read(monitorSettingsProvider);
-    _logMonitorDashboard(
-      '_refreshAdvertisement: monitoringEnabled=$monitoringEnabled '
-      'identity.hasValue=${identity.hasValue} identity.hasError=${identity.hasError} '
-      'identity.isLoading=${identity.isLoading} '
-      'settings.hasValue=${settings.hasValue} settings.hasError=${settings.hasError}',
-    );
-    if (identity.hasError) {
-      _logMonitorDashboard('Identity error: ${identity.error}');
-    }
-    if (settings.hasError) {
-      _logMonitorDashboard('Settings error: ${settings.error}');
-    }
-    if (!monitoringEnabled || !identity.hasValue || !settings.hasValue) {
+    final appSession = ref.read(appSessionProvider);
+
+    if (!monitoringEnabled || !identity.hasValue || !appSession.hasValue) {
       await _stopAdvertising();
       return;
     }
@@ -72,7 +62,7 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
     final pairingPort = pairingState.port ?? builder.defaultPairingPort;
     final nextAd = builder.buildMdnsAdvertisement(
       identity: identity.requireValue,
-      monitorName: settings.requireValue.name,
+      monitorName: appSession.requireValue.deviceName,
       controlPort: controlPort,
       pairingPort: pairingPort,
     );
@@ -85,14 +75,11 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
 
     await _stopAdvertising();
     try {
-      _logMonitorDashboard('Calling startAdvertise for ${nextAd.monitorId}');
       await _mdnsService.startAdvertise(nextAd);
       _currentAdvertisement = nextAd;
       _advertising = true;
-      _logMonitorDashboard('startAdvertise succeeded');
     } catch (e) {
-      _logMonitorDashboard('startAdvertise failed: $e');
-      // Ignore failures; listener will still show pinned monitors from storage.
+      _log('startAdvertise failed: $e');
     }
   }
 
@@ -115,418 +102,462 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
 
   @override
   Widget build(BuildContext context) {
-    // Trigger control server auto-start based on monitoring + identity + trust.
+    // Trigger auto-start providers
+    // Note: On Android, audioCaptureAutoStartProvider handles mDNS via foreground service
     ref.watch(controlServerAutoStartProvider);
-    // Trigger audio capture auto-start when monitoring is enabled.
     ref.watch(audioCaptureAutoStartProvider);
 
-    // Watch providers that affect mDNS advertisement - this triggers rebuild when they change
+    // Watch providers for advertisement (Linux/iOS mDNS)
     final identityForAd = ref.watch(identityProvider);
-    final settingsForAd = ref.watch(monitorSettingsProvider);
+    final appSessionForAd = ref.watch(appSessionProvider);
     final monitoringForAd = ref.watch(monitoringStatusProvider);
 
-    // Refresh advertisement when any of these change
+    // Refresh advertisement when dependencies change (for non-Android platforms)
     ref.listen<AsyncValue<DeviceIdentity>>(identityProvider, (prev, next) {
-      _logMonitorDashboard('identityProvider changed: ${prev?.hasValue}->${next.hasValue}');
       _refreshAdvertisement();
     });
-    ref.listen<AsyncValue<MonitorSettings>>(monitorSettingsProvider, (prev, next) {
-      _logMonitorDashboard('monitorSettingsProvider changed: ${prev?.hasValue}->${next.hasValue}');
+    ref.listen<AsyncValue<AppSessionState>>(appSessionProvider, (prev, next) {
       _refreshAdvertisement();
     });
     ref.listen<bool>(monitoringStatusProvider, (prev, next) {
-      _logMonitorDashboard('monitoringStatusProvider changed: $prev->$next');
       _refreshAdvertisement();
     });
 
-    // Schedule advertisement refresh after build if conditions are met
-    if (identityForAd.hasValue && settingsForAd.hasValue && monitoringForAd && !_advertising) {
+    // Schedule initial advertisement for non-Android platforms
+    if (identityForAd.hasValue &&
+        appSessionForAd.hasValue &&
+        monitoringForAd &&
+        !_advertising) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _refreshAdvertisement();
       });
     }
+
     final monitoringEnabled = ref.watch(monitoringStatusProvider);
     final settingsAsync = ref.watch(monitorSettingsProvider);
     final settings = settingsAsync.asData?.value ?? MonitorSettings.defaults;
-    final trustedPeers = ref.watch(trustedListenersProvider);
-    final identity = ref.watch(identityProvider);
-    final serviceBuilder = ref.watch(serviceIdentityProvider);
-    final pairingServer = ref.watch(pairingServerProvider);
-    final controlServer = ref.watch(controlServerProvider);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           'Monitor controls',
-          style: Theme.of(
-            context,
-          ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+            fontWeight: FontWeight.w800,
+          ),
         ),
         const SizedBox(height: 10),
-        _MonitorCard(
-          title: monitoringEnabled ? 'Monitoring ON' : 'Monitoring OFF',
-          subtitle:
-              'Runs sound detection locally. No audio leaves the device unless a trusted listener opens a stream.',
-          badge: monitoringEnabled ? 'Live' : 'Stopped',
-          badgeColor: monitoringEnabled ? AppColors.success : AppColors.warning,
-          trailing: Switch(
-            value: monitoringEnabled,
-            thumbColor: WidgetStatePropertyAll(AppColors.primary),
-            onChanged: (value) =>
-                ref.read(monitoringStatusProvider.notifier).toggle(value),
+
+        // Main monitoring card
+        _MonitoringControlsCard(
+          monitoringEnabled: monitoringEnabled,
+          settings: settings,
+          isLoading: settingsAsync.isLoading,
+        ),
+
+        const SizedBox(height: 14),
+
+        // Pairing & Identity card
+        const _PairingIdentityCard(),
+
+        const SizedBox(height: 14),
+
+        // Trusted listeners card
+        const _TrustedListenersCard(),
+
+        const SizedBox(height: 14),
+
+        // Control channel status
+        const _ControlStatusCard(),
+      ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Monitoring Controls Card
+// ---------------------------------------------------------------------------
+
+class _MonitoringControlsCard extends ConsumerWidget {
+  const _MonitoringControlsCard({
+    required this.monitoringEnabled,
+    required this.settings,
+    required this.isLoading,
+  });
+
+  final bool monitoringEnabled;
+  final MonitorSettings settings;
+  final bool isLoading;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final audioCaptureState = ref.watch(audioCaptureProvider);
+    final isDebugCapture = ref.watch(audioCaptureProvider.notifier).isDebugCapture;
+    final appSession = ref.watch(appSessionProvider);
+    final deviceDisplayName = appSession.asData?.value.displayName ?? 'Loading...';
+
+    return CcCard(
+      title: monitoringEnabled ? 'Monitoring ON' : 'Monitoring OFF',
+      subtitle:
+          'Runs sound detection locally. No audio leaves the device unless a trusted listener opens a stream.',
+      badge: monitoringEnabled ? 'Live' : 'Stopped',
+      badgeColor: monitoringEnabled ? AppColors.success : AppColors.warning,
+      trailing: Switch(
+        value: monitoringEnabled,
+        thumbColor: WidgetStatePropertyAll(AppColors.primary),
+        onChanged: (value) =>
+            ref.read(monitoringStatusProvider.notifier).toggle(value),
+      ),
+      children: [
+        if (isLoading)
+          const Padding(
+            padding: EdgeInsets.only(bottom: 8.0),
+            child: LinearProgressIndicator(minHeight: 2),
           ),
+
+        // Listening indicator
+        const ListeningIndicator(),
+        const SizedBox(height: 12),
+
+        // Current settings summary
+        CcMetricRow(
+          label: 'Device name',
+          value: deviceDisplayName,
+        ),
+        CcMetricRow(
+          label: 'Noise threshold',
+          value: '${settings.noise.threshold}% (${_thresholdToDb(settings.noise.threshold)})',
+        ),
+        CcMetricRow(
+          label: 'Auto-stream',
+          value:
+              '${_autoStreamLabel(settings.autoStreamType)} for ${settings.autoStreamDurationSec}s',
+        ),
+
+        const Divider(height: 24),
+
+        // Testing section
+        Row(
           children: [
-            TextFormField(
-              initialValue: settings.name,
-              decoration: const InputDecoration(
-                labelText: 'Monitor name',
-                hintText: 'Nursery',
-              ),
-              onChanged: (value) => ref
-                  .read(monitorSettingsProvider.notifier)
-                  .setName(value.trim()),
-            ),
-            const SizedBox(height: 8),
-            if (settingsAsync.isLoading)
-              const Padding(
-                padding: EdgeInsets.only(bottom: 8.0),
-                child: LinearProgressIndicator(minHeight: 2),
-              ),
-            _MetricRow(
-              label: 'Auto-stream',
-              value:
-                  '${_autoStreamLabel(settings.autoStreamType)} for ${settings.autoStreamDurationSec}s',
-            ),
-            const SizedBox(height: 8),
-            _SettingsSlider(
-              label: 'Noise threshold',
-              helper: 'Higher = less sensitive. Level uses dB scale (50 = -30dB).',
-              value: settings.noise.threshold.toDouble(),
-              min: 20,
-              max: 80,
-              divisions: 12,
-              displayValue: '${settings.noise.threshold} (${_thresholdToDb(settings.noise.threshold)})',
-              onChanged: (v) => ref
-                  .read(monitorSettingsProvider.notifier)
-                  .setThreshold(v.round()),
-            ),
-            _SettingsSlider(
-              label: 'Min duration (ms)',
-              helper: 'Frames above threshold before triggering NOISE_EVENT.',
-              value: settings.noise.minDurationMs.toDouble(),
-              min: 200,
-              max: 2000,
-              divisions: 36,
-              displayValue: '${settings.noise.minDurationMs} ms',
-              onChanged: (v) => ref
-                  .read(monitorSettingsProvider.notifier)
-                  .setMinDurationMs(v.round()),
-            ),
-            _SettingsSlider(
-              label: 'Cooldown (s)',
-              helper: 'Delay before another event fires.',
-              value: settings.noise.cooldownSeconds.toDouble(),
-              min: 3,
-              max: 20,
-              divisions: 17,
-              displayValue: '${settings.noise.cooldownSeconds}s',
-              onChanged: (v) => ref
-                  .read(monitorSettingsProvider.notifier)
-                  .setCooldownSeconds(v.round()),
-            ),
-            const SizedBox(height: 6),
             Text(
-              'Auto-stream behavior',
-              style: Theme.of(
-                context,
-              ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800),
+              'Audio monitor',
+              style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.w800,
+              ),
             ),
-            const SizedBox(height: 6),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: AutoStreamType.values.map((type) {
-                final selected = settings.autoStreamType == type;
-                return ChoiceChip(
-                  label: Text(switch (type) {
-                    AutoStreamType.none => 'Off',
-                    AutoStreamType.audio => 'Audio',
-                    AutoStreamType.audioVideo => 'Audio+Video',
-                  }),
-                  selected: selected,
-                  onSelected: (_) => ref
-                      .read(monitorSettingsProvider.notifier)
-                      .setAutoStreamType(type),
-                );
-              }).toList(),
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                Text(
-                  'Auto-stream duration',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(width: 10),
-                DropdownButton<int>(
-                  value: settings.autoStreamDurationSec,
-                  onChanged: (value) {
-                    if (value == null) return;
-                    ref
-                        .read(monitorSettingsProvider.notifier)
-                        .setAutoStreamDuration(value);
-                  },
-                  items: const [
-                    DropdownMenuItem(value: 10, child: Text('10s')),
-                    DropdownMenuItem(value: 15, child: Text('15s')),
-                    DropdownMenuItem(value: 30, child: Text('30s')),
-                    DropdownMenuItem(value: 45, child: Text('45s')),
-                  ],
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            const Divider(),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Text(
-                  'Testing',
-                  style: Theme.of(context)
-                      .textTheme
-                      .titleSmall
-                      ?.copyWith(fontWeight: FontWeight.w800),
-                ),
-                const SizedBox(width: 8),
-                if (ref.watch(audioCaptureProvider.notifier).isDebugCapture)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: Colors.orange.shade100,
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: Colors.orange.shade300),
+            const SizedBox(width: 8),
+            if (isDebugCapture)
+              CcBadge(
+                label: 'SYNTHETIC',
+                color: Colors.orange,
+                size: CcBadgeSize.small,
+              ),
+          ],
+        ),
+        const SizedBox(height: 8),
+
+        // Audio waveform
+        if (monitoringEnabled) ...[
+          AudioWaveform(
+            levelHistory: audioCaptureState.levelHistory,
+            currentLevel: audioCaptureState.level,
+            threshold: settings.noise.threshold,
+            isDebugCapture: isDebugCapture,
+          ),
+          const SizedBox(height: 12),
+        ],
+
+        // Test buttons
+        _TestButtons(isDebugCapture: isDebugCapture),
+      ],
+    );
+  }
+}
+
+class _TestButtons extends ConsumerWidget {
+  const _TestButtons({required this.isDebugCapture});
+
+  final bool isDebugCapture;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final controlServer = ref.watch(controlServerProvider);
+    final monitoringEnabled = ref.watch(monitoringStatusProvider);
+
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        FilledButton.icon(
+          onPressed: controlServer.status == ControlServerStatus.running
+              ? () {
+                  final timestampMs = DateTime.now().millisecondsSinceEpoch;
+                  ref.read(controlServerProvider.notifier).broadcastNoiseEvent(
+                    timestampMs: timestampMs,
+                    peakLevel: 75,
+                  );
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Test noise event sent'),
+                      duration: Duration(seconds: 2),
                     ),
-                    child: Text(
-                      'SYNTHETIC AUDIO',
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: Colors.orange.shade800,
-                        fontWeight: FontWeight.w700,
-                        fontSize: 10,
+                  );
+                }
+              : null,
+          icon: const Icon(Icons.volume_up),
+          label: const Text('Send Test Noise Event'),
+        ),
+        if (isDebugCapture)
+          OutlinedButton.icon(
+            onPressed: monitoringEnabled
+                ? () {
+                    ref.read(audioCaptureProvider.notifier).injectTestNoise();
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Injecting synthetic noise...'),
+                        duration: Duration(seconds: 2),
                       ),
-                    ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            // Audio waveform
-            if (monitoringEnabled) ...[
-              _AudioWaveform(
-                levelHistory: ref.watch(audioCaptureProvider).levelHistory,
-                currentLevel: ref.watch(audioCaptureProvider).level,
-                threshold: settings.noise.threshold,
-                isDebugCapture: ref.watch(audioCaptureProvider.notifier).isDebugCapture,
+                    );
+                  }
+                : null,
+            icon: const Icon(Icons.graphic_eq),
+            label: const Text('Inject Synthetic Noise'),
+          ),
+      ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pairing & Identity Card
+// ---------------------------------------------------------------------------
+
+class _PairingIdentityCard extends ConsumerWidget {
+  const _PairingIdentityCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final identity = ref.watch(identityProvider);
+    final appSession = ref.watch(appSessionProvider);
+    final serviceBuilder = ref.watch(serviceIdentityProvider);
+    final pairingServer = ref.watch(pairingServerProvider);
+
+    return CcCard(
+      title: 'Pairing & identity',
+      subtitle:
+          'Share a QR or run PIN-based pairing. Listeners must pin this device fingerprint before any control traffic is accepted.',
+      badge: 'Pinned cert',
+      badgeColor: AppColors.primary,
+      children: [
+        identity.when(
+          data: (id) => CcMetricRow(
+            label: 'Device fingerprint',
+            value: id.certFingerprint.substring(0, 12),
+          ),
+          loading: () => const CcMetricRow(
+            label: 'Device fingerprint',
+            value: 'loading...',
+          ),
+          error: (err, st) => const CcMetricRow(
+            label: 'Device fingerprint',
+            value: 'error',
+          ),
+        ),
+        Row(
+          children: [
+            Expanded(
+              child: FilledButton.icon(
+                onPressed: () async {
+                  if (!identity.hasValue || !appSession.hasValue) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Identity still loading')),
+                    );
+                    return;
+                  }
+                  // Generate one-time pairing token for QR code flow
+                  final pairingToken = ref.read(pairingServerProvider.notifier).generatePairingToken();
+                  if (pairingToken == null) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Pairing server not ready')),
+                    );
+                    return;
+                  }
+                  final deviceName = appSession.requireValue.deviceName;
+                  final ips = await getLocalIpAddresses();
+                  final payload = serviceBuilder.qrPayloadString(
+                    identity: identity.requireValue,
+                    monitorName: deviceName,
+                    ips: ips,
+                    pairingToken: pairingToken,
+                  );
+                  final payloadJson = serviceBuilder.buildQrPayload(
+                    identity: identity.requireValue,
+                    monitorName: deviceName,
+                    ips: ips,
+                    pairingToken: pairingToken,
+                  ).toJson();
+                  if (!context.mounted) return;
+                  showPairingQrSheet(
+                    context,
+                    payload: payload,
+                    payloadJson: payloadJson,
+                  );
+                },
+                icon: const Icon(Icons.qr_code),
+                label: const Text('Show pairing QR'),
               ),
-              const SizedBox(height: 12),
-            ],
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                FilledButton.icon(
-                  onPressed: controlServer.status == ControlServerStatus.running
-                      ? () {
-                          final timestampMs = DateTime.now().millisecondsSinceEpoch;
-                          ref.read(controlServerProvider.notifier).broadcastNoiseEvent(
-                            timestampMs: timestampMs,
-                            peakLevel: 75,
-                          );
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Test noise event sent'),
-                              duration: Duration(seconds: 2),
-                            ),
-                          );
-                        }
-                      : null,
-                  icon: const Icon(Icons.volume_up),
-                  label: const Text('Send Test Noise Event'),
+            ),
+          ],
+        ),
+        if (pairingServer.activeSession != null) ...[
+          const SizedBox(height: 8),
+          PairingSessionBanner(
+            session: pairingServer.activeSession!,
+            onAccept: () {
+              ref.read(pairingServerProvider.notifier).confirmSession(
+                pairingServer.activeSession!.sessionId,
+              );
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Pairing accepted - waiting for listener to confirm')),
+              );
+            },
+            onReject: () {
+              ref.read(pairingServerProvider.notifier).rejectSession(
+                pairingServer.activeSession!.sessionId,
+              );
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Pairing rejected')),
+              );
+            },
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Trusted Listeners Card
+// ---------------------------------------------------------------------------
+
+class _TrustedListenersCard extends ConsumerWidget {
+  const _TrustedListenersCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final trustedPeers = ref.watch(trustedListenersProvider);
+
+    return CcCard(
+      title: 'Trusted listeners',
+      subtitle: 'Pinned fingerprints are required on every control session.',
+      badge: 'mTLS required',
+      badgeColor: AppColors.primary,
+      children: [
+        trustedPeers.when(
+          data: (peers) => peers.isEmpty
+              ? const Text('No trusted listeners yet.')
+              : Column(
+                  children: peers
+                      .map(
+                        (peer) => TrustedListenerRow(
+                          name: peer.name,
+                          fingerprint: peer.certFingerprint,
+                          onRevoke: () => _confirmRevoke(context, ref, peer),
+                        ),
+                      )
+                      .toList(),
                 ),
-                // Show inject button only when using debug audio capture
-                if (ref.watch(audioCaptureProvider.notifier).isDebugCapture)
-                  OutlinedButton.icon(
-                    onPressed: monitoringEnabled
-                        ? () {
-                            ref.read(audioCaptureProvider.notifier).injectTestNoise();
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('Injecting synthetic noise...'),
-                                duration: Duration(seconds: 2),
-                              ),
-                            );
-                          }
-                        : null,
-                    icon: const Icon(Icons.graphic_eq),
-                    label: const Text('Inject Synthetic Noise'),
-                  ),
-              ],
+          loading: () => const Padding(
+            padding: EdgeInsets.symmetric(vertical: 8),
+            child: LinearProgressIndicator(minHeight: 2),
+          ),
+          error: (err, st) => Text(
+            'Could not load trusted listeners',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: Colors.red,
             ),
-          ],
+          ),
         ),
-        const SizedBox(height: 14),
-        _MonitorCard(
-          title: 'Pairing & identity',
-          subtitle:
-              'Share a QR or run PIN-based pairing. Listeners must pin this device fingerprint before any control traffic is accepted.',
-          badge: 'Pinned cert',
-          badgeColor: AppColors.primary,
-          children: [
-            identity.when(
-              data: (id) => _MetricRow(
-                label: 'Device fingerprint',
-                value: id.certFingerprint.substring(0, 12),
-              ),
-              loading: () => const _MetricRow(
-                label: 'Device fingerprint',
-                value: 'loading...',
-              ),
-              error: (err, _) =>
-                  const _MetricRow(label: 'Device fingerprint', value: 'error'),
+      ],
+    );
+  }
+
+  Future<void> _confirmRevoke(
+    BuildContext context,
+    WidgetRef ref,
+    TrustedPeer peer,
+  ) async {
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Revoke listener?'),
+            content: Text(
+              'Remove ${peer.name}? They must re-pair before connecting again.',
             ),
-            Row(
-              children: [
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: () {
-                      if (!identity.hasValue) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Identity still loading'),
-                          ),
-                        );
-                        return;
-                      }
-                      final payload = serviceBuilder.buildQrPayload(
-                        identity: identity.requireValue,
-                        monitorName: settings.name,
-                      );
-                      final payloadString = serviceBuilder.qrPayloadString(
-                        identity: identity.requireValue,
-                        monitorName: settings.name,
-                      );
-                      _showQrSheet(
-                        context,
-                        payload: payloadString,
-                        payloadJson: payload.toJson(),
-                      );
-                    },
-                    icon: const Icon(Icons.qr_code),
-                    label: const Text('Show pairing QR'),
-                  ),
-                ),
-              ],
-            ),
-            // Display active pairing session when a listener initiates pairing
-            if (pairingServer.activeSession != null) ...[
-              const SizedBox(height: 8),
-              _PairingSessionBanner(session: pairingServer.activeSession!),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Revoke'),
+              ),
             ],
-          ],
+          ),
+        ) ??
+        false;
+    if (confirmed) {
+      await ref.read(trustedListenersProvider.notifier).revoke(peer.deviceId);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Control Status Card
+// ---------------------------------------------------------------------------
+
+class _ControlStatusCard extends ConsumerWidget {
+  const _ControlStatusCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final serviceBuilder = ref.watch(serviceIdentityProvider);
+    final controlServer = ref.watch(controlServerProvider);
+    final trustedPeers = ref.watch(trustedListenersProvider);
+
+    return CcCard(
+      title: 'Control channel status',
+      subtitle:
+          'HTTP+WebSocket control (TLS ${serviceBuilder.defaultPort}), nonce+signature handshake and pinned fingerprint.',
+      badge: 'HTTP+WS',
+      badgeColor: AppColors.primary,
+      children: [
+        CcMetricRow(
+          label: 'Status',
+          value: _serverStatusLabel(controlServer),
         ),
-        const SizedBox(height: 14),
-        _MonitorCard(
-          title: 'Trusted listeners',
-          subtitle:
-              'Pinned fingerprints are required on every control session.',
-          badge: 'mTLS required',
-          badgeColor: AppColors.primary,
-          children: [
-            trustedPeers.when(
-              data: (peers) => peers.isEmpty
-                  ? const Text('No trusted listeners yet.')
-                  : Column(
-                      children: peers
-                          .map(
-                            (peer) => _TrustedListenerRow(
-                              name: peer.name,
-                              fingerprint: peer.certFingerprint,
-                              onRevoke: () async {
-                                final confirmed =
-                                    await showDialog<bool>(
-                                      context: context,
-                                      builder: (context) => AlertDialog(
-                                        title: const Text('Revoke listener?'),
-                                        content: Text(
-                                          'Remove ${peer.name}? They must re-pair before connecting again.',
-                                        ),
-                                        actions: [
-                                          TextButton(
-                                            onPressed: () => Navigator.of(
-                                              context,
-                                            ).pop(false),
-                                            child: const Text('Cancel'),
-                                          ),
-                                          FilledButton(
-                                            onPressed: () =>
-                                                Navigator.of(context).pop(true),
-                                            child: const Text('Revoke'),
-                                          ),
-                                        ],
-                                      ),
-                                    ) ??
-                                    false;
-                                if (confirmed) {
-                                  await ref
-                                      .read(trustedListenersProvider.notifier)
-                                      .revoke(peer.deviceId);
-                                }
-                              },
-                            ),
-                          )
-                          .toList(),
-                    ),
-              loading: () => const Padding(
-                padding: EdgeInsets.symmetric(vertical: 8),
-                child: LinearProgressIndicator(minHeight: 2),
-              ),
-              error: (err, _) => Text(
-                'Could not load trusted listeners',
-                style: Theme.of(
-                  context,
-                ).textTheme.bodySmall?.copyWith(color: Colors.red),
-              ),
-            ),
-          ],
+        CcMetricRow(
+          label: 'Active connections',
+          value: '${controlServer.activeConnectionsCount}',
         ),
-        const SizedBox(height: 14),
-        _MonitorCard(
-          title: 'Control channel status',
-          subtitle:
-              'HTTP+WebSocket control (TLS ${serviceBuilder.defaultPort}), nonce+signature handshake and pinned fingerprint.',
-          badge: 'HTTP+WS',
-          badgeColor: AppColors.primary,
-          children: [
-            _MetricRow(
-              label: 'Status',
-              value: _serverStatusLabel(controlServer),
-            ),
-            _MetricRow(
-              label: 'Trusted listeners',
-              value:
-                  '${trustedPeers.maybeWhen(data: (list) => list.length, orElse: () => 0)} pinned',
-            ),
-            const _MetricRow(
-              label: 'Streams',
-              value: 'Control (bi-dir) • media via WebRTC',
-            ),
-          ],
+        CcMetricRow(
+          label: 'Trusted listeners',
+          value:
+              '${trustedPeers.maybeWhen(data: (list) => list.length, orElse: () => 0)} pinned',
+        ),
+        const CcMetricRow(
+          label: 'Streams',
+          value: 'Control (bi-dir) + media via WebRTC',
         ),
       ],
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 String _autoStreamLabel(AutoStreamType type) {
   switch (type) {
@@ -539,8 +570,6 @@ String _autoStreamLabel(AutoStreamType type) {
   }
 }
 
-/// Convert threshold (0-100) to approximate dB value for display.
-/// Level 0 = -60dB, level 100 = 0dB.
 String _thresholdToDb(int threshold) {
   final db = (threshold * 60 / 100) - 60;
   return '${db.round()}dB';
@@ -555,497 +584,6 @@ String _serverStatusLabel(ControlServerState state) {
     case ControlServerStatus.error:
       return 'Error: ${state.error ?? 'unknown'}';
     case ControlServerStatus.stopped:
-    default:
       return 'Stopped';
-  }
-}
-
-class _MonitorCard extends StatelessWidget {
-  const _MonitorCard({
-    required this.title,
-    required this.subtitle,
-    required this.children,
-    this.badge,
-    this.badgeColor,
-    this.trailing,
-  });
-
-  final String title;
-  final String subtitle;
-  final List<Widget> children;
-  final String? badge;
-  final Color? badgeColor;
-  final Widget? trailing;
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: Theme.of(context).textTheme.titleMedium
-                            ?.copyWith(fontWeight: FontWeight.w800),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        subtitle,
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color: AppColors.muted,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                if (badge != null)
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 6,
-                    ),
-                    decoration: BoxDecoration(
-                      color: (badgeColor ?? AppColors.primary).withValues(
-                        alpha: 0.12,
-                      ),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Text(
-                      badge!,
-                      style: TextStyle(
-                        color: badgeColor ?? AppColors.primary,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                if (trailing != null) ...[const SizedBox(width: 10), trailing!],
-              ],
-            ),
-            const SizedBox(height: 12),
-            ...children,
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _MetricRow extends StatelessWidget {
-  const _MetricRow({required this.label, required this.value});
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 140,
-            child: Text(
-              label,
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
-            ),
-          ),
-          Expanded(
-            child: Text(
-              value,
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SettingsSlider extends StatelessWidget {
-  const _SettingsSlider({
-    required this.label,
-    required this.helper,
-    required this.value,
-    required this.min,
-    required this.max,
-    required this.divisions,
-    required this.displayValue,
-    required this.onChanged,
-  });
-
-  final String label;
-  final String helper;
-  final double value;
-  final double min;
-  final double max;
-  final int divisions;
-  final String displayValue;
-  final ValueChanged<double> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              label,
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
-            ),
-            Text(
-              displayValue,
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-            ),
-          ],
-        ),
-        Slider(
-          value: value.clamp(min, max).toDouble(),
-          min: min,
-          max: max,
-          divisions: divisions,
-          label: displayValue,
-          onChanged: onChanged,
-        ),
-        Text(
-          helper,
-          style: Theme.of(
-            context,
-          ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-        ),
-        const SizedBox(height: 8),
-      ],
-    );
-  }
-}
-
-class _TrustedListenerRow extends StatelessWidget {
-  const _TrustedListenerRow({
-    required this.name,
-    required this.fingerprint,
-    this.onRevoke,
-  });
-
-  final String name;
-  final String fingerprint;
-  final VoidCallback? onRevoke;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: Row(
-        children: [
-          const Icon(Icons.verified_user, size: 18, color: AppColors.primary),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              name,
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
-            ),
-          ),
-          Text(
-            fingerprint,
-            style: Theme.of(
-              context,
-            ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-          ),
-          if (onRevoke != null) ...[
-            const SizedBox(width: 8),
-            TextButton(onPressed: onRevoke, child: const Text('Revoke')),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _PairingSessionBanner extends StatelessWidget {
-  const _PairingSessionBanner({required this.session});
-
-  final ActivePairingSession session;
-
-  @override
-  Widget build(BuildContext context) {
-    final remaining = session.expiresAt.difference(DateTime.now()).inSeconds;
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: AppColors.primary.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.primary.withValues(alpha: 0.3)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Pairing Request',
-            style: Theme.of(
-              context,
-            ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            'Verify this code matches the listener device:',
-            style: Theme.of(
-              context,
-            ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-          ),
-          const SizedBox(height: 8),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                session.comparisonCode,
-                style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                  letterSpacing: 4,
-                  fontWeight: FontWeight.w900,
-                  fontFamily: 'monospace',
-                ),
-              ),
-              Text(
-                'Expires in ${remaining.clamp(0, 60)}s',
-                style: Theme.of(
-                  context,
-                ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          Text(
-            'Session ${session.sessionId.substring(0, 8)}',
-            style: Theme.of(
-              context,
-            ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-void _showQrSheet(
-  BuildContext context, {
-  required String payload,
-  required Map<String, dynamic> payloadJson,
-}) {
-  showModalBottomSheet(
-    context: context,
-    showDragHandle: true,
-    builder: (context) {
-      return Padding(
-        padding: const EdgeInsets.all(16),
-        child: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Pairing QR',
-                style: Theme.of(
-                  context,
-                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
-              ),
-              const SizedBox(height: 12),
-              Center(
-                child: QrImageView(
-                  data: payload,
-                  size: 220,
-                  backgroundColor: Colors.white,
-                  padding: const EdgeInsets.all(12),
-                ),
-              ),
-              const SizedBox(height: 12),
-              _MetricRow(
-                label: 'Payload size',
-                value: '${payload.length} bytes',
-              ),
-              _MetricRow(
-                label: 'Monitor',
-                value: payloadJson['monitorName'] as String? ?? '',
-              ),
-              const SizedBox(height: 8),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: AppColors.surface,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.grey.shade200),
-                ),
-                child: Text(
-                  const JsonEncoder.withIndent('  ').convert(payloadJson),
-                  style: const TextStyle(fontFamily: 'monospace'),
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    },
-  );
-}
-
-class _AudioWaveform extends StatelessWidget {
-  const _AudioWaveform({
-    required this.levelHistory,
-    required this.currentLevel,
-    required this.threshold,
-    this.isDebugCapture = false,
-  });
-
-  final List<int> levelHistory;
-  final int currentLevel;
-  final int threshold;
-  final bool isDebugCapture;
-
-  @override
-  Widget build(BuildContext context) {
-    final isAboveThreshold = currentLevel >= threshold;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Icon(
-              isDebugCapture ? Icons.science : Icons.graphic_eq,
-              size: 16,
-              color: isDebugCapture ? Colors.orange.shade600 : AppColors.muted,
-            ),
-            const SizedBox(width: 6),
-            Text(
-              isDebugCapture ? 'Synthetic Audio' : 'Audio Waveform',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: isDebugCapture ? Colors.orange.shade600 : AppColors.muted,
-                    fontWeight: FontWeight.w600,
-                  ),
-            ),
-            const Spacer(),
-            Text(
-              '$currentLevel',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: isAboveThreshold ? AppColors.warning : AppColors.muted,
-                    fontWeight: FontWeight.w700,
-                    fontFamily: 'monospace',
-                  ),
-            ),
-            Text(
-              ' / $threshold',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: AppColors.muted,
-                  ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 6),
-        Container(
-          height: 60,
-          width: double.infinity,
-          decoration: BoxDecoration(
-            color: Colors.grey.shade100,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: Colors.grey.shade300),
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: CustomPaint(
-            painter: _WaveformPainter(
-              levels: levelHistory,
-              threshold: threshold,
-              primaryColor: AppColors.primary,
-              warningColor: AppColors.warning,
-            ),
-            size: Size.infinite,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _WaveformPainter extends CustomPainter {
-  _WaveformPainter({
-    required this.levels,
-    required this.threshold,
-    required this.primaryColor,
-    required this.warningColor,
-  });
-
-  final List<int> levels;
-  final int threshold;
-  final Color primaryColor;
-  final Color warningColor;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (levels.isEmpty) return;
-
-    final thresholdY = size.height * (1 - threshold / 100.0);
-
-    // Draw threshold line
-    final thresholdPaint = Paint()
-      ..color = Colors.red.withValues(alpha: 0.4)
-      ..strokeWidth = 1
-      ..style = PaintingStyle.stroke;
-    canvas.drawLine(
-      Offset(0, thresholdY),
-      Offset(size.width, thresholdY),
-      thresholdPaint,
-    );
-
-    // Calculate bar width based on number of samples to show
-    const maxBars = 150; // Show up to 150 bars (~3 seconds)
-    final samplesToShow = levels.length > maxBars ? maxBars : levels.length;
-    final startIndex = levels.length > maxBars ? levels.length - maxBars : 0;
-    final barWidth = size.width / maxBars;
-    final barSpacing = 1.0;
-
-    // Draw waveform bars
-    for (var i = 0; i < samplesToShow; i++) {
-      final level = levels[startIndex + i];
-      final barHeight = (level / 100.0) * size.height;
-      final x = i * barWidth;
-      final y = size.height - barHeight;
-
-      final isAboveThreshold = level >= threshold;
-      final paint = Paint()
-        ..color = isAboveThreshold
-            ? warningColor.withValues(alpha: 0.8)
-            : primaryColor.withValues(alpha: 0.7)
-        ..style = PaintingStyle.fill;
-
-      // Draw bar from bottom
-      final rect = RRect.fromRectAndRadius(
-        Rect.fromLTWH(x, y, barWidth - barSpacing, barHeight),
-        const Radius.circular(1),
-      );
-      canvas.drawRRect(rect, paint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(_WaveformPainter oldDelegate) {
-    return oldDelegate.levels != levels ||
-        oldDelegate.threshold != threshold;
   }
 }

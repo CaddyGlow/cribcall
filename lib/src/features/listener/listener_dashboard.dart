@@ -1,203 +1,166 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../control/control_client.dart' as client;
 import '../../control/control_service.dart';
 import '../../domain/models.dart';
+import '../../identity/device_identity.dart';
+import '../../sound/audio_playback.dart';
 import '../../state/app_state.dart';
+import '../../state/per_monitor_settings.dart';
 import '../../theme.dart';
+import '../../webrtc/webrtc_controller.dart';
+import '../shared/widgets/widgets.dart';
 import 'listener_pin_page.dart';
 import 'listener_scan_qr_page.dart';
-import 'listener_stream_page.dart';
-import 'widgets/pinned_badge.dart';
+import 'widgets/widgets.dart';
 
-class ListenerDashboard extends ConsumerWidget {
+/// Listener dashboard - orchestrator for displaying paired monitors
+/// with inline playback and per-monitor settings.
+class ListenerDashboard extends ConsumerStatefulWidget {
   const ListenerDashboard({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<ListenerDashboard> createState() => _ListenerDashboardState();
+}
+
+class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
+  String? _activeMonitorId;
+  StreamSubscription<Uint8List>? _audioDataSubscription;
+  AudioPlaybackService? _audioPlayback;
+  Timer? _pinTimer;
+  bool _startingPlayback = false;
+  bool _sessionRestoreAttempted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initAudioPlayback();
+    _attemptSessionRestore();
+  }
+
+  /// Attempt to reconnect to the last connected monitor on startup.
+  Future<void> _attemptSessionRestore() async {
+    if (_sessionRestoreAttempted) return;
+    _sessionRestoreAttempted = true;
+
+    final session = await ref.read(appSessionProvider.future);
+    final lastMonitorId = session.lastConnectedMonitorId;
+    if (lastMonitorId == null) return;
+
+    // Wait for trusted monitors and identity to be available
+    final monitors = await ref.read(trustedMonitorsProvider.future);
+    final identity = await ref.read(identityProvider.future);
+
+    final monitor = monitors
+        .where((m) => m.monitorId == lastMonitorId)
+        .firstOrNull;
+    if (monitor == null) return;
+
+    // Check if we can find the monitor via mDNS
+    final advertisements = ref.read(discoveredMonitorsProvider);
+    final ad = advertisements
+        .where((a) => a.monitorId == lastMonitorId)
+        .firstOrNull;
+    if (ad == null) return;
+
+    // Auto-reconnect
+    if (!mounted) return;
+    await ref
+        .read(controlClientProvider.notifier)
+        .connectToMonitor(
+          advertisement: ad,
+          monitor: monitor,
+          identity: identity,
+        );
+  }
+
+  void _initAudioPlayback() {
+    _audioDataSubscription = ref
+        .read(streamingProvider.notifier)
+        .audioDataStream
+        .listen(_onAudioData);
+  }
+
+  void _onAudioData(Uint8List data) {
+    if (_audioPlayback == null ||
+        (!_audioPlayback!.isRunning && !_startingPlayback)) {
+      _audioPlayback ??= AudioPlaybackService();
+      _startingPlayback = true;
+      _audioPlayback!.start().then((_) {
+        _startingPlayback = false;
+      });
+    }
+    _audioPlayback?.write(data);
+  }
+
+  void _startPinTimer() {
+    _pinTimer?.cancel();
+    _pinTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      ref.read(streamingProvider.notifier).pinStream();
+    });
+  }
+
+  void _stopPinTimer() {
+    _pinTimer?.cancel();
+    _pinTimer = null;
+  }
+
+  @override
+  void dispose() {
+    _stopPinTimer();
+    _audioDataSubscription?.cancel();
+    _audioPlayback?.stop();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final advertisements = ref.watch(discoveredMonitorsProvider);
     final trustedMonitors = ref.watch(trustedMonitorsProvider);
     final identity = ref.watch(identityProvider);
-    final listenerSettingsAsync = ref.watch(listenerSettingsProvider);
-    final listenerSettings =
-        listenerSettingsAsync.asData?.value ?? ListenerSettings.defaults;
     final pinned = trustedMonitors.maybeWhen(
       data: (list) => list,
       orElse: () => <TrustedMonitor>[],
     );
 
-    Future<void> forgetMonitor(String monitorId, String monitorName) async {
-      final confirmed =
-          await showDialog<bool>(
-            context: context,
-            builder: (context) => AlertDialog(
-              title: const Text('Forget monitor?'),
-              content: Text(
-                'Remove $monitorName from trusted list? You will need to re-pair.',
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(false),
-                  child: const Text('Cancel'),
-                ),
-                FilledButton(
-                  onPressed: () => Navigator.of(context).pop(true),
-                  child: const Text('Forget'),
-                ),
-              ],
-            ),
-          ) ??
-          false;
-      if (!confirmed) return;
-      await ref.read(trustedMonitorsProvider.notifier).removeMonitor(monitorId);
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Forgot $monitorName')));
-    }
-
-    MdnsAdvertisement? fallbackAdvertisement(TrustedMonitor monitor) {
-      if (monitor.lastKnownIp == null) return null;
-      return MdnsAdvertisement(
-        monitorId: monitor.monitorId,
-        monitorName: monitor.monitorName,
-        monitorCertFingerprint: monitor.certFingerprint,
-        controlPort: monitor.controlPort,
-        pairingPort: monitor.pairingPort,
-        version: monitor.serviceVersion,
-        transport: monitor.transport,
-        ip: monitor.lastKnownIp,
-      );
-    }
-
-    Future<void> handleListen(
-      BuildContext uiContext,
-      _MonitorCardData data,
-    ) async {
-      if (!uiContext.mounted) return;
-      if (!data.trusted) {
-        if (data.advertisement != null) {
-          await showModalBottomSheet<void>(
-            context: uiContext,
-            showDragHandle: true,
-            builder: (context) =>
-                ListenerPinPage(advertisement: data.advertisement!),
-          );
-        } else {
-          ScaffoldMessenger.of(uiContext).showSnackBar(
-            const SnackBar(
-              content: Text('Pair this monitor (QR or PIN) before listening'),
-            ),
-          );
-        }
-        return;
-      }
-      if (data.trustedMonitor == null) {
-        ScaffoldMessenger.of(uiContext).showSnackBar(
-          const SnackBar(
-            content: Text('Trusted monitor details missing; re-pair and retry'),
-          ),
-        );
-        return;
-      }
-      final endpoint = data.connectTarget;
-      if (endpoint == null) {
-        ScaffoldMessenger.of(uiContext).showSnackBar(
-          const SnackBar(
-            content: Text('Monitor is offline; waiting for mDNS presence'),
-          ),
-        );
-        return;
-      }
-      if (!identity.hasValue) {
-        ScaffoldMessenger.of(uiContext).showSnackBar(
-          const SnackBar(
-            content: Text('Loading device identity; try again in a moment'),
-          ),
-        );
-        return;
-      }
-      final failure = await ref
-          .read(controlClientProvider.notifier)
-          .connectToMonitor(
-            advertisement: endpoint,
-            monitor: data.trustedMonitor!,
-            identity: identity.requireValue,
-          );
-      if (!uiContext.mounted) return;
-      if (failure != null) {
-        ScaffoldMessenger.of(uiContext).showSnackBar(
-          SnackBar(content: Text('Control connect failed: $failure')),
-        );
-      } else {
-        // Connection successful - navigate to stream page
-        if (uiContext.mounted) {
-          Navigator.of(uiContext).push(
-            MaterialPageRoute(
-              builder: (_) => ListenerStreamPage(
-                monitorName: data.name,
-                autoStart: false,
-              ),
-            ),
-          );
-        }
-      }
-    }
-
-    final monitors = [
-      ...advertisements.map((ad) {
-        final pinnedMonitor = pinned.cast<TrustedMonitor?>().firstWhere(
-          (p) => p?.monitorId == ad.monitorId,
-          orElse: () => null,
-        );
-        final isTrusted = pinnedMonitor != null;
-        late final _MonitorCardData data;
-        data = _MonitorCardData(
-          name: ad.monitorName,
-          status: 'Online',
-          lastNoiseEpochMs: pinnedMonitor?.lastNoiseEpochMs,
-          fingerprint: ad.monitorCertFingerprint,
-          trusted: isTrusted,
-          trustedMonitor: pinnedMonitor,
-          lastKnownIp: ad.ip ?? pinnedMonitor?.lastKnownIp,
-          onForget: isTrusted
-              ? () => forgetMonitor(ad.monitorId, ad.monitorName)
-              : null,
-          advertisement: ad,
-          connectTarget: ad,
-          onListen: () => handleListen(context, data),
-        );
-        return data;
-      }),
-      for (final monitor in pinned)
-        if (!advertisements.any((ad) => ad.monitorId == monitor.monitorId))
-          (() {
-            late final _MonitorCardData data;
-            final fallback = fallbackAdvertisement(monitor);
-            data = _MonitorCardData(
-              name: monitor.monitorName,
-              status: fallback == null ? 'Offline' : 'Last seen',
-              lastNoiseEpochMs: monitor.lastNoiseEpochMs,
-              fingerprint: monitor.certFingerprint,
-              trusted: true,
-              trustedMonitor: monitor,
-              lastKnownIp: monitor.lastKnownIp,
-              onForget: () =>
-                  forgetMonitor(monitor.monitorId, monitor.monitorName),
-              advertisement: null,
-              connectTarget: fallback,
-              onListen: () => handleListen(context, data),
-            );
-            return data;
-          })(),
-    ];
-
+    // Get control client state for connection status
     final controlClientState = ref.watch(controlClientProvider);
-    final isConnected = controlClientState.status == ControlClientStatus.connected;
+    final connectedMonitorId = controlClientState.monitorId;
+    final isControlConnected =
+        controlClientState.status == ControlClientStatus.connected;
+    final isControlConnecting =
+        controlClientState.status == ControlClientStatus.connecting;
+
+    // Separate trusted from discovered
+    final trustedData = <MonitorItemData>[];
+    final discoveredData = <MonitorItemData>[];
+    _buildMonitorLists(
+      advertisements,
+      pinned,
+      trustedData,
+      discoveredData,
+      connectedMonitorId: connectedMonitorId,
+      isControlConnected: isControlConnected,
+      isControlConnecting: isControlConnecting,
+    );
+
+    // Manage pin timer based on streaming state
+    final streamState = ref.watch(streamingProvider);
+    final isStreaming = streamState.status == StreamingStatus.connected;
+    if (isStreaming && _pinTimer == null) {
+      _startPinTimer();
+    } else if (!isStreaming) {
+      _stopPinTimer();
+    }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // Header
         Text(
           'Listener controls',
           style: Theme.of(
@@ -205,566 +168,530 @@ class ListenerDashboard extends ConsumerWidget {
           ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
         ),
         const SizedBox(height: 10),
-        // Connection status card
-        if (isConnected)
-          Card(
-            color: AppColors.success.withValues(alpha: 0.1),
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: AppColors.success.withValues(alpha: 0.2),
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(
-                      Icons.wifi,
-                      color: AppColors.success,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Connected to ${controlClientState.monitorName ?? "Monitor"}',
-                          style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          'Ready to receive alerts and stream audio',
-                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: AppColors.muted,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  FilledButton.icon(
-                    onPressed: () {
-                      Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) => ListenerStreamPage(
-                            monitorName: controlClientState.monitorName,
-                            autoStart: false,
-                          ),
-                        ),
-                      );
-                    },
-                    icon: const Icon(Icons.play_arrow),
-                    label: const Text('Stream'),
-                  ),
-                ],
+
+        // Trusted monitors card
+        _buildTrustedMonitorsCard(context, trustedData, identity, pinned),
+        const SizedBox(height: 14),
+
+        // Discovery & pairing card
+        _buildDiscoveryCard(context, discoveredData),
+      ],
+    );
+  }
+
+  void _buildMonitorLists(
+    List<MdnsAdvertisement> advertisements,
+    List<TrustedMonitor> pinned,
+    List<MonitorItemData> trustedData,
+    List<MonitorItemData> discoveredData, {
+    String? connectedMonitorId,
+    bool isControlConnected = false,
+    bool isControlConnecting = false,
+  }) {
+    // Process discovered advertisements
+    for (final ad in advertisements) {
+      final pinnedMonitor = pinned.cast<TrustedMonitor?>().firstWhere(
+        (p) => p?.monitorId == ad.monitorId,
+        orElse: () => null,
+      );
+      final isTrusted = pinnedMonitor != null;
+      final isThisConnected =
+          isControlConnected && connectedMonitorId == ad.monitorId;
+      final isThisConnecting =
+          isControlConnecting && connectedMonitorId == ad.monitorId;
+
+      final data = MonitorItemData(
+        monitorId: ad.monitorId,
+        name: ad.monitorName,
+        status: 'Online',
+        lastNoiseEpochMs: pinnedMonitor?.lastNoiseEpochMs,
+        lastSeenEpochMs: pinnedMonitor?.lastSeenEpochMs,
+        fingerprint: ad.monitorCertFingerprint,
+        trusted: isTrusted,
+        trustedMonitor: pinnedMonitor,
+        lastKnownIp: ad.ip ?? pinnedMonitor?.lastKnownIp,
+        advertisement: ad,
+        connectTarget: ad,
+        isConnected: isThisConnected,
+        isConnecting: isThisConnecting,
+        onConnect: isTrusted
+            ? () => _handleConnect(ad.monitorId, ad, pinnedMonitor, ad)
+            : null,
+        onDisconnect: isThisConnected ? _handleDisconnect : null,
+        onListen: isThisConnected
+            ? () => ref.read(streamingProvider.notifier).requestStream()
+            : null,
+        onStop: _handleStop,
+        onForget: isTrusted
+            ? () => _forgetMonitor(pinnedMonitor!, advertisement: ad)
+            : null,
+        onPair: () => _showPairSheet(ad),
+        onSettings: isTrusted
+            ? () => showMonitorSettingsSheet(
+                context,
+                monitorId: ad.monitorId,
+                monitorName: ad.monitorName,
+              )
+            : null,
+      );
+
+      if (isTrusted) {
+        trustedData.add(data);
+      } else {
+        discoveredData.add(data);
+      }
+    }
+
+    // Add offline pinned monitors
+    for (final monitor in pinned) {
+      if (advertisements.any((ad) => ad.monitorId == monitor.monitorId)) {
+        continue;
+      }
+      final fallback = _fallbackAdvertisement(monitor);
+      final isThisConnected =
+          isControlConnected && connectedMonitorId == monitor.monitorId;
+      final isThisConnecting =
+          isControlConnecting && connectedMonitorId == monitor.monitorId;
+
+      trustedData.add(
+        MonitorItemData(
+          monitorId: monitor.monitorId,
+          name: monitor.monitorName,
+          status: 'Offline',
+          lastNoiseEpochMs: monitor.lastNoiseEpochMs,
+          lastSeenEpochMs: monitor.lastSeenEpochMs,
+          fingerprint: monitor.certFingerprint,
+          trusted: true,
+          trustedMonitor: monitor,
+          lastKnownIp: monitor.lastKnownIp,
+          advertisement: null,
+          connectTarget: fallback,
+          isConnected: isThisConnected,
+          isConnecting: isThisConnecting,
+          onConnect: fallback != null
+              ? () => _handleConnect(monitor.monitorId, null, monitor, fallback)
+              : null,
+          onDisconnect: isThisConnected ? _handleDisconnect : null,
+          onListen: isThisConnected
+              ? () => ref.read(streamingProvider.notifier).requestStream()
+              : null,
+          onStop: _handleStop,
+          onForget: () => _forgetMonitor(monitor, advertisement: fallback),
+          onSettings: () => showMonitorSettingsSheet(
+            context,
+            monitorId: monitor.monitorId,
+            monitorName: monitor.monitorName,
+          ),
+        ),
+      );
+    }
+  }
+
+  MdnsAdvertisement? _fallbackAdvertisement(TrustedMonitor monitor) {
+    // Try lastKnownIp first, then fall back to first known IP from QR pairing
+    final ip = monitor.lastKnownIp ?? monitor.knownIps?.firstOrNull;
+    if (ip == null) return null;
+    return MdnsAdvertisement(
+      monitorId: monitor.monitorId,
+      monitorName: monitor.monitorName,
+      monitorCertFingerprint: monitor.certFingerprint,
+      controlPort: monitor.controlPort,
+      pairingPort: monitor.pairingPort,
+      version: monitor.serviceVersion,
+      transport: monitor.transport,
+      ip: ip,
+    );
+  }
+
+  Future<void> _forgetMonitor(
+    TrustedMonitor monitor, {
+    MdnsAdvertisement? advertisement,
+  }) async {
+    final confirmed =
+        await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Forget monitor?'),
+            content: Text(
+              'Remove ${monitor.monitorName} from trusted list? You will need to re-pair.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
               ),
-            ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Forget'),
+              ),
+            ],
           ),
-        if (isConnected) const SizedBox(height: 14),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      'Trusted monitors',
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    identity.maybeWhen(
-                      data: (id) =>
-                          PinnedBadge(fingerprint: id.certFingerprint),
-                      orElse: () => const PinnedBadge(),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  'Server pinning happens before any control traffic leaves this device.',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
-                ),
-                const SizedBox(height: 14),
-                ...monitors.map((m) => _MonitorCard(data: m)),
-                const SizedBox(height: 12),
-                trustedMonitors.when(
-                  data: (list) => Text(
-                    'Pinned monitors: ${list.length}',
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-                  ),
-                  loading: () => const Text('Loading pinned monitors...'),
-                  error: (err, _) => Text(
-                    'Could not load pinned monitors',
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodySmall?.copyWith(color: Colors.red),
-                  ),
-                ),
-              ],
-            ),
-          ),
+        ) ??
+        false;
+    if (!confirmed) return;
+
+    final identity = ref.read(identityProvider).asData?.value;
+    final target = advertisement ?? _fallbackAdvertisement(monitor);
+    bool unpaired = false;
+
+    if (identity != null && target?.ip != null) {
+      final unpairClient = client.ControlClient(identity: identity);
+      unpaired = await unpairClient.requestUnpair(
+        host: target!.ip!,
+        port: target.controlPort,
+        expectedFingerprint: monitor.certFingerprint,
+        listenerId: identity.deviceId,
+      );
+    }
+
+    await ref
+        .read(trustedMonitorsProvider.notifier)
+        .removeMonitor(monitor.monitorId);
+    await ref
+        .read(perMonitorSettingsProvider.notifier)
+        .removeSettings(monitor.monitorId);
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          unpaired
+              ? 'Unpaired and forgot ${monitor.monitorName}'
+              : 'Forgot ${monitor.monitorName}',
         ),
-        const SizedBox(height: 14),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      'Listener settings',
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    if (listenerSettingsAsync.isLoading)
-                      const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                SwitchListTile.adaptive(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Noise notifications'),
-                  subtitle: const Text(
-                    'Local alerts on NOISE_EVENT even when app is backgrounded.',
-                  ),
-                  value: listenerSettings.notificationsEnabled,
-                  onChanged: (_) => ref
-                      .read(listenerSettingsProvider.notifier)
-                      .toggleNotifications(),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  'Default action',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(height: 6),
-                Wrap(
-                  spacing: 8,
-                  children: ListenerDefaultAction.values.map((action) {
-                    final selected = listenerSettings.defaultAction == action;
-                    return ChoiceChip(
-                      label: Text(
-                        action == ListenerDefaultAction.notify
-                            ? 'Notify only'
-                            : 'Auto-open stream',
-                      ),
-                      selected: selected,
-                      onSelected: (_) => ref
-                          .read(listenerSettingsProvider.notifier)
-                          .setDefaultAction(action),
-                    );
-                  }).toList(),
-                ),
-              ],
-            ),
-          ),
+      ),
+    );
+  }
+
+  /// Connect to a monitor's control server (for receiving notifications).
+  Future<void> _handleConnect(
+    String monitorId,
+    MdnsAdvertisement? advertisement,
+    TrustedMonitor trustedMonitor,
+    MdnsAdvertisement connectTarget,
+  ) async {
+    final identity = ref.read(identityProvider);
+
+    if (!identity.hasValue) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Loading device identity; try again in a moment'),
         ),
-        const SizedBox(height: 14),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+      );
+      return;
+    }
+
+    // Set active monitor
+    setState(() => _activeMonitorId = monitorId);
+
+    final failure = await ref
+        .read(controlClientProvider.notifier)
+        .connectToMonitor(
+          advertisement: connectTarget,
+          monitor: trustedMonitor,
+          identity: identity.requireValue,
+        );
+
+    if (!mounted) return;
+    if (failure != null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Connect failed: $failure')));
+      setState(() => _activeMonitorId = null);
+    }
+  }
+
+  /// Disconnect from the current monitor.
+  void _handleDisconnect() {
+    // Stop streaming first if active
+    final streamState = ref.read(streamingProvider);
+    if (streamState.status == StreamingStatus.connected ||
+        streamState.status == StreamingStatus.connecting) {
+      ref.read(streamingProvider.notifier).endStream();
+    }
+    _stopPinTimer();
+    _audioPlayback?.stop();
+
+    // Disconnect control connection
+    ref.read(controlClientProvider.notifier).disconnect();
+    setState(() => _activeMonitorId = null);
+  }
+
+  void _handleStop() {
+    ref.read(streamingProvider.notifier).endStream();
+    _stopPinTimer();
+    _audioPlayback?.stop();
+    setState(() => _activeMonitorId = null);
+  }
+
+  Future<void> _showPairSheet(MdnsAdvertisement advertisement) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => ListenerPinPage(advertisement: advertisement),
+    );
+  }
+
+  Widget _buildTrustedMonitorsCard(
+    BuildContext context,
+    List<MonitorItemData> monitors,
+    AsyncValue<DeviceIdentity> identity,
+    List<TrustedMonitor> pinned,
+  ) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
-                  'Discovery & pairing',
+                  'Trusted monitors',
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
                     fontWeight: FontWeight.w800,
                   ),
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  'Scan a QR for instant trust or browse mDNS and pair with a 6-digit PIN bound to the server fingerprint.',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
-                ),
-                const SizedBox(height: 14),
-                Row(
-                  children: [
-                    Expanded(
-                      child: FilledButton.icon(
-                        onPressed: () async {
-                          final result = await Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (_) => const ListenerScanQrPage(),
-                            ),
-                          );
-                          if (!context.mounted) return;
-                          if (result is MonitorQrPayload) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(
-                                  'Pinned ${result.monitorName} (${result.monitorCertFingerprint.substring(0, 12)})',
-                                ),
-                              ),
-                            );
-                          }
-                        },
-                        icon: const Icon(Icons.qr_code_2),
-                        label: const Text('Scan QR code'),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: () {
-                          showModalBottomSheet<void>(
-                            context: context,
-                            showDragHandle: true,
-                            builder: (sheetContext) {
-                              final discovered = monitors
-                                  .where((m) => m.advertisement != null)
-                                  .toList();
-                              return _NetworkScanSheet(monitors: discovered);
-                            },
-                          );
-                        },
-                        icon: const Icon(Icons.wifi_tethering),
-                        label: const Text('Scan network'),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                Row(
-                  children: const [
-                    Icon(Icons.lock, size: 18, color: AppColors.primary),
-                    SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        'Untrusted clients may only send pairing messages; everything else requires a pinned fingerprint.',
-                        style: TextStyle(color: AppColors.muted),
-                      ),
-                    ),
-                  ],
+                identity.maybeWhen(
+                  data: (id) => PinnedBadge(fingerprint: id.certFingerprint),
+                  orElse: () => const PinnedBadge(),
                 ),
               ],
             ),
-          ),
+            const SizedBox(height: 6),
+            Text(
+              'Server pinning protects against MITM attacks.',
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+            ),
+            const SizedBox(height: 14),
+
+            // Monitor list
+            if (monitors.isEmpty)
+              CcEmptyState(
+                icon: Icons.podcasts_outlined,
+                title: 'No paired monitors',
+                description: 'Scan a QR code or browse the network to pair.',
+              )
+            else
+              ...monitors.map(
+                (m) => TrustedMonitorItem(
+                  data: m,
+                  isActive: _activeMonitorId == m.monitorId,
+                ),
+              ),
+
+            const SizedBox(height: 8),
+            Text(
+              'Paired: ${pinned.length}',
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+            ),
+          ],
         ),
-      ],
+      ),
     );
   }
-}
 
-class _MonitorCardData {
-  _MonitorCardData({
-    required this.name,
-    required this.status,
-    required this.lastNoiseEpochMs,
-    required this.fingerprint,
-    required this.trusted,
-    this.lastKnownIp,
-    this.trustedMonitor,
-    this.onForget,
-    this.advertisement,
-    this.connectTarget,
-    this.onListen,
-  });
-
-  final String name;
-  final String status;
-  final int? lastNoiseEpochMs;
-  final String fingerprint;
-  final bool trusted;
-  final String? lastKnownIp;
-  final TrustedMonitor? trustedMonitor;
-  final VoidCallback? onForget;
-  final MdnsAdvertisement? advertisement;
-  final MdnsAdvertisement? connectTarget;
-  final VoidCallback? onListen;
-}
-
-class _MonitorCard extends StatelessWidget {
-  const _MonitorCard({required this.data});
-
-  final _MonitorCardData data;
-
-  @override
-  Widget build(BuildContext context) {
-    final online = data.status.toLowerCase() == 'online';
-    final lastNoiseText = _formatLastNoise(data.lastNoiseEpochMs);
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.grey.shade200),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
+  void _showDiscoveredMonitorsDrawer(
+    BuildContext context,
+    List<MonitorItemData> monitors,
+  ) {
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.5,
+        minChildSize: 0.3,
+        maxChildSize: 0.85,
+        expand: false,
+        builder: (context, scrollController) => Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              CircleAvatar(
-                radius: 18,
-                backgroundColor: online
-                    ? AppColors.success.withValues(alpha: 0.16)
-                    : AppColors.warning.withValues(alpha: 0.16),
-                child: Icon(
-                  online ? Icons.podcasts : Icons.podcasts_outlined,
-                  color: online ? AppColors.success : AppColors.warning,
-                  size: 18,
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      data.name,
-                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                        fontWeight: FontWeight.w800,
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    'Discovered monitors',
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CcBadge(
+                        label: '${monitors.length} found',
+                        color: AppColors.primary,
+                        size: CcBadgeSize.small,
                       ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'Fingerprint ${data.fingerprint}',
-                      style: Theme.of(
-                        context,
-                      ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-                    ),
-                    if (data.lastKnownIp != null) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        'Last known IP ${data.lastKnownIp}',
-                        style: Theme.of(
-                          context,
-                        ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+                      const SizedBox(width: 8),
+                      IconButton(
+                        onPressed: () {
+                          ref.invalidate(discoveredMonitorsProvider);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Refreshing mDNS discovery...'),
+                              duration: Duration(seconds: 1),
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.refresh, size: 20),
+                        tooltip: 'Refresh',
+                        style: IconButton.styleFrom(
+                          padding: const EdgeInsets.all(8),
+                          minimumSize: const Size(32, 32),
+                        ),
                       ),
                     ],
-                  ],
-                ),
+                  ),
+                ],
               ),
-              if (data.trusted) ...[
-                Container(
-                  margin: const EdgeInsets.only(right: 8),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 6,
+              const SizedBox(height: 6),
+              Text(
+                'Monitors found on your network that are not yet paired.',
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+              ),
+              const SizedBox(height: 12),
+              Expanded(
+                child: monitors.isEmpty
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.wifi_find,
+                              size: 48,
+                              color: AppColors.muted.withValues(alpha: 0.5),
+                            ),
+                            const SizedBox(height: 12),
+                            Text(
+                              'No monitors found',
+                              style: Theme.of(context).textTheme.titleSmall
+                                  ?.copyWith(
+                                    fontWeight: FontWeight.w700,
+                                    color: AppColors.muted,
+                                  ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Make sure monitors are running on your network',
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(color: AppColors.muted),
+                            ),
+                          ],
+                        ),
+                      )
+                    : ListView.builder(
+                        controller: scrollController,
+                        itemCount: monitors.length,
+                        itemBuilder: (context, index) =>
+                            DiscoveredMonitorItem(data: monitors[index]),
+                      ),
+              ),
+              const SizedBox(height: 16),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDiscoveryCard(
+    BuildContext context,
+    List<MonitorItemData> discoveredMonitors,
+  ) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Discovery & pairing',
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Scan a QR for instant trust or browse mDNS and pair with a 6-digit PIN.',
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+            ),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed: () async {
+                      final scaffoldMessenger = ScaffoldMessenger.of(context);
+                      final result = await Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => const ListenerScanQrPage(),
+                        ),
+                      );
+                      if (!mounted) return;
+                      if (result is MonitorQrPayload) {
+                        scaffoldMessenger.showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              'Pinned ${result.monitorName} (${result.monitorCertFingerprint.substring(0, 12)})',
+                            ),
+                          ),
+                        );
+                      }
+                    },
+                    icon: const Icon(Icons.qr_code_2),
+                    label: const Text('Scan QR code'),
                   ),
-                  decoration: BoxDecoration(
-                    color: AppColors.primary.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Text(
-                    'Pinned',
-                    style: TextStyle(
-                      color: AppColors.primary,
-                      fontWeight: FontWeight.w700,
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _showDiscoveredMonitorsDrawer(
+                      context,
+                      discoveredMonitors,
+                    ),
+                    icon: const Icon(Icons.wifi_find),
+                    label: Text(
+                      discoveredMonitors.isEmpty
+                          ? 'Browse network'
+                          : 'Browse network (${discoveredMonitors.length})',
                     ),
                   ),
                 ),
               ],
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 6,
-                ),
-                decoration: BoxDecoration(
-                  color: online
-                      ? AppColors.success.withValues(alpha: 0.14)
-                      : AppColors.warning.withValues(alpha: 0.14),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Text(
-                  data.status,
-                  style: TextStyle(
-                    color: online ? AppColors.success : AppColors.warning,
-                    fontWeight: FontWeight.w700,
+            ),
+            const SizedBox(height: 12),
+            const Row(
+              children: [
+                Icon(Icons.lock, size: 16, color: AppColors.primary),
+                SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    'Untrusted clients may only send pairing messages.',
+                    style: TextStyle(color: AppColors.muted, fontSize: 12),
                   ),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              const Icon(
-                Icons.notifications_active,
-                size: 16,
-                color: AppColors.primary,
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  'Last noise: $lastNoiseText',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 6,
-            runSpacing: 4,
-            children: [
-              TextButton(onPressed: data.onListen, child: const Text('Listen')),
-              if (!data.trusted && data.advertisement != null)
-                TextButton.icon(
-                  onPressed: () async {
-                    final ad = data.advertisement!;
-                    await showModalBottomSheet<void>(
-                      context: context,
-                      showDragHandle: true,
-                      builder: (context) => ListenerPinPage(advertisement: ad),
-                    );
-                  },
-                  icon: const Icon(Icons.pin),
-                  label: const Text('Pair with PIN'),
-                ),
-              if (data.trusted && data.onForget != null)
-                TextButton.icon(
-                  onPressed: data.onForget,
-                  icon: const Icon(Icons.delete_outline),
-                  label: const Text('Forget'),
-                  style: TextButton.styleFrom(foregroundColor: Colors.red),
-                ),
-            ],
-          ),
-        ],
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
-}
-
-class _NetworkScanSheet extends StatelessWidget {
-  const _NetworkScanSheet({required this.monitors});
-
-  final List<_MonitorCardData> monitors;
-
-  @override
-  Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            'Network scan',
-            style: Theme.of(
-              context,
-            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Listening for CribCall monitors via mDNS.',
-            style: Theme.of(
-              context,
-            ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-          ),
-          const SizedBox(height: 12),
-          if (monitors.isEmpty)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 12),
-              child: Text('No monitors discovered yet.'),
-            )
-          else
-            ...monitors.map((m) {
-              final online = m.status.toLowerCase() == 'online';
-              return Container(
-                margin: const EdgeInsets.only(bottom: 10),
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: AppColors.surface,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.grey.shade200),
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            m.name,
-                            style: Theme.of(context).textTheme.titleSmall
-                                ?.copyWith(fontWeight: FontWeight.w800),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Fingerprint ${m.fingerprint}',
-                            style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(color: AppColors.muted),
-                          ),
-                          if (m.advertisement?.ip != null)
-                            Text(
-                              'IP ${m.advertisement!.ip}',
-                              style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(color: AppColors.muted),
-                            ),
-                        ],
-                      ),
-                    ),
-                    if (m.trusted)
-                      FilledButton(
-                        onPressed: m.onListen,
-                        child: Text(online ? 'Listen' : 'Try reconnect'),
-                      )
-                    else
-                      OutlinedButton(
-                        onPressed: () async {
-                          if (m.advertisement == null) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('Monitor offline; cannot pair.'),
-                              ),
-                            );
-                            return;
-                          }
-                          await showModalBottomSheet<void>(
-                            context: context,
-                            showDragHandle: true,
-                            builder: (_) => ListenerPinPage(
-                              advertisement: m.advertisement!,
-                            ),
-                          );
-                        },
-                        child: const Text('Pair with PIN'),
-                      ),
-                  ],
-                ),
-              );
-            }),
-        ],
-      ),
-    );
-  }
-}
-
-String _formatLastNoise(int? epochMs) {
-  if (epochMs == null) return 'No events yet';
-  final ts = DateTime.fromMillisecondsSinceEpoch(epochMs);
-  final diff = DateTime.now().difference(ts);
-  if (diff.inSeconds < 60) return 'Just now';
-  if (diff.inMinutes < 60) return '${diff.inMinutes} min ago';
-  if (diff.inHours < 24) return '${diff.inHours} hr ago';
-  return '${diff.inDays} d ago';
 }

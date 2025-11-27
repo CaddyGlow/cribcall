@@ -5,7 +5,7 @@ import 'package:cribcall/src/config/build_flags.dart';
 import 'package:cribcall/src/domain/models.dart';
 import 'package:cribcall/src/discovery/mdns_service.dart';
 import 'package:cribcall/src/state/app_state.dart';
-import 'package:cribcall/src/storage/settings_repository.dart';
+import 'package:cribcall/src/storage/app_session_repository.dart';
 import 'package:cribcall/src/storage/trusted_monitors_repository.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -29,17 +29,17 @@ void main() {
     addTearDown(container.dispose);
 
     final settings = await container.read(monitorSettingsProvider.future);
-    expect(settings.noise.threshold, 60);
+    expect(settings.noise.threshold, 50);
     expect(settings.autoStreamType, AutoStreamType.audio);
     expect(settings.autoStreamDurationSec, 15);
   });
 
-  test('monitor settings controller updates and persists name', () async {
-    final tempDir = await Directory.systemTemp.createTemp('monitor_settings');
+  test('app session controller updates and persists device name', () async {
+    final tempDir = await Directory.systemTemp.createTemp('app_session');
     final container = ProviderContainer(
       overrides: [
-        monitorSettingsRepoProvider.overrideWithValue(
-          MonitorSettingsRepository(overrideDirectoryPath: tempDir.path),
+        appSessionRepoProvider.overrideWithValue(
+          AppSessionRepository(overrideDirectoryPath: tempDir.path),
         ),
       ],
     );
@@ -48,14 +48,14 @@ void main() {
       await tempDir.delete(recursive: true);
     });
 
-    await container.read(monitorSettingsProvider.future);
-    await container.read(monitorSettingsProvider.notifier).setName('Crib Cam');
-    final updated = container.read(monitorSettingsProvider).value!;
-    expect(updated.name, 'Crib Cam');
+    await container.read(appSessionProvider.future);
+    await container.read(appSessionProvider.notifier).setDeviceName('Crib Cam');
+    final updated = container.read(appSessionProvider).value!;
+    expect(updated.deviceName, 'Crib Cam');
 
-    final repo = MonitorSettingsRepository(overrideDirectoryPath: tempDir.path);
+    final repo = AppSessionRepository(overrideDirectoryPath: tempDir.path);
     final reloaded = await repo.load();
-    expect(reloaded.name, 'Crib Cam');
+    expect(reloaded.deviceName, 'Crib Cam');
   });
 
   test('monitoring status toggles', () {

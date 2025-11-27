@@ -24,8 +24,10 @@ class PairInitResult {
   });
 
   final String sessionId;
+
   /// 6-digit comparison code to display on both devices
   final String comparisonCode;
+
   /// Derived key for auth tag computation
   final List<int> pairingKey;
   final DateTime expiresAt;
@@ -46,11 +48,31 @@ class PairingResult {
   final List<int> monitorCertificateDer;
 }
 
+/// Exception thrown when certificate fingerprint doesn't match expected value.
+class CertificateMismatchException implements Exception {
+  const CertificateMismatchException({
+    required this.expected,
+    required this.actual,
+  });
+
+  final String expected;
+  final String actual;
+
+  @override
+  String toString() =>
+      'Certificate changed: monitor may have been reinstalled. '
+      'Please forget and re-pair this monitor.';
+}
+
 /// Client for connecting to control and pairing servers.
 class ControlClient {
   ControlClient({required this.identity});
 
   final DeviceIdentity identity;
+
+  // Track certificate mismatch for better error reporting
+  String? _lastMismatchExpected;
+  String? _lastMismatchActual;
 
   /// Connect to the control server (mTLS WebSocket).
   /// Requires that the monitor's certificate is already trusted.
@@ -61,22 +83,34 @@ class ControlClient {
   }) async {
     _log('Connecting to control server $host:$port');
 
+    // Clear any previous mismatch state
+    _lastMismatchExpected = null;
+    _lastMismatchActual = null;
+
     final client = await _buildHttpClient(expectedFingerprint);
 
-    // Health check first
-    await _healthCheck(client, host, port, expectedFingerprint);
+    // Health check first - may throw CertificateMismatchException
+    try {
+      await _healthCheck(client, host, port, expectedFingerprint);
+    } on HandshakeException {
+      // If we recorded a mismatch, throw a more helpful error
+      if (_lastMismatchExpected != null && _lastMismatchActual != null) {
+        throw CertificateMismatchException(
+          expected: _lastMismatchExpected!,
+          actual: _lastMismatchActual!,
+        );
+      }
+      rethrow;
+    }
 
     // Upgrade to WebSocket
-    final uri = Uri(
-      scheme: 'wss',
-      host: host,
-      port: port,
-      path: '/control/ws',
-    );
+    final uri = Uri(scheme: 'wss', host: host, port: port, path: '/control/ws');
 
     _log('Upgrading to WebSocket $uri');
-    final socket = await WebSocket.connect(uri.toString(), customClient: client)
-        .timeout(const Duration(seconds: 10));
+    final socket = await WebSocket.connect(
+      uri.toString(),
+      customClient: client,
+    ).timeout(const Duration(seconds: 10));
 
     final connectionId = 'client-${DateTime.now().microsecondsSinceEpoch}';
     return ControlConnection(
@@ -139,7 +173,9 @@ class ControlClient {
 
     if (initResponse.statusCode != HttpStatus.ok) {
       final body = await utf8.decodeStream(initResponse);
-      throw HttpException('Pair init failed (${initResponse.statusCode}): $body');
+      throw HttpException(
+        'Pair init failed (${initResponse.statusCode}): $body',
+      );
     }
 
     final initBody = await utf8.decodeStream(initResponse);
@@ -175,8 +211,12 @@ class ControlClient {
     _log('Confirming pairing session=$sessionId');
 
     // Reuse existing client or create new one
-    final client = _httpClient ??
-        await _buildHttpClient(expectedFingerprint, allowUnpinned: allowUnpinned);
+    final client =
+        _httpClient ??
+        await _buildHttpClient(
+          expectedFingerprint,
+          allowUnpinned: allowUnpinned,
+        );
 
     // Build transcript
     final transcript = <String, dynamic>{
@@ -214,7 +254,9 @@ class ControlClient {
 
     if (confirmResponse.statusCode != HttpStatus.ok) {
       final body = await utf8.decodeStream(confirmResponse);
-      throw HttpException('Pair confirm failed (${confirmResponse.statusCode}): $body');
+      throw HttpException(
+        'Pair confirm failed (${confirmResponse.statusCode}): $body',
+      );
     }
 
     final confirmBody = await utf8.decodeStream(confirmResponse);
@@ -247,7 +289,8 @@ class ControlClient {
   }) async {
     // Parse monitor's P-256 public key (uncompressed: 0x04 + x + y)
     final monitorPublicKeyBytes = base64Decode(monitorPublicKeyB64);
-    if (monitorPublicKeyBytes.length != 65 || monitorPublicKeyBytes[0] != 0x04) {
+    if (monitorPublicKeyBytes.length != 65 ||
+        monitorPublicKeyBytes[0] != 0x04) {
       throw const FormatException('Invalid monitor public key format');
     }
     final monitorPublicKey = EcPublicKey(
@@ -305,6 +348,45 @@ class ControlClient {
   void close() {
     _httpClient?.close();
     _httpClient = null;
+  }
+
+  /// Request the monitor to remove this listener from its trusted list.
+  /// Returns true if the monitor acknowledged the unpair action.
+  Future<bool> requestUnpair({
+    required String host,
+    required int port,
+    required String expectedFingerprint,
+    required String listenerId,
+  }) async {
+    _log('Requesting unpair from $host:$port listenerId=$listenerId');
+    HttpClient? client;
+    try {
+      client = await _buildHttpClient(expectedFingerprint);
+      final uri = Uri.https('$host:$port', '/unpair');
+      final request = await client.postUrl(uri);
+      request.headers.contentType = ContentType.json;
+      request.write(jsonEncode({'listenerId': listenerId}));
+
+      final response = await request.close().timeout(
+        const Duration(seconds: 5),
+      );
+      final body = await utf8.decodeStream(response);
+
+      if (response.statusCode != HttpStatus.ok) {
+        _log('Unpair failed: status=${response.statusCode} body=$body');
+        return false;
+      }
+
+      final data = jsonDecode(body);
+      final acknowledged = data is Map && data['unpaired'] == true;
+      _log('Unpair response: acknowledged=$acknowledged');
+      return acknowledged;
+    } catch (e) {
+      _log('Unpair request error: $e');
+      return false;
+    } finally {
+      client?.close(force: true);
+    }
   }
 
   Future<void> _healthCheck(
@@ -379,6 +461,9 @@ class ControlClient {
           'Certificate mismatch for $host:$port: '
           'expected=${_shortFp(expectedFingerprint)} got=${_shortFp(fp)}',
         );
+        // Record the mismatch for better error reporting
+        _lastMismatchExpected = expectedFingerprint;
+        _lastMismatchActual = fp;
       } else {
         _lastSeenFingerprint = fp;
       }

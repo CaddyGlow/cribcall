@@ -86,61 +86,95 @@ class DesktopMdnsService implements MdnsService {
   static const _serviceType = '_baby-monitor._tcp.local';
 
   @override
-  Stream<MdnsAdvertisement> browse() async* {
-    developer.log('Starting desktop mDNS browse', name: 'mdns');
-    await _client.start();
-    await for (final PtrResourceRecord ptr in _client.lookup<PtrResourceRecord>(
-      ResourceRecordQuery.serverPointer(_serviceType),
-    )) {
-      final domain = ptr.domainName;
-      SrvResourceRecord? srv;
-      await for (final record in _client.lookup<SrvResourceRecord>(
-        ResourceRecordQuery.service(domain),
-      )) {
-        srv = record;
-        break;
-      }
-      if (srv == null) continue;
+  Stream<MdnsAdvertisement> browse() {
+    developer.log('Starting desktop mDNS browse (continuous)', name: 'mdns');
+    final controller = StreamController<MdnsAdvertisement>();
 
-      final attributes = <String, String>{};
-      await for (final record in _client.lookup<TxtResourceRecord>(
-        ResourceRecordQuery.text(domain),
-      )) {
-        final parts = record.text.split('=');
-        if (parts.length == 2) {
-          attributes[parts[0]] = parts[1];
+    Future<void> runScan() async {
+      try {
+        await _client.start();
+        await for (final PtrResourceRecord ptr
+            in _client.lookup<PtrResourceRecord>(
+          ResourceRecordQuery.serverPointer(_serviceType),
+        )) {
+          final domain = ptr.domainName;
+          SrvResourceRecord? srv;
+          await for (final record in _client.lookup<SrvResourceRecord>(
+            ResourceRecordQuery.service(domain),
+          )) {
+            srv = record;
+            break;
+          }
+          if (srv == null) continue;
+
+          final attributes = <String, String>{};
+          await for (final record in _client.lookup<TxtResourceRecord>(
+            ResourceRecordQuery.text(domain),
+          )) {
+            // TXT record contains multiple lines, each with key=value format
+            for (final line in record.text.split('\n')) {
+              final trimmed = line.trim();
+              if (trimmed.isEmpty) continue;
+              final eqIndex = trimmed.indexOf('=');
+              if (eqIndex > 0) {
+                final key = trimmed.substring(0, eqIndex);
+                final value = trimmed.substring(eqIndex + 1);
+                attributes[key] = value;
+              }
+            }
+          }
+          IPAddressResourceRecord? addressRecord;
+          await for (final record in _client.lookup<IPAddressResourceRecord>(
+            ResourceRecordQuery.addressIPv4(srv.target),
+          )) {
+            addressRecord = record;
+            break;
+          }
+          final monitorId = attributes['monitorId'] ?? srv.target;
+          final monitorName = attributes['monitorName'] ?? srv.target;
+          final fingerprint = attributes['monitorCertFingerprint'] ?? '';
+          final transport = attributes['transport'] ?? kTransportHttpWs;
+          final controlPortAttr =
+              int.tryParse(attributes['controlPort'] ?? '') ?? srv.port;
+          final pairingPortAttr =
+              int.tryParse(attributes['pairingPort'] ?? '') ?? kPairingDefaultPort;
+          developer.log(
+            'mDNS found monitor=$monitorId ip=${addressRecord?.address.address ?? 'unknown'} '
+            'controlPort=$controlPortAttr pairingPort=$pairingPortAttr transport=$transport '
+            'fingerprint=$fingerprint',
+            name: 'mdns',
+          );
+          if (!controller.isClosed) {
+            controller.add(MdnsAdvertisement(
+              monitorId: monitorId,
+              monitorName: monitorName,
+              monitorCertFingerprint: fingerprint,
+              controlPort: controlPortAttr,
+              pairingPort: pairingPortAttr,
+              version: int.tryParse(attributes['version'] ?? '1') ?? 1,
+              transport: transport,
+              ip: addressRecord?.address.address,
+            ));
+          }
         }
+      } catch (e) {
+        developer.log('mDNS scan error: $e', name: 'mdns');
       }
-      IPAddressResourceRecord? addressRecord;
-      await for (final record in _client.lookup<IPAddressResourceRecord>(
-        ResourceRecordQuery.addressIPv4(srv.target),
-      )) {
-        addressRecord = record;
-        break;
-      }
-      final monitorId = attributes['monitorId'] ?? srv.target;
-      final monitorName = attributes['monitorName'] ?? srv.target;
-      final fingerprint = attributes['monitorCertFingerprint'] ?? '';
-      final transport = attributes['transport'] ?? kTransportHttpWs;
-      final controlPortAttr = int.tryParse(attributes['controlPort'] ?? '') ?? srv.port;
-      final pairingPortAttr = int.tryParse(attributes['pairingPort'] ?? '') ?? kPairingDefaultPort;
-      developer.log(
-        'mDNS found monitor=$monitorId ip=${addressRecord?.address.address ?? 'unknown'} '
-        'controlPort=$controlPortAttr pairingPort=$pairingPortAttr transport=$transport '
-        'fp=${_shortFingerprint(fingerprint)}',
-        name: 'mdns',
-      );
-      yield MdnsAdvertisement(
-        monitorId: monitorId,
-        monitorName: monitorName,
-        monitorCertFingerprint: fingerprint,
-        controlPort: controlPortAttr,
-        pairingPort: pairingPortAttr,
-        version: int.tryParse(attributes['version'] ?? '1') ?? 1,
-        transport: transport,
-        ip: addressRecord?.address.address,
-      );
     }
+
+    // Run initial scan immediately
+    runScan();
+
+    // Schedule periodic scans every 10 seconds
+    final timer = Timer.periodic(const Duration(seconds: 10), (_) {
+      runScan();
+    });
+
+    controller.onCancel = () {
+      timer.cancel();
+    };
+
+    return controller.stream;
   }
 
   @override

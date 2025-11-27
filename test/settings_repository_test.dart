@@ -11,11 +11,9 @@ void main() {
     final repo = MonitorSettingsRepository(overrideDirectoryPath: dir.path);
 
     final defaults = await repo.load();
-    expect(defaults.name, MonitorSettings.defaults.name);
     expect(defaults.noise.threshold, MonitorSettings.defaults.noise.threshold);
 
     final updated = defaults.copyWith(
-      name: 'Nursery 2',
       noise: defaults.noise.copyWith(threshold: 72),
       autoStreamType: AutoStreamType.audioVideo,
       autoStreamDurationSec: 30,
@@ -23,7 +21,6 @@ void main() {
     await repo.save(updated);
 
     final roundTrip = await repo.load();
-    expect(roundTrip.name, 'Nursery 2');
     expect(roundTrip.noise.threshold, 72);
     expect(roundTrip.autoStreamType, AutoStreamType.audioVideo);
     expect(roundTrip.autoStreamDurationSec, 30);

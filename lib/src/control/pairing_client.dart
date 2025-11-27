@@ -256,6 +256,123 @@ class PairingClient {
     );
   }
 
+  /// Pairs using a one-time token from QR code.
+  ///
+  /// This is a single-step pairing - no comparison code needed.
+  /// If the token is valid, pairing completes immediately.
+  Future<PairTokenResponse> pairWithToken({
+    required String host,
+    required int port,
+    required String expectedFingerprint,
+    required String pairingToken,
+    required DeviceIdentity listenerIdentity,
+    required String listenerName,
+  }) async {
+    _log(
+      'Token pairing to $host:$port '
+      'expectedFp=${_shortFingerprint(expectedFingerprint)}',
+    );
+
+    final client = await _httpClient(
+      expectedFingerprint,
+      listenerIdentity,
+    );
+    _client = client;
+
+    final uri = Uri(
+      scheme: 'https',
+      host: host,
+      port: port,
+      path: '/pair/token',
+    );
+
+    final requestBody = PairTokenRequest(
+      pairingToken: pairingToken,
+      listenerId: listenerIdentity.deviceId,
+      listenerName: listenerName,
+      listenerCertFingerprint: listenerIdentity.certFingerprint,
+      listenerCertificateDer: listenerIdentity.certificateDer,
+    );
+
+    _log('POST $uri');
+    final request = await client.postUrl(uri);
+    request.headers.contentType = ContentType.json;
+    request.write(requestBody.toJsonString());
+    final response = await request.close();
+
+    // Capture server certificate fingerprint
+    final cert = response.certificate;
+    if (cert != null) {
+      final fp = _fingerprintHex(cert.der);
+      _lastSeenFingerprint = fp;
+      _log('Server cert fingerprint=${_shortFingerprint(fp)}');
+    }
+
+    if (response.statusCode != HttpStatus.ok) {
+      final body = await utf8.decodeStream(response);
+      _log('Token pairing failed: ${response.statusCode} $body');
+      throw HttpException(
+        'Token pairing failed: ${response.statusCode}',
+        uri: uri,
+      );
+    }
+
+    final body = await utf8.decodeStream(response);
+    final json = jsonDecode(body) as Map<String, dynamic>;
+    final result = PairTokenResponse.fromJson(json);
+
+    _log(
+      'Token pairing result: accepted=${result.accepted} '
+      'reason=${result.reason ?? 'none'}',
+    );
+
+    return result;
+  }
+
+  /// Confirms pairing by calling POST /pair/confirm with polling support.
+  ///
+  /// This should be called after the user has verified that the comparison
+  /// codes on both devices match and tapped "Codes Match".
+  ///
+  /// The method will poll until the monitor user accepts, rejects, or timeout.
+  /// [pollIntervalMs] - interval between poll attempts (default 1000ms)
+  /// [timeoutMs] - total timeout for polling (default 60000ms)
+  Future<PairConfirmResponse> confirmPairingWithPolling({
+    required String host,
+    required int port,
+    required String expectedFingerprint,
+    required DeviceIdentity listenerIdentity,
+    required String sessionId,
+    required List<int> pairingKey,
+    int pollIntervalMs = 1000,
+    int timeoutMs = 60000,
+    bool allowUnpinned = false,
+  }) async {
+    final deadline = DateTime.now().add(Duration(milliseconds: timeoutMs));
+
+    while (DateTime.now().isBefore(deadline)) {
+      final response = await confirmPairing(
+        host: host,
+        port: port,
+        expectedFingerprint: expectedFingerprint,
+        listenerIdentity: listenerIdentity,
+        sessionId: sessionId,
+        pairingKey: pairingKey,
+        allowUnpinned: allowUnpinned,
+      );
+
+      if (response.status != PairConfirmStatus.pending) {
+        return response;
+      }
+
+      _log('Pairing pending, polling again in ${pollIntervalMs}ms...');
+      await Future<void>.delayed(Duration(milliseconds: pollIntervalMs));
+    }
+
+    _log('Pairing timed out after ${timeoutMs}ms');
+    return PairConfirmResponse.rejected('Pairing timed out waiting for monitor acceptance');
+  }
+
   /// Closes the HTTP client.
   void close() {
     _client?.close();

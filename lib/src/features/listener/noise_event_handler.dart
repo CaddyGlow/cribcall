@@ -7,10 +7,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../control/control_service.dart';
 import '../../domain/models.dart';
 import '../../fcm/fcm_service.dart';
+import '../../notifications/notification_service.dart';
 import '../../state/app_state.dart';
-import 'listener_stream_page.dart';
+import '../../state/per_monitor_settings.dart';
+import '../../webrtc/webrtc_controller.dart';
 
-/// Widget that listens for noise events and shows the streaming page.
+/// Widget that listens for noise events and triggers auto-play or notifications.
 /// Wrap your main content with this to enable auto-open stream on noise.
 class NoiseEventHandler extends ConsumerStatefulWidget {
   const NoiseEventHandler({
@@ -26,7 +28,7 @@ class NoiseEventHandler extends ConsumerStatefulWidget {
 
 class _NoiseEventHandlerState extends ConsumerState<NoiseEventHandler> {
   StreamSubscription<NoiseEventData>? _noiseSubscription;
-  bool _streamPageOpen = false;
+  Timer? _autoPlayTimer;
 
   @override
   void initState() {
@@ -62,78 +64,172 @@ class _NoiseEventHandlerState extends ConsumerState<NoiseEventHandler> {
 
     if (!mounted) return;
 
-    // Check if auto-open is enabled
+    // Check per-monitor settings first
+    final perMonitorSettingsState = ref.read(perMonitorSettingsProvider).asData?.value;
+    final perMonitorSettings = perMonitorSettingsState?.getOrDefault(event.monitorId);
+
+    // Check if notifications are enabled for this monitor
+    if (perMonitorSettings?.notificationsEnabled == false) {
+      _log('Notifications disabled for monitor ${event.monitorId}');
+      return;
+    }
+
+    // Check if auto-play on noise is enabled for this monitor
+    if (perMonitorSettings?.autoPlayOnNoise == true) {
+      _startAutoPlay(event, perMonitorSettings!.autoPlayDurationSec);
+      return;
+    }
+
+    // Fall back to global listener settings
     final listenerSettings = ref.read(listenerSettingsProvider).asData?.value;
     final defaultAction = listenerSettings?.defaultAction ?? ListenerDefaultAction.notify;
 
     if (defaultAction == ListenerDefaultAction.autoOpenStream) {
-      _openStreamPage(event);
+      _startAutoPlay(event, perMonitorSettings?.autoPlayDurationSec ?? 15);
     } else {
       _showNoiseNotification(event);
     }
   }
 
-  void _openStreamPage(NoiseEventData event) {
-    if (_streamPageOpen) {
-      _log('Stream page already open, ignoring');
+  Future<void> _startAutoPlay(NoiseEventData event, int durationSec) async {
+    final streamState = ref.read(streamingProvider);
+    final controlClientState = ref.read(controlClientProvider);
+
+    // Don't interrupt existing streams
+    if (streamState.status == StreamingStatus.connected ||
+        streamState.status == StreamingStatus.connecting) {
+      _log('Stream already active, ignoring auto-play');
       return;
     }
 
-    _log('Opening stream page for noise event');
-    _streamPageOpen = true;
+    _log('Starting auto-play for noise event (duration: ${durationSec}s)');
 
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => ListenerStreamPage(
-          monitorName: event.monitorName,
-          autoStart: true,
-        ),
-      ),
-    ).then((_) {
-      _streamPageOpen = false;
+    // If not connected, try to connect first
+    if (controlClientState.status != ControlClientStatus.connected) {
+      _log('Not connected, attempting to connect to monitor ${event.monitorId}');
+
+      final connected = await _connectToMonitor(event.monitorId);
+      if (!connected) {
+        _log('Failed to connect, showing notification instead');
+        _showNoiseNotification(event);
+        return;
+      }
+    }
+
+    // Request stream
+    ref.read(streamingProvider.notifier).requestStream();
+
+    // Set up auto-stop timer
+    _autoPlayTimer?.cancel();
+    _autoPlayTimer = Timer(Duration(seconds: durationSec), () {
+      _log('Auto-play duration expired, stopping stream');
+      final currentState = ref.read(streamingProvider);
+      if (currentState.status == StreamingStatus.connected) {
+        ref.read(streamingProvider.notifier).endStream();
+      }
     });
+
+    // Show notification about auto-play
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Icon(Icons.play_circle, color: Colors.white),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  'Auto-playing ${event.monitorName} for ${durationSec}s',
+                ),
+              ),
+            ],
+          ),
+          action: SnackBarAction(
+            label: 'Stop',
+            onPressed: () {
+              _autoPlayTimer?.cancel();
+              ref.read(streamingProvider.notifier).endStream();
+            },
+          ),
+          duration: const Duration(seconds: 3),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  /// Connect to a monitor by ID. Returns true if successful.
+  Future<bool> _connectToMonitor(String monitorId) async {
+    try {
+      // Get trusted monitor
+      final trustedMonitors = await ref.read(trustedMonitorsProvider.future);
+      final monitor = trustedMonitors
+          .where((m) => m.monitorId == monitorId)
+          .firstOrNull;
+
+      if (monitor == null) {
+        _log('Monitor $monitorId not in trusted list');
+        return false;
+      }
+
+      // Get identity
+      final identity = await ref.read(identityProvider.future);
+
+      // Try to find monitor via mDNS first
+      final advertisements = ref.read(discoveredMonitorsProvider);
+      var ad = advertisements
+          .where((a) => a.monitorId == monitorId)
+          .firstOrNull;
+
+      // Fall back to last known address if not discovered
+      if (ad == null && monitor.lastKnownIp != null) {
+        ad = MdnsAdvertisement(
+          monitorId: monitor.monitorId,
+          monitorName: monitor.monitorName,
+          monitorCertFingerprint: monitor.certFingerprint,
+          controlPort: monitor.controlPort,
+          pairingPort: monitor.pairingPort,
+          version: monitor.serviceVersion,
+          transport: monitor.transport,
+          ip: monitor.lastKnownIp,
+        );
+      }
+
+      if (ad == null) {
+        _log('No connection info for monitor $monitorId');
+        return false;
+      }
+
+      // Connect
+      final failure = await ref.read(controlClientProvider.notifier).connectToMonitor(
+        advertisement: ad,
+        monitor: monitor,
+        identity: identity,
+      );
+
+      if (failure != null) {
+        _log('Connection failed: $failure');
+        return false;
+      }
+
+      return true;
+    } catch (e) {
+      _log('Error connecting to monitor: $e');
+      return false;
+    }
   }
 
   void _showNoiseNotification(NoiseEventData event) {
-    if (!mounted) return;
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Row(
-          children: [
-            const Icon(Icons.notifications_active, color: Colors.white),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    'Noise detected',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  Text(
-                    event.monitorName,
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-        action: SnackBarAction(
-          label: 'Listen',
-          onPressed: () => _openStreamPage(event),
-        ),
-        duration: const Duration(seconds: 5),
-        behavior: SnackBarBehavior.floating,
-      ),
+    NotificationService.instance.showNoiseAlert(
+      monitorName: event.monitorName,
+      peakLevel: event.peakLevel,
     );
   }
 
   @override
   void dispose() {
     _noiseSubscription?.cancel();
+    _autoPlayTimer?.cancel();
     super.dispose();
   }
 

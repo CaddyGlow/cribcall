@@ -18,26 +18,98 @@ import '../pairing/pake_engine.dart';
 import '../pairing/pin_pairing_controller.dart';
 import '../background/background_service.dart';
 import '../sound/audio_capture.dart';
+import '../storage/app_session_repository.dart';
+export '../storage/app_session_repository.dart' show AppSessionState;
 import '../storage/settings_repository.dart';
 import '../storage/trusted_listeners_repository.dart';
 import '../storage/trusted_monitors_repository.dart';
 import '../control/control_service.dart';
 import '../fcm/fcm_service.dart';
 
+/// Provider for the app session repository.
+final appSessionRepoProvider = Provider<AppSessionRepository>((ref) {
+  return AppSessionRepository();
+});
+
+/// Provider for the persisted app session state.
+final appSessionProvider =
+    AsyncNotifierProvider<AppSessionController, AppSessionState>(
+      AppSessionController.new,
+    );
+
+/// Controller for app session state with persistence.
+class AppSessionController extends AsyncNotifier<AppSessionState> {
+  @override
+  Future<AppSessionState> build() async {
+    final repo = ref.read(appSessionRepoProvider);
+    return repo.load();
+  }
+
+  Future<void> setRole(DeviceRole role) async {
+    final current = state.asData?.value ?? AppSessionState.defaults;
+    final updated = current.copyWith(lastRole: role);
+    state = AsyncData(updated);
+    await ref.read(appSessionRepoProvider).save(updated);
+  }
+
+  Future<void> setMonitoringEnabled(bool enabled) async {
+    final current = state.asData?.value ?? AppSessionState.defaults;
+    final updated = current.copyWith(monitoringEnabled: enabled);
+    state = AsyncData(updated);
+    await ref.read(appSessionRepoProvider).save(updated);
+  }
+
+  Future<void> setLastConnectedMonitorId(String? monitorId) async {
+    final current = state.asData?.value ?? AppSessionState.defaults;
+    final updated = monitorId == null
+        ? current.copyWith(clearLastConnectedMonitorId: true)
+        : current.copyWith(lastConnectedMonitorId: monitorId);
+    state = AsyncData(updated);
+    await ref.read(appSessionRepoProvider).save(updated);
+  }
+
+  Future<void> setDeviceName(String name) async {
+    final current = state.asData?.value ?? AppSessionState.defaults;
+    final updated = current.copyWith(deviceName: name);
+    state = AsyncData(updated);
+    await ref.read(appSessionRepoProvider).save(updated);
+  }
+}
+
 class RoleController extends Notifier<DeviceRole?> {
   @override
   DeviceRole? build() => null;
 
-  void select(DeviceRole role) => state = role;
+  void select(DeviceRole role) {
+    state = role;
+    // Persist to session
+    ref.read(appSessionProvider.notifier).setRole(role);
+  }
 
   void reset() => state = null;
+
+  /// Initialize from persisted session state.
+  void restoreFromSession(DeviceRole? role) {
+    if (role != null) {
+      state = role;
+    }
+  }
 }
 
 class MonitoringStatusController extends Notifier<bool> {
   @override
   bool build() => true;
 
-  void toggle(bool value) => state = value;
+  void toggle(bool value) {
+    state = value;
+    // Persist to session
+    ref.read(appSessionProvider.notifier).setMonitoringEnabled(value);
+  }
+
+  /// Initialize from persisted session state.
+  void restoreFromSession(bool enabled) {
+    state = enabled;
+  }
 }
 
 class MonitorSettingsController extends AsyncNotifier<MonitorSettings> {
@@ -53,9 +125,6 @@ class MonitorSettingsController extends AsyncNotifier<MonitorSettings> {
   Future<void> setAutoStreamDuration(int seconds) => _updateAndPersist(
     (current) => current.copyWith(autoStreamDurationSec: seconds),
   );
-
-  Future<void> setName(String name) =>
-      _updateAndPersist((current) => current.copyWith(name: name));
 
   Future<void> setAutoStreamType(AutoStreamType type) =>
       _updateAndPersist((current) => current.copyWith(autoStreamType: type));
@@ -220,6 +289,7 @@ final controlServerAutoStartProvider = Provider<void>((ref) {
   // Watch fingerprints only (not full listener data with FCM tokens)
   final trustedFingerprints = ref.watch(_trustedListenerFingerprintsProvider);
   final monitorSettings = ref.watch(monitorSettingsProvider);
+  final appSession = ref.watch(appSessionProvider);
 
   Future.microtask(() async {
     // Read full listener data only when actually starting the server
@@ -228,13 +298,15 @@ final controlServerAutoStartProvider = Provider<void>((ref) {
     if (!monitoringEnabled ||
         !identity.hasValue ||
         !trustedListeners.hasValue ||
-        !monitorSettings.hasValue) {
+        !monitorSettings.hasValue ||
+        !appSession.hasValue) {
       developer.log(
         'Server auto-start skipped '
         'monitoring=$monitoringEnabled '
         'identityReady=${identity.hasValue} '
         'trustedReady=${trustedListeners.hasValue} '
-        'settingsReady=${monitorSettings.hasValue}',
+        'settingsReady=${monitorSettings.hasValue} '
+        'sessionReady=${appSession.hasValue}',
         name: 'control_server',
       );
       await ref.read(pairingServerProvider.notifier).stop();
@@ -244,7 +316,7 @@ final controlServerAutoStartProvider = Provider<void>((ref) {
 
     final deviceIdentity = identity.requireValue;
     final peers = trustedListeners.requireValue;
-    final settings = monitorSettings.requireValue;
+    final session = appSession.requireValue;
 
     developer.log(
       'Server auto-start invoking '
@@ -257,7 +329,7 @@ final controlServerAutoStartProvider = Provider<void>((ref) {
     await ref.read(pairingServerProvider.notifier).start(
       identity: deviceIdentity,
       port: kPairingDefaultPort,
-      monitorName: settings.name,
+      monitorName: session.deviceName,
     );
 
     // Start control server (mTLS WebSocket, for trusted connections)
@@ -338,6 +410,7 @@ class AudioCaptureController extends Notifier<AudioCaptureState> {
   Future<void> start({
     required NoiseSettings settings,
     required NoiseEventSink onNoise,
+    MdnsAdvertisement? mdnsAdvertisement,
   }) async {
     if (_service != null) {
       developer.log(
@@ -374,6 +447,7 @@ class AudioCaptureController extends Notifier<AudioCaptureState> {
         settings: settings,
         onNoise: onNoise,
         onLevel: _onLevel,
+        mdnsAdvertisement: mdnsAdvertisement,
       );
     } else {
       developer.log(
@@ -437,10 +511,15 @@ final audioCaptureProvider =
     );
 
 /// Auto-starts audio capture when monitoring is enabled on the monitor role.
+/// On Android, this also handles mDNS advertising via the foreground service.
 final audioCaptureAutoStartProvider = Provider<void>((ref) {
   final role = ref.watch(roleProvider);
   final monitoringEnabled = ref.watch(monitoringStatusProvider);
   final monitorSettings = ref.watch(monitorSettingsProvider);
+
+  // Watch dependencies needed for mDNS advertisement (Android only)
+  final identity = ref.watch(identityProvider);
+  final appSession = ref.watch(appSessionProvider);
 
   Future.microtask(() async {
     // Only run audio capture on monitor devices
@@ -460,6 +539,26 @@ final audioCaptureAutoStartProvider = Provider<void>((ref) {
 
     final settings = monitorSettings.requireValue;
 
+    // Build mDNS advertisement for Android foreground service
+    MdnsAdvertisement? mdnsAd;
+    if (identity.hasValue && appSession.hasValue) {
+      final builder = ref.read(serviceIdentityProvider);
+      final controlState = ref.read(controlServerProvider);
+      final pairingState = ref.read(pairingServerProvider);
+      final controlPort = controlState.port ?? builder.defaultPort;
+      final pairingPort = pairingState.port ?? kPairingDefaultPort;
+      mdnsAd = builder.buildMdnsAdvertisement(
+        identity: identity.requireValue,
+        monitorName: appSession.requireValue.deviceName,
+        controlPort: controlPort,
+        pairingPort: pairingPort,
+      );
+      developer.log(
+        'Audio capture with mDNS: monitorId=${mdnsAd.monitorId} controlPort=$controlPort',
+        name: 'audio_capture',
+      );
+    }
+
     developer.log(
       'Audio capture auto-start: threshold=${settings.noise.threshold} '
       'minDuration=${settings.noise.minDurationMs}ms cooldown=${settings.noise.cooldownSeconds}s',
@@ -468,6 +567,7 @@ final audioCaptureAutoStartProvider = Provider<void>((ref) {
 
     await ref.read(audioCaptureProvider.notifier).start(
       settings: settings.noise,
+      mdnsAdvertisement: mdnsAd,
       onNoise: (event) {
         developer.log(
           'Noise detected: peak=${event.peakLevel} ts=${event.timestampMs}',
@@ -563,9 +663,15 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
     return repo.load();
   }
 
-  Future<void> addMonitor(MonitorQrPayload payload, {String? lastKnownIp}) async {
+  Future<void> addMonitor(
+    MonitorQrPayload payload, {
+    String? lastKnownIp,
+    List<int>? certificateDer,
+  }) async {
     final current = await _ensureValue();
     if (current.any((m) => m.monitorId == payload.monitorId)) return;
+    // Use first IP from QR payload as lastKnownIp if not explicitly provided
+    final effectiveLastKnownIp = lastKnownIp ?? payload.ips?.firstOrNull;
     final updated = [
       ...current,
       TrustedMonitor(
@@ -576,8 +682,10 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
         pairingPort: payload.service.pairingPort,
         serviceVersion: payload.service.version,
         transport: payload.service.transport,
-        lastKnownIp: lastKnownIp,
+        lastKnownIp: effectiveLastKnownIp,
+        knownIps: payload.ips,
         addedAtEpochSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        certificateDer: certificateDer,
       ),
     ];
     state = AsyncData(updated);
@@ -601,13 +709,8 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
     );
     if (index == -1) return;
     final existing = current[index];
-    if (existing.lastKnownIp == advertisement.ip &&
-        existing.controlPort == advertisement.controlPort &&
-        existing.pairingPort == advertisement.pairingPort &&
-        existing.transport == advertisement.transport &&
-        existing.serviceVersion == advertisement.version) {
-      return;
-    }
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    // Always update lastSeenEpochMs when we see the monitor via mDNS
     final updated = [...current];
     updated[index] = TrustedMonitor(
       monitorId: existing.monitorId,
@@ -615,6 +718,7 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
       certFingerprint: existing.certFingerprint,
       lastKnownIp: advertisement.ip ?? existing.lastKnownIp,
       lastNoiseEpochMs: existing.lastNoiseEpochMs,
+      lastSeenEpochMs: nowMs,
       controlPort: advertisement.controlPort,
       pairingPort: advertisement.pairingPort,
       serviceVersion: advertisement.version,
@@ -642,6 +746,7 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
       certFingerprint: existing.certFingerprint,
       lastKnownIp: existing.lastKnownIp,
       lastNoiseEpochMs: timestampMs,
+      lastSeenEpochMs: existing.lastSeenEpochMs,
       controlPort: existing.controlPort,
       pairingPort: existing.pairingPort,
       serviceVersion: existing.serviceVersion,
@@ -740,11 +845,32 @@ final discoveredMonitorsProvider = Provider<List<MdnsAdvertisement>>((ref) {
 });
 
 class IdentityController extends AsyncNotifier<DeviceIdentity> {
+  late final IdentityStore _store;
+
   @override
   Future<DeviceIdentity> build() async {
-    final store = IdentityStore.create();
-    final repo = IdentityRepository(store: store);
+    _store = IdentityStore.create();
+    final repo = IdentityRepository(store: _store);
     return repo.loadOrCreate();
+  }
+
+  /// Deletes the current identity and regenerates a new one.
+  /// WARNING: This will break all existing pairings - devices will need to re-pair.
+  Future<void> regenerate() async {
+    state = const AsyncLoading();
+    try {
+      // Delete stored identity
+      await _store.delete();
+
+      // Generate new identity
+      final repo = IdentityRepository(store: _store);
+      final newIdentity = await repo.loadOrCreate();
+
+      state = AsyncData(newIdentity);
+    } catch (e, st) {
+      state = AsyncError(e, st);
+      rethrow;
+    }
   }
 }
 

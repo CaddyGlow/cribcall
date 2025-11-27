@@ -420,6 +420,7 @@ class AndroidAudioCaptureService extends AudioCaptureService {
     super.frameSize,
     MethodChannel? methodChannel,
     EventChannel? eventChannel,
+    this.mdnsAdvertisement,
   }) : _method = methodChannel ?? const MethodChannel('cribcall/audio'),
        _events = eventChannel ?? const EventChannel('cribcall/audio_events');
 
@@ -429,6 +430,10 @@ class AndroidAudioCaptureService extends AudioCaptureService {
   final _buffer = BytesBuilder(copy: false);
   int _bytesPerFrame = 0;
   int _dataCount = 0;
+
+  /// Optional mDNS advertisement to pass to the foreground service.
+  /// On Android, the foreground service handles mDNS advertising.
+  final MdnsAdvertisement? mdnsAdvertisement;
 
   @override
   Future<void> start() async {
@@ -457,9 +462,19 @@ class AndroidAudioCaptureService extends AudioCaptureService {
     );
 
     try {
-      await _method.invokeMethod<void>('start');
+      // Pass mDNS params if available (for foreground service advertising)
+      final params = <String, dynamic>{};
+      if (mdnsAdvertisement != null) {
+        params['monitorId'] = mdnsAdvertisement!.monitorId;
+        params['monitorName'] = mdnsAdvertisement!.monitorName;
+        params['monitorCertFingerprint'] = mdnsAdvertisement!.monitorCertFingerprint;
+        params['controlPort'] = mdnsAdvertisement!.controlPort;
+        params['pairingPort'] = mdnsAdvertisement!.pairingPort;
+        params['version'] = mdnsAdvertisement!.version;
+      }
+      await _method.invokeMethod<void>('start', params.isNotEmpty ? params : null);
       developer.log(
-        'Started Android audio capture',
+        'Started Android audio capture${mdnsAdvertisement != null ? " with mDNS" : ""}',
         name: 'audio_capture',
       );
     } catch (e) {

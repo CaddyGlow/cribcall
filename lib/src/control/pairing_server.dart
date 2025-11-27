@@ -25,9 +25,16 @@ typedef PairingCompleteCallback = void Function(TrustedPeer peer);
 /// The UI should display this code for the user to verify it matches the listener.
 typedef PairingSessionCreatedCallback = void Function(
   String sessionId,
+  String listenerName,
   String comparisonCode,
   DateTime expiresAt,
 );
+
+/// Callback when a pairing session is rejected by the monitor user.
+typedef PairingSessionRejectedCallback = void Function(String sessionId);
+
+/// Callback when a pairing session is confirmed by the monitor user.
+typedef PairingSessionConfirmedCallback = void Function(String sessionId);
 
 /// TLS HTTP server for pairing only.
 /// Uses server-side TLS (client validates server fingerprint from QR/mDNS).
@@ -37,10 +44,14 @@ class PairingServer {
   PairingServer({
     required this.onPairingComplete,
     this.onSessionCreated,
+    this.onSessionRejected,
+    this.onSessionConfirmed,
   });
 
   final PairingCompleteCallback onPairingComplete;
   final PairingSessionCreatedCallback? onSessionCreated;
+  final PairingSessionRejectedCallback? onSessionRejected;
+  final PairingSessionConfirmedCallback? onSessionConfirmed;
 
   final List<HttpServer> _servers = [];
   int? _boundPort;
@@ -51,8 +62,37 @@ class PairingServer {
   /// Active pairing sessions, keyed by session ID.
   final Map<String, _PairingSession> _sessions = {};
 
+  /// One-time pairing token for QR code flow.
+  String? _activePairingToken;
+  DateTime? _tokenExpiresAt;
+
   int? get boundPort => _boundPort;
   String? get fingerprint => _identity?.certFingerprint;
+
+  /// Generate a new one-time pairing token for QR code flow.
+  /// Invalidates any previous token.
+  /// Returns base64url encoded 32-byte token.
+  String generatePairingToken() {
+    final random = Random.secure();
+    final bytes = List<int>.generate(32, (_) => random.nextInt(256));
+    _activePairingToken = base64Url.encode(bytes);
+    _tokenExpiresAt = DateTime.now().add(const Duration(minutes: 5));
+    _log('Generated new pairing token, expires at $_tokenExpiresAt');
+    return _activePairingToken!;
+  }
+
+  /// Invalidate the current pairing token.
+  void invalidateToken() {
+    _activePairingToken = null;
+    _tokenExpiresAt = null;
+    _log('Pairing token invalidated');
+  }
+
+  /// Check if a token is currently valid.
+  bool get hasValidToken =>
+      _activePairingToken != null &&
+      _tokenExpiresAt != null &&
+      DateTime.now().isBefore(_tokenExpiresAt!);
 
   Future<void> start({
     required int port,
@@ -121,6 +161,44 @@ class PairingServer {
     _log('Pairing server stopped');
   }
 
+  /// Monitor user confirms the pairing request.
+  /// This must be called before the listener's /pair/confirm request will succeed.
+  bool confirmSession(String sessionId) {
+    final session = _sessions[sessionId];
+    if (session == null) {
+      _log('Cannot confirm unknown session=$sessionId');
+      return false;
+    }
+    if (DateTime.now().isAfter(session.expiresAt)) {
+      _sessions.remove(sessionId);
+      _log('Cannot confirm expired session=$sessionId');
+      return false;
+    }
+    if (session.monitorRejected) {
+      _log('Cannot confirm already rejected session=$sessionId');
+      return false;
+    }
+    session.monitorConfirmed = true;
+    _log('Monitor confirmed session=$sessionId');
+    onSessionConfirmed?.call(sessionId);
+    return true;
+  }
+
+  /// Monitor user rejects the pairing request.
+  bool rejectSession(String sessionId) {
+    final session = _sessions[sessionId];
+    if (session == null) {
+      _log('Cannot reject unknown session=$sessionId');
+      return false;
+    }
+    session.monitorRejected = true;
+    _log('Monitor rejected session=$sessionId');
+    onSessionRejected?.call(sessionId);
+    // Remove the session so listener gets "Session not found" on confirm
+    _sessions.remove(sessionId);
+    return true;
+  }
+
   Future<void> _handleRequest(HttpRequest request) async {
     final remoteIp = request.connectionInfo?.remoteAddress.address ?? 'unknown';
     final remotePort = request.connectionInfo?.remotePort ?? 0;
@@ -140,6 +218,12 @@ class PairingServer {
         case '/pair/confirm':
           if (request.method == 'POST') {
             await _handlePairConfirm(request);
+            return;
+          }
+          break;
+        case '/pair/token':
+          if (request.method == 'POST') {
+            await _handlePairToken(request);
             return;
           }
           break;
@@ -242,7 +326,12 @@ class PairingServer {
     );
 
     // Notify UI to display comparison code
-    onSessionCreated?.call(sessionId, comparisonCode, expiresAt);
+    onSessionCreated?.call(
+      sessionId,
+      initRequest.listenerName,
+      comparisonCode,
+      expiresAt,
+    );
 
     final response = PairInitResponse(
       pairingSessionId: sessionId,
@@ -296,6 +385,13 @@ class PairingServer {
       return;
     }
 
+    // Return pending if monitor user hasn't confirmed yet (listener will poll)
+    if (!session.monitorConfirmed) {
+      _log('Pair confirm pending: monitor has not confirmed session=${session.sessionId}');
+      _sendConfirmResponse(request, PairConfirmResponse.pending());
+      return;
+    }
+
     // Validate auth tag using pre-computed pairing key
     final valid = await _validateAuthTag(session, confirmRequest);
     if (!valid) {
@@ -332,6 +428,93 @@ class PairingServer {
     );
 
     _sendConfirmResponse(request, response);
+  }
+
+  /// Handle POST /pair/token - QR code token-based pairing.
+  /// If the token is valid, pairing completes immediately without user confirmation.
+  Future<void> _handlePairToken(HttpRequest request) async {
+    final bodyStr = await utf8.decodeStream(request);
+    final Map<String, dynamic> body;
+    try {
+      body = jsonDecode(bodyStr) as Map<String, dynamic>;
+    } catch (e) {
+      _sendError(request, HttpStatus.badRequest, 'invalid_json', 'Invalid JSON body');
+      return;
+    }
+
+    final PairTokenRequest tokenRequest;
+    try {
+      tokenRequest = PairTokenRequest.fromJson(body);
+    } catch (e) {
+      _sendError(request, HttpStatus.badRequest, 'invalid_request', 'Invalid request format: $e');
+      return;
+    }
+
+    _log(
+      'Pair token from listener=${tokenRequest.listenerId} '
+      'name=${tokenRequest.listenerName} '
+      'fingerprint=${_shortFingerprint(tokenRequest.listenerCertFingerprint)}',
+    );
+
+    // Validate token
+    if (_activePairingToken == null || _tokenExpiresAt == null) {
+      _log('Pair token rejected: no active token');
+      _sendTokenResponse(request, PairTokenResponse.rejected('No active pairing token'));
+      return;
+    }
+
+    if (DateTime.now().isAfter(_tokenExpiresAt!)) {
+      _activePairingToken = null;
+      _tokenExpiresAt = null;
+      _log('Pair token rejected: token expired');
+      _sendTokenResponse(request, PairTokenResponse.rejected('Pairing token expired'));
+      return;
+    }
+
+    if (tokenRequest.pairingToken != _activePairingToken) {
+      _log('Pair token rejected: invalid token');
+      _sendTokenResponse(request, PairTokenResponse.rejected('Invalid pairing token'));
+      return;
+    }
+
+    // Token valid - immediately invalidate (single use)
+    _activePairingToken = null;
+    _tokenExpiresAt = null;
+
+    // Pairing successful
+    _log(
+      'Token pairing successful listener=${tokenRequest.listenerId} '
+      'name=${tokenRequest.listenerName}',
+    );
+
+    final peer = TrustedPeer(
+      deviceId: tokenRequest.listenerId,
+      name: tokenRequest.listenerName,
+      certFingerprint: tokenRequest.listenerCertFingerprint,
+      addedAtEpochSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      certificateDer: tokenRequest.listenerCertificateDer,
+    );
+
+    // Notify callback
+    onPairingComplete(peer);
+
+    // Send success response with monitor's certificate
+    final response = PairTokenResponse.accepted(
+      monitorId: _identity!.deviceId,
+      monitorName: _monitorName!,
+      monitorCertFingerprint: _identity!.certFingerprint,
+      monitorCertificateDer: _identity!.certificateDer,
+    );
+
+    _sendTokenResponse(request, response);
+  }
+
+  void _sendTokenResponse(HttpRequest request, PairTokenResponse response) {
+    request.response
+      ..statusCode = HttpStatus.ok
+      ..headers.contentType = ContentType.json
+      ..write(response.toJsonString());
+    request.response.close();
   }
 
   Future<bool> _validateAuthTag(
@@ -409,6 +592,12 @@ class _PairingSession {
   /// Derived key for auth tag verification
   final List<int> pairingKey;
   final DateTime expiresAt;
+
+  /// Whether the monitor user has confirmed this pairing request.
+  bool monitorConfirmed = false;
+
+  /// Whether the monitor user has rejected this pairing request.
+  bool monitorRejected = false;
 }
 
 Future<SecurityContext> _buildSecurityContext(DeviceIdentity identity) async {

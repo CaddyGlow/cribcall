@@ -26,6 +26,7 @@ class _ListenerScanQrPageState extends ConsumerState<ListenerScanQrPage> {
   String? _scannerError;
   bool _scannerLocked = false;
   bool _startingScanner = false;
+  bool _tokenPairingInProgress = false;
 
   void _handleCapture(BarcodeCapture capture) {
     if (_scannerLocked) return;
@@ -45,13 +46,60 @@ class _ListenerScanQrPageState extends ConsumerState<ListenerScanQrPage> {
         _payloadError = null;
         if (lockScanner) _scannerLocked = true;
       });
-      ref.read(trustedMonitorsProvider.notifier).addMonitor(payload);
+
+      // Check if payload has a token for auto-pairing
+      if (payload.hasToken) {
+        _performTokenPairing(payload);
+      } else {
+        // Legacy flow - just add monitor (will need PIN pairing later)
+        ref.read(trustedMonitorsProvider.notifier).addMonitor(payload);
+      }
       return true;
     } catch (e) {
       setState(() {
         _payloadError = 'Invalid QR payload: $e';
       });
       return false;
+    }
+  }
+
+  /// Perform token-based pairing (auto-pairing from QR code).
+  Future<void> _performTokenPairing(MonitorQrPayload payload) async {
+    final identity = ref.read(identityProvider).asData?.value;
+    final appSession = ref.read(appSessionProvider).asData?.value;
+
+    if (identity == null || appSession == null) {
+      setState(() {
+        _payloadError = 'Identity not ready. Please try again.';
+        _scannerLocked = false;
+      });
+      return;
+    }
+
+    setState(() {
+      _tokenPairingInProgress = true;
+      _payloadError = null;
+    });
+
+    final error = await ref.read(pairingSessionProvider.notifier).pairWithToken(
+      payload: payload,
+      listenerIdentity: identity,
+      listenerName: appSession.deviceName,
+    );
+
+    if (!mounted) return;
+
+    if (error != null) {
+      setState(() {
+        _payloadError = error;
+        _tokenPairingInProgress = false;
+        _scannerLocked = false;
+      });
+    } else {
+      // Success - navigate back with the payload
+      if (mounted) {
+        Navigator.of(context).pop(payload);
+      }
     }
   }
 
@@ -128,11 +176,18 @@ class _ListenerScanQrPageState extends ConsumerState<ListenerScanQrPage> {
                     onDetect: _handleCapture,
                   ),
           ),
-          if (_payload != null)
+          if (_tokenPairingInProgress)
+            _PairingProgressCard(
+              title: _payload?.monitorName ?? 'Monitor',
+              fingerprint: _payload?.monitorCertFingerprint ?? '',
+            )
+          else if (_payload != null)
             _ResultCard(
               title: _payload!.monitorName,
               fingerprint: _payload!.monitorCertFingerprint,
               monitorId: _payload!.monitorId,
+              ips: _payload!.ips,
+              hasToken: _payload!.hasToken,
               onUse: () => Navigator.of(context).pop(_payload),
             )
           else if (_payloadError != null)
@@ -209,12 +264,88 @@ class _ResultCard extends StatelessWidget {
     required this.fingerprint,
     required this.monitorId,
     required this.onUse,
+    this.ips,
+    this.hasToken = false,
   });
 
   final String title;
   final String fingerprint;
   final String monitorId;
+  final List<String>? ips;
+  final bool hasToken;
   final VoidCallback onUse;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: const BorderRadius.only(
+          topLeft: Radius.circular(16),
+          topRight: Radius.circular(16),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.08),
+            blurRadius: 10,
+            offset: const Offset(0, -2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  title,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+                ),
+              ),
+              if (hasToken)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: AppColors.success.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    'Paired',
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: AppColors.success,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text('Monitor ID: $monitorId'),
+          Text('Fingerprint: ${fingerprint.substring(0, 12)}'),
+          if (ips != null && ips!.isNotEmpty)
+            Text('IPs: ${ips!.join(', ')}'),
+          const SizedBox(height: 10),
+          FilledButton(onPressed: onUse, child: const Text('Use this monitor')),
+        ],
+      ),
+    );
+  }
+}
+
+class _PairingProgressCard extends StatelessWidget {
+  const _PairingProgressCard({
+    required this.title,
+    required this.fingerprint,
+  });
+
+  final String title;
+  final String fingerprint;
 
   @override
   Widget build(BuildContext context) {
@@ -246,10 +377,23 @@ class _ResultCard extends StatelessWidget {
             ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
           ),
           const SizedBox(height: 6),
-          Text('Monitor ID: $monitorId'),
-          Text('Fingerprint: ${fingerprint.substring(0, 12)}'),
-          const SizedBox(height: 10),
-          FilledButton(onPressed: onUse, child: const Text('Use this monitor')),
+          if (fingerprint.isNotEmpty)
+            Text('Fingerprint: ${fingerprint.substring(0, 12)}'),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              const SizedBox(width: 12),
+              Text(
+                'Pairing with monitor...',
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+            ],
+          ),
         ],
       ),
     );
