@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -65,13 +66,39 @@ class SecureIdentityStore implements IdentityStore {
 
   @override
   Future<Map<String, dynamic>?> read() async {
-    final value = await _storage.read(key: _key);
-    if (value == null) return null;
-    return jsonDecode(value) as Map<String, dynamic>;
+    debugPrint('[identity_store] SecureIdentityStore.read() starting');
+    try {
+      final value = await _storage.read(key: _key).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {
+          debugPrint('[identity_store] SecureIdentityStore.read() TIMEOUT');
+          return null;
+        },
+      );
+      debugPrint('[identity_store] SecureIdentityStore.read() completed: ${value != null ? 'found' : 'null'}');
+      if (value == null) return null;
+      return jsonDecode(value) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[identity_store] SecureIdentityStore.read() error: $e');
+      rethrow;
+    }
   }
 
   @override
   Future<void> write(Map<String, dynamic> data) async {
-    await _storage.write(key: _key, value: jsonEncode(data));
+    debugPrint('[identity_store] SecureIdentityStore.write() starting');
+    try {
+      await _storage.write(key: _key, value: jsonEncode(data)).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {
+          debugPrint('[identity_store] SecureIdentityStore.write() TIMEOUT');
+          throw TimeoutException('SecureStorage write timeout');
+        },
+      );
+      debugPrint('[identity_store] SecureIdentityStore.write() completed');
+    } catch (e) {
+      debugPrint('[identity_store] SecureIdentityStore.write() error: $e');
+      rethrow;
+    }
   }
 }

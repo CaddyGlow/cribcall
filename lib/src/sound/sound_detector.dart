@@ -51,7 +51,15 @@ class SoundDetector {
   int _levelFromSamples(List<double> samples) {
     final sumSq = samples.fold<double>(0, (acc, s) => acc + s * s);
     final rms = sqrt(sumSq / samples.length);
-    final level = (rms * 100).clamp(0, 100);
+
+    // Convert to dB scale for more useful level values.
+    // RMS of 1.0 (max) -> 0 dB, typical speech ~0.05-0.1 -> -26 to -20 dB
+    // Map -60 dB to 0 and 0 dB to 100.
+    if (rms < 1e-10) return 0; // Silence
+    final db = 20 * log(rms) / ln10;
+    // db ranges from ~-60 (silence) to 0 (max)
+    // Map to 0-100 scale: level = (db + 60) * 100 / 60
+    final level = ((db + 60) * 100 / 60).clamp(0, 100);
     return level.round();
   }
 

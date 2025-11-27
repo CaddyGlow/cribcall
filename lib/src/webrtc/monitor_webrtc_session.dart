@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:developer' as developer;
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -12,14 +14,21 @@ typedef OnIceCandidate = void Function(Map<String, dynamic> candidate);
 /// Callback when connection state changes.
 typedef OnConnectionState = void Function(RTCPeerConnectionState state);
 
+/// Callback to provide audio data for streaming.
+typedef AudioDataProvider = Stream<Uint8List> Function();
+
 /// WebRTC session for streaming audio/video from monitor to listener.
 /// This is the Monitor-side implementation (creates offer, captures local media).
+///
+/// On Android, uses data channel to stream audio from the foreground service
+/// instead of getUserMedia to avoid mic conflicts.
 class MonitorWebRtcSession {
   MonitorWebRtcSession({
     required this.sessionId,
     required this.onIceCandidate,
     this.onConnectionState,
     this.mediaType = 'audio',
+    this.audioDataProvider,
     WebRtcConfig? config,
   }) : _config = config ?? const WebRtcConfig();
 
@@ -29,8 +38,13 @@ class MonitorWebRtcSession {
   final String mediaType;
   final WebRtcConfig _config;
 
+  /// Provider for audio data (used on Android to get data from AudioCaptureService).
+  final AudioDataProvider? audioDataProvider;
+
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
+  RTCDataChannel? _audioDataChannel;
+  StreamSubscription<Uint8List>? _audioSubscription;
   bool _disposed = false;
 
   /// Whether this session has been disposed.
@@ -39,11 +53,14 @@ class MonitorWebRtcSession {
   /// Current local stream (if any).
   MediaStream? get localStream => _localStream;
 
+  /// Whether using data channel for audio (Android).
+  bool get usesDataChannelAudio => !kIsWeb && Platform.isAndroid && audioDataProvider != null;
+
   /// Initialize the peer connection and capture local media.
   Future<void> initialize() async {
     if (_disposed) return;
 
-    _log('Initializing monitor WebRTC session');
+    _log('Initializing monitor WebRTC session (dataChannel=$usesDataChannelAudio)');
 
     final configuration = {
       'iceServers': _config.iceServers.isEmpty
@@ -73,12 +90,72 @@ class MonitorWebRtcSession {
     _peerConnection!.onConnectionState = (state) {
       _log('Connection state: $state');
       onConnectionState?.call(state);
+
+      // Start sending audio data when connected (for data channel mode)
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected &&
+          usesDataChannelAudio) {
+        _startAudioDataStream();
+      }
     };
 
-    // Capture local media
-    await _captureLocalMedia();
+    // On Android with audio provider, use data channel instead of getUserMedia
+    if (usesDataChannelAudio) {
+      await _createAudioDataChannel();
+    } else {
+      // Capture local media using getUserMedia (non-Android or no provider)
+      await _captureLocalMedia();
+    }
 
     _log('Monitor WebRTC session initialized');
+  }
+
+  /// Create a data channel for streaming audio (Android).
+  Future<void> _createAudioDataChannel() async {
+    _log('Creating audio data channel');
+
+    final channelInit = RTCDataChannelInit()
+      ..ordered = true
+      ..maxRetransmits = 0; // Unreliable for low latency
+
+    _audioDataChannel = await _peerConnection!.createDataChannel(
+      'audio',
+      channelInit,
+    );
+
+    _audioDataChannel!.onDataChannelState = (state) {
+      _log('Audio data channel state: $state');
+    };
+
+    _log('Audio data channel created');
+  }
+
+  /// Start streaming audio data through the data channel.
+  void _startAudioDataStream() {
+    if (_audioDataChannel == null || audioDataProvider == null) {
+      _log('Cannot start audio stream: channel=${_audioDataChannel != null}, provider=${audioDataProvider != null}');
+      return;
+    }
+
+    _log('Starting audio data stream');
+
+    int packetCount = 0;
+    _audioSubscription?.cancel();
+    _audioSubscription = audioDataProvider!().listen(
+      (data) {
+        if (_disposed || _audioDataChannel == null) return;
+        try {
+          _audioDataChannel!.send(RTCDataChannelMessage.fromBinary(data));
+          packetCount++;
+          if (packetCount == 1 || packetCount % 100 == 0) {
+            _log('Sent audio packet #$packetCount (${data.length} bytes)');
+          }
+        } catch (e) {
+          _log('Error sending audio data: $e');
+        }
+      },
+      onError: (e) => _log('Audio data stream error: $e'),
+      onDone: () => _log('Audio data stream ended (sent $packetCount packets)'),
+    );
   }
 
   Future<void> _captureLocalMedia() async {
@@ -163,6 +240,18 @@ class MonitorWebRtcSession {
     _disposed = true;
 
     _log('Disposing monitor WebRTC session');
+
+    // Stop audio data subscription
+    await _audioSubscription?.cancel();
+    _audioSubscription = null;
+
+    // Close audio data channel
+    try {
+      await _audioDataChannel?.close();
+    } catch (e) {
+      _log('Error closing audio data channel: $e');
+    }
+    _audioDataChannel = null;
 
     try {
       // Stop all tracks

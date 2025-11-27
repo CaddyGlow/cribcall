@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:developer' as developer;
+import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../foundation/foundation_stub.dart'
@@ -319,6 +320,10 @@ class AudioCaptureController extends Notifier<AudioCaptureState> {
   /// Whether the debug audio capture service is being used.
   bool get isDebugCapture => _service is DebugAudioCaptureService;
 
+  /// Raw audio data stream for WebRTC streaming.
+  /// Returns null if audio capture is not running.
+  Stream<Uint8List>? get rawAudioStream => _service?.rawAudioStream;
+
   void _onLevel(int level) {
     _levelBuffer.add(level);
     if (_levelBuffer.length > kLevelHistorySize) {
@@ -558,7 +563,7 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
     return repo.load();
   }
 
-  Future<void> addMonitor(MonitorQrPayload payload) async {
+  Future<void> addMonitor(MonitorQrPayload payload, {String? lastKnownIp}) async {
     final current = await _ensureValue();
     if (current.any((m) => m.monitorId == payload.monitorId)) return;
     final updated = [
@@ -571,6 +576,7 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
         pairingPort: payload.service.pairingPort,
         serviceVersion: payload.service.version,
         transport: payload.service.transport,
+        lastKnownIp: lastKnownIp,
         addedAtEpochSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
       ),
     ];

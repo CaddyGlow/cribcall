@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../domain/models.dart';
+import '../../pairing/pin_pairing_controller.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
 
@@ -31,10 +32,13 @@ class _ListenerPinPageState extends ConsumerState<ListenerPinPage> {
   String? _status;
   bool _connecting = false;
   bool _confirming = false;
+  // Save notifier reference for safe disposal (ref.read is unsafe in dispose)
+  PairingController? _pairingNotifier;
 
   @override
   void initState() {
     super.initState();
+    _pairingNotifier = ref.read(pairingSessionProvider.notifier);
     _logPairingPage(
       'Pairing page opened for monitor=${widget.advertisement.monitorId} '
       'name=${widget.advertisement.monitorName} '
@@ -137,7 +141,7 @@ class _ListenerPinPageState extends ConsumerState<ListenerPinPage> {
   @override
   void dispose() {
     _logPairingPage('Pairing page disposed');
-    ref.read(pairingSessionProvider.notifier).closeConnection();
+    _pairingNotifier?.closeConnection();
     super.dispose();
   }
 

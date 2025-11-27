@@ -32,6 +32,7 @@ class AudioCaptureService : Service() {
 
     // Callback for sending audio data to Flutter
     var onAudioData: ((ByteArray) -> Unit)? = null
+    private var packetCount = 0
 
     companion object {
         const val CHANNEL_ID = "cribcall_monitoring"
@@ -203,6 +204,10 @@ class AudioCaptureService : Service() {
                     val bytes = byteBuffer.array()
 
                     handler.post {
+                        packetCount++
+                        if (packetCount == 1 || packetCount % 100 == 0) {
+                            Log.i(logTag, "Audio packet #$packetCount (${bytes.size} bytes), callback=${onAudioData != null}")
+                        }
                         onAudioData?.invoke(bytes)
                     }
                 } else if (readResult < 0) {

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:developer' as developer;
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -61,6 +62,13 @@ class StreamingController extends Notifier<StreamingState> {
   /// Stream of remote media stream updates.
   final _remoteStreamController = StreamController<MediaStream?>.broadcast();
   Stream<MediaStream?> get remoteStreamUpdates => _remoteStreamController.stream;
+
+  /// Stream of audio data received via data channel (for Android monitors).
+  final _audioDataController = StreamController<Uint8List>.broadcast();
+  Stream<Uint8List> get audioDataStream => _audioDataController.stream;
+
+  /// Whether receiving audio via data channel (instead of media track).
+  bool get usesDataChannelAudio => _session?.usesDataChannelAudio ?? false;
 
   @override
   StreamingState build() {
@@ -131,6 +139,7 @@ class StreamingController extends Notifier<StreamingState> {
         onIceCandidate: _sendIceCandidate,
         onRemoteStream: _onRemoteStream,
         onConnectionState: _onConnectionState,
+        onAudioData: _onAudioData,
       );
 
       await _session!.initialize();
@@ -191,6 +200,18 @@ class StreamingController extends Notifier<StreamingState> {
     _remoteStream = stream;
     _remoteStreamController.add(stream);
     state = state.copyWith(status: StreamingStatus.connected);
+  }
+
+  int _audioDataCount = 0;
+
+  void _onAudioData(Uint8List data) {
+    _audioDataCount++;
+    if (_audioDataCount == 1 || _audioDataCount % 100 == 0) {
+      _log('_onAudioData #$_audioDataCount (${data.length} bytes, hasListeners=${_audioDataController.hasListener})');
+    }
+    if (!_audioDataController.isClosed) {
+      _audioDataController.add(data);
+    }
   }
 
   void _onConnectionState(RTCPeerConnectionState connectionState) {
@@ -283,6 +304,7 @@ class StreamingController extends Notifier<StreamingState> {
     _signalingSubscription = null;
     _closeSession();
     await _remoteStreamController.close();
+    await _audioDataController.close();
   }
 
   void _log(String message) {

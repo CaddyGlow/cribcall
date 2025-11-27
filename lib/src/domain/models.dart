@@ -10,7 +10,7 @@ enum ListenerDefaultAction { notify, autoOpenStream }
 
 class NoiseSettings {
   static const defaults = NoiseSettings(
-    threshold: 60,
+    threshold: 50,
     minDurationMs: 800,
     cooldownSeconds: 8,
   );

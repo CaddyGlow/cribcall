@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:developer' as developer;
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -15,6 +16,9 @@ typedef OnRemoteStream = void Function(MediaStream stream);
 /// Callback when connection state changes.
 typedef OnConnectionState = void Function(RTCPeerConnectionState state);
 
+/// Callback when audio data is received via data channel.
+typedef OnAudioData = void Function(Uint8List data);
+
 /// WebRTC session for receiving audio/video stream from monitor.
 /// This is the Listener-side implementation.
 class WebRtcSession {
@@ -23,6 +27,7 @@ class WebRtcSession {
     required this.onIceCandidate,
     required this.onRemoteStream,
     this.onConnectionState,
+    this.onAudioData,
     WebRtcConfig? config,
   }) : _config = config ?? const WebRtcConfig();
 
@@ -30,10 +35,12 @@ class WebRtcSession {
   final OnIceCandidate onIceCandidate;
   final OnRemoteStream onRemoteStream;
   final OnConnectionState? onConnectionState;
+  final OnAudioData? onAudioData;
   final WebRtcConfig _config;
 
   RTCPeerConnection? _peerConnection;
   MediaStream? _remoteStream;
+  RTCDataChannel? _audioDataChannel;
   bool _disposed = false;
 
   /// Whether this session has been disposed.
@@ -41,6 +48,9 @@ class WebRtcSession {
 
   /// Current remote stream (if any).
   MediaStream? get remoteStream => _remoteStream;
+
+  /// Whether receiving audio via data channel (instead of media track).
+  bool get usesDataChannelAudio => _audioDataChannel != null;
 
   /// Initialize the peer connection.
   Future<void> initialize() async {
@@ -92,7 +102,44 @@ class WebRtcSession {
       onRemoteStream(stream);
     };
 
+    // Handle incoming data channel (for Android audio streaming)
+    _peerConnection!.onDataChannel = (channel) {
+      _log('Data channel received: ${channel.label}');
+      if (channel.label == 'audio') {
+        _audioDataChannel = channel;
+        _setupAudioDataChannel();
+      }
+    };
+
     _log('WebRTC session initialized');
+  }
+
+  int _receivedPackets = 0;
+
+  /// Set up audio data channel message handling.
+  void _setupAudioDataChannel() {
+    if (_audioDataChannel == null) return;
+
+    _audioDataChannel!.onDataChannelState = (state) {
+      _log('Audio data channel state: $state');
+    };
+
+    _audioDataChannel!.onMessage = (message) {
+      if (_disposed) return;
+      if (message.isBinary) {
+        _receivedPackets++;
+        if (_receivedPackets == 1 || _receivedPackets % 100 == 0) {
+          _log('Received audio packet #$_receivedPackets (${message.binary.length} bytes), onAudioData=${onAudioData != null}');
+        }
+        if (onAudioData != null) {
+          onAudioData!(message.binary);
+        } else if (_receivedPackets == 1) {
+          _log('WARNING: onAudioData callback is null, audio will not be forwarded');
+        }
+      }
+    };
+
+    _log('Audio data channel set up');
   }
 
   /// Handle incoming SDP offer from monitor.
@@ -136,6 +183,14 @@ class WebRtcSession {
     _disposed = true;
 
     _log('Disposing WebRTC session');
+
+    // Close audio data channel
+    try {
+      await _audioDataChannel?.close();
+    } catch (e) {
+      _log('Error closing audio data channel: $e');
+    }
+    _audioDataChannel = null;
 
     try {
       await _remoteStream?.dispose();

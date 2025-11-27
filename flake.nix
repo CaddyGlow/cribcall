@@ -18,26 +18,58 @@
       let
         pkgs = import nixpkgs {
           inherit system;
-          config.allowUnfree = true;
-          config.android_sdk.accept_license = true;
+          config = {
+            android_sdk.accept_license = true;
+            allowUnfree = true;
+          };
         };
-        flutter = pkgs.flutter;
+
         androidComposition = pkgs.androidenv.composeAndroidPackages {
           cmdLineToolsVersion = "11.0";
-          platformToolsVersion = "36.0.2";
-          buildToolsVersions = [ "36.0.0" ];
-          platformVersions = [ "34" ];
+          buildToolsVersions = [
+            "28.0.3"
+            "30.0.3"
+            "35.0.0"
+          ];
+          platformVersions = [
+            "28"
+            "29"
+            "30"
+            "31"
+            "32"
+            "33"
+            "34"
+            "35"
+            "36"
+          ];
+          includeNDK = true;
+          ndkVersions = [ "28.2.13676358" ];
+          cmakeVersions = [ "3.22.1" ];
+          abiVersions = [
+            # "armeabi-v7a"
+            # "arm64-v8a"
+            # "x86"
+            "x86_64"
+          ];
           includeEmulator = true;
-          emulatorVersion = "36.4.1";
           includeSystemImages = true;
           systemImageTypes = [ "google_apis_playstore" ];
-          abiVersions = [ "x86_64" ];
-          includeNDK = true;
-          ndkVersions = [ "26.1.10909125" ];
+          extraLicenses = [
+            "android-googletv-license"
+            "android-sdk-arm-dbt-license"
+            "android-sdk-license"
+            "android-sdk-preview-license"
+            "google-gdk-license"
+            "intel-android-extra-license"
+            "intel-android-sysimage-license"
+            "mips-android-sysimage-license"
+          ];
         };
         androidSdk = androidComposition.androidsdk;
+
         rustToolchain = builtins.fromTOML (builtins.readFile (self + "/rust-toolchain.toml"));
         rustcChannel = rustToolchain.toolchain.channel;
+
         libPath = pkgs.lib.makeLibraryPath [
           pkgs.alsa-lib
           pkgs.pulseaudio
@@ -48,11 +80,14 @@
           pkgs.libdrm
           pkgs.libgbm
         ];
+
         bindgenIncludePath = [
           ''-I"${pkgs.llvmPackages_latest.libclang.lib}/lib/clang/${pkgs.llvmPackages_latest.libclang.version}/include"''
           ''-I"${pkgs.glib.dev}/include/glib-2.0"''
           ''-I${pkgs.glib.out}/lib/glib-2.0/include/''
         ];
+
+        flutter = pkgs.flutter;
       in
       {
         devShells.default = pkgs.mkShell rec {
@@ -63,24 +98,24 @@
           ];
 
           buildInputs = [
-            pkgs.openssl
-            flutter
-            pkgs.dart
             androidSdk
-            pkgs.openjdk
-            pkgs.clang
-            pkgs.llvmPackages.bintools
-            pkgs.rustup
-            pkgs.protobuf
-            pkgs.sysprof
+            flutter
             pkgs.alsa-lib
-            pkgs.pulseaudio
+            pkgs.clang
+            pkgs.dart
             pkgs.glib
             pkgs.gtk3
-            pkgs.libsecret
-            pkgs.libGL
             pkgs.libdrm
             pkgs.libgbm
+            pkgs.libGL
+            pkgs.libsecret
+            pkgs.llvmPackages.bintools
+            pkgs.openjdk
+            pkgs.openssl
+            pkgs.protobuf
+            pkgs.pulseaudio
+            pkgs.rustup
+            pkgs.sysprof
           ];
 
           RUSTC_VERSION = rustcChannel;
@@ -109,7 +144,7 @@
             export ANDROID_SDK_ROOT="${androidSdk}/libexec/android-sdk"
             export ANDROID_HOME=$ANDROID_SDK_ROOT
             export ANDROID_AVD_HOME="$HOME/.config/.android/avd"
-            export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/26.1.10909125"
+            export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/28.2.13676358"
             export ANDROID_NDK_ROOT=$ANDROID_NDK_HOME
             echo "CribCall dev shell ready (Flutter, Dart, rustup-managed Rust, Android SDK)."
           '';

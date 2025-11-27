@@ -29,7 +29,6 @@ class MonitorDashboard extends ConsumerStatefulWidget {
 class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
   MdnsAdvertisement? _currentAdvertisement;
   bool _advertising = false;
-  bool _listenersAttached = false;
   late final MdnsService _mdnsService;
 
   @override
@@ -49,6 +48,18 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
     final monitoringEnabled = ref.read(monitoringStatusProvider);
     final identity = ref.read(identityProvider);
     final settings = ref.read(monitorSettingsProvider);
+    _logMonitorDashboard(
+      '_refreshAdvertisement: monitoringEnabled=$monitoringEnabled '
+      'identity.hasValue=${identity.hasValue} identity.hasError=${identity.hasError} '
+      'identity.isLoading=${identity.isLoading} '
+      'settings.hasValue=${settings.hasValue} settings.hasError=${settings.hasError}',
+    );
+    if (identity.hasError) {
+      _logMonitorDashboard('Identity error: ${identity.error}');
+    }
+    if (settings.hasError) {
+      _logMonitorDashboard('Settings error: ${settings.error}');
+    }
     if (!monitoringEnabled || !identity.hasValue || !settings.hasValue) {
       await _stopAdvertising();
       return;
@@ -74,10 +85,13 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
 
     await _stopAdvertising();
     try {
+      _logMonitorDashboard('Calling startAdvertise for ${nextAd.monitorId}');
       await _mdnsService.startAdvertise(nextAd);
       _currentAdvertisement = nextAd;
       _advertising = true;
-    } catch (_){ 
+      _logMonitorDashboard('startAdvertise succeeded');
+    } catch (e) {
+      _logMonitorDashboard('startAdvertise failed: $e');
       // Ignore failures; listener will still show pinned monitors from storage.
     }
   }
@@ -106,21 +120,27 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
     // Trigger audio capture auto-start when monitoring is enabled.
     ref.watch(audioCaptureAutoStartProvider);
 
-    if (!_listenersAttached) {
-      _listenersAttached = true;
-      ref.listen<AsyncValue<DeviceIdentity>>(identityProvider, (_, __) {
-        _refreshAdvertisement();
-      });
-      ref.listen<AsyncValue<MonitorSettings>>(monitorSettingsProvider, (_, __) {
-        _refreshAdvertisement();
-      });
-      ref.listen<bool>(monitoringStatusProvider, (_, __) {
-        _refreshAdvertisement();
-      });
-      ref.listen<AsyncValue<List<TrustedPeer>>>(
-        trustedListenersProvider,
-        (_, __) {},
-      );
+    // Watch providers that affect mDNS advertisement - this triggers rebuild when they change
+    final identityForAd = ref.watch(identityProvider);
+    final settingsForAd = ref.watch(monitorSettingsProvider);
+    final monitoringForAd = ref.watch(monitoringStatusProvider);
+
+    // Refresh advertisement when any of these change
+    ref.listen<AsyncValue<DeviceIdentity>>(identityProvider, (prev, next) {
+      _logMonitorDashboard('identityProvider changed: ${prev?.hasValue}->${next.hasValue}');
+      _refreshAdvertisement();
+    });
+    ref.listen<AsyncValue<MonitorSettings>>(monitorSettingsProvider, (prev, next) {
+      _logMonitorDashboard('monitorSettingsProvider changed: ${prev?.hasValue}->${next.hasValue}');
+      _refreshAdvertisement();
+    });
+    ref.listen<bool>(monitoringStatusProvider, (prev, next) {
+      _logMonitorDashboard('monitoringStatusProvider changed: $prev->$next');
+      _refreshAdvertisement();
+    });
+
+    // Schedule advertisement refresh after build if conditions are met
+    if (identityForAd.hasValue && settingsForAd.hasValue && monitoringForAd && !_advertising) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _refreshAdvertisement();
       });
@@ -181,12 +201,12 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
             const SizedBox(height: 8),
             _SettingsSlider(
               label: 'Noise threshold',
-              helper: 'Higher = less sensitive. Persisted locally.',
+              helper: 'Higher = less sensitive. Level uses dB scale (50 = -30dB).',
               value: settings.noise.threshold.toDouble(),
-              min: 0,
-              max: 100,
-              divisions: 20,
-              displayValue: '${settings.noise.threshold}',
+              min: 20,
+              max: 80,
+              divisions: 12,
+              displayValue: '${settings.noise.threshold} (${_thresholdToDb(settings.noise.threshold)})',
               onChanged: (v) => ref
                   .read(monitorSettingsProvider.notifier)
                   .setThreshold(v.round()),
@@ -517,6 +537,13 @@ String _autoStreamLabel(AutoStreamType type) {
     case AutoStreamType.audioVideo:
       return 'Audio + video';
   }
+}
+
+/// Convert threshold (0-100) to approximate dB value for display.
+/// Level 0 = -60dB, level 100 = 0dB.
+String _thresholdToDb(int threshold) {
+  final db = (threshold * 60 / 100) - 60;
+  return '${db.round()}dB';
 }
 
 String _serverStatusLabel(ControlServerState state) {

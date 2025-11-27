@@ -4,6 +4,8 @@ import 'dart:developer' as developer;
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 
+import '../notifications/notification_service.dart';
+
 /// Data extracted from an FCM noise event message.
 class NoiseEventData {
   const NoiseEventData({
@@ -31,9 +33,19 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
     'Background FCM message: ${message.data}',
     name: 'fcm_service',
   );
-  // Store for later processing when app resumes.
-  // The FcmService.onNoiseEvent callback won't be available in background isolate,
-  // so we rely on the app's onMessageOpenedApp handler when user taps notification.
+
+  // Show local notification for noise events
+  final data = message.data;
+  final type = data['type'] as String?;
+  if (type == 'NOISE_EVENT') {
+    final monitorName = data['monitorName'] as String? ?? 'Monitor';
+    final peakLevel = int.tryParse(data['peakLevel']?.toString() ?? '') ?? 0;
+
+    await NotificationService.instance.showNoiseAlert(
+      monitorName: monitorName,
+      peakLevel: peakLevel,
+    );
+  }
 }
 
 /// Singleton service for handling Firebase Cloud Messaging.

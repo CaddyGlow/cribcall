@@ -32,8 +32,48 @@ abstract class AudioCaptureService {
   final int frameSize;
   final SoundDetector detector;
 
+  /// Stream controller for raw PCM audio data (for WebRTC streaming).
+  final _rawDataController = StreamController<Uint8List>.broadcast();
+
+  /// Stream of raw PCM audio data (16-bit signed little-endian mono).
+  /// Subscribe to this for WebRTC streaming.
+  Stream<Uint8List> get rawAudioStream => _rawDataController.stream;
+
+  int _emitCount = 0;
+
+  /// Emit raw audio data to subscribers.
+  void emitRawData(Uint8List data) {
+    if (!_rawDataController.isClosed) {
+      _rawDataController.add(data);
+      _emitCount++;
+      if (_emitCount == 1 || _emitCount % 100 == 0) {
+        // Calculate peak level to verify audio isn't silent
+        final peak = _calculatePeakLevel(data);
+        developer.log(
+          'emitRawData: packet #$_emitCount (${data.length} bytes, peak=$peak, listeners=${_rawDataController.hasListener})',
+          name: 'audio_capture',
+        );
+      }
+    }
+  }
+
+  /// Calculate peak audio level from PCM data (0-32768 range).
+  int _calculatePeakLevel(Uint8List data) {
+    if (data.length < 2) return 0;
+    final byteData = ByteData.sublistView(data);
+    int peak = 0;
+    for (var i = 0; i < data.length - 1; i += 2) {
+      final sample = byteData.getInt16(i, Endian.little).abs();
+      if (sample > peak) peak = sample;
+    }
+    return peak;
+  }
+
   Future<void> start();
-  Future<void> stop();
+
+  Future<void> stop() async {
+    await _rawDataController.close();
+  }
 }
 
 /// No-op fallback for platforms without capture wired yet.
@@ -48,7 +88,9 @@ class NoopAudioCaptureService extends AudioCaptureService {
   Future<void> start() async {}
 
   @override
-  Future<void> stop() async {}
+  Future<void> stop() async {
+    await super.stop();
+  }
 }
 
 /// Debug audio capture that captures from the virtual mic (cribcall_virtual.monitor).
@@ -153,6 +195,8 @@ class DebugAudioCaptureService extends AudioCaptureService {
 
     while (offset + _bytesPerFrame <= bytes.length) {
       final frameBytes = Uint8List.sublistView(bytes, offset, offset + _bytesPerFrame);
+      // Emit raw data for WebRTC streaming
+      emitRawData(frameBytes);
       final samples = _pcmBytesToSamples(frameBytes);
       final timestampMs = DateTime.now().millisecondsSinceEpoch;
       detector.addFrame(samples, timestampMs: timestampMs);
@@ -230,6 +274,7 @@ class DebugAudioCaptureService extends AudioCaptureService {
     _toneProcess?.kill();
     _toneProcess = null;
     developer.log('Debug audio capture stopped', name: 'audio_capture');
+    await super.stop();
   }
 }
 
@@ -325,6 +370,8 @@ class LinuxSubprocessAudioCaptureService extends AudioCaptureService {
 
     while (offset + _bytesPerFrame <= bytes.length) {
       final frameBytes = Uint8List.sublistView(bytes, offset, offset + _bytesPerFrame);
+      // Emit raw data for WebRTC streaming
+      emitRawData(frameBytes);
       final samples = _pcmBytesToSamples(frameBytes);
       final timestampMs = DateTime.now().millisecondsSinceEpoch;
       detector.addFrame(samples, timestampMs: timestampMs);
@@ -355,6 +402,7 @@ class LinuxSubprocessAudioCaptureService extends AudioCaptureService {
     _process = null;
     _buffer.clear();
     developer.log('Audio capture stopped', name: 'audio_capture');
+    await super.stop();
   }
 }
 
@@ -380,6 +428,7 @@ class AndroidAudioCaptureService extends AudioCaptureService {
   StreamSubscription<dynamic>? _subscription;
   final _buffer = BytesBuilder(copy: false);
   int _bytesPerFrame = 0;
+  int _dataCount = 0;
 
   @override
   Future<void> start() async {
@@ -421,7 +470,17 @@ class AndroidAudioCaptureService extends AudioCaptureService {
   }
 
   void _onData(dynamic data) {
+    _dataCount++;
+    if (_dataCount == 1 || _dataCount % 100 == 0) {
+      developer.log(
+        '_onData: received #$_dataCount (type=${data.runtimeType}, isUint8List=${data is Uint8List})',
+        name: 'audio_capture',
+      );
+    }
     if (data is! Uint8List) return;
+
+    // Emit raw data for WebRTC streaming
+    emitRawData(data);
 
     _buffer.add(data);
     final bytes = Uint8List.fromList(_buffer.takeBytes());
@@ -462,5 +521,6 @@ class AndroidAudioCaptureService extends AudioCaptureService {
       developer.log('Error stopping audio capture: $e', name: 'audio_capture');
     }
     developer.log('Android audio capture stopped', name: 'audio_capture');
+    await super.stop();
   }
 }

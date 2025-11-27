@@ -174,6 +174,7 @@ class PairingController extends Notifier<PairingSessionState?> {
             transport: current.advertisement.transport,
           ),
         ),
+        lastKnownIp: ip,
       );
 
       state = null;

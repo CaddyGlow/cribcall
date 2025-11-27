@@ -42,6 +42,11 @@ class MainActivity : FlutterActivity() {
     private val listenerChannel = "cribcall/listener"
     private val listenerLogTag = "cribcall_listener"
 
+    // Audio playback for listener side
+    private val audioPlaybackChannel = "cribcall/audio_playback"
+    private val audioPlaybackLogTag = "cribcall_audio_playback"
+    private var audioPlaybackService: AudioPlaybackService? = null
+
     // Service binding
     private var audioCaptureService: AudioCaptureService? = null
     private var serviceBound = false
@@ -55,7 +60,11 @@ class MainActivity : FlutterActivity() {
 
             // Set up callback to forward audio data to Flutter
             audioCaptureService?.onAudioData = { bytes ->
-                audioEventSink?.success(bytes)
+                if (audioEventSink != null) {
+                    audioEventSink?.success(bytes)
+                } else {
+                    Log.w(audioLogTag, "onAudioData: audioEventSink is null, dropping ${bytes.size} bytes")
+                }
             }
         }
 
@@ -146,10 +155,14 @@ class MainActivity : FlutterActivity() {
         EventChannel(messenger, audioEvents).setStreamHandler(object : EventChannel.StreamHandler {
             override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
                 audioEventSink = events
-                Log.i(audioLogTag, "Audio event channel connected")
+                Log.i(audioLogTag, "Audio event channel connected, sink=${events != null}, serviceBound=$serviceBound")
                 // Update callback if service is already bound
                 audioCaptureService?.onAudioData = { bytes ->
-                    audioEventSink?.success(bytes)
+                    if (audioEventSink != null) {
+                        audioEventSink?.success(bytes)
+                    } else {
+                        Log.w(audioLogTag, "onAudioData (onListen): audioEventSink is null")
+                    }
                 }
             }
 
@@ -177,6 +190,36 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+
+        // Audio playback channel (for listener receiving audio via data channel)
+        MethodChannel(messenger, audioPlaybackChannel).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "start" -> {
+                    if (audioPlaybackService == null) {
+                        audioPlaybackService = AudioPlaybackService()
+                    }
+                    val success = audioPlaybackService?.start() == true
+                    Log.i(audioPlaybackLogTag, "Audio playback start: $success")
+                    result.success(success)
+                }
+                "stop" -> {
+                    audioPlaybackService?.stop()
+                    audioPlaybackService = null
+                    Log.i(audioPlaybackLogTag, "Audio playback stopped")
+                    result.success(null)
+                }
+                "write" -> {
+                    val data = call.argument<ByteArray>("data")
+                    if (data != null) {
+                        audioPlaybackService?.write(data)
+                        result.success(null)
+                    } else {
+                        result.error("invalid_args", "Missing audio data", null)
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
     }
 
     private fun bindAudioService() {
@@ -190,7 +233,7 @@ class MainActivity : FlutterActivity() {
             serviceName =
                 "${args["monitorName"] as? String ?: "monitor"}-${args["monitorId"] as? String ?: "id"}"
             serviceType = this@MainActivity.serviceType
-            port = (args["servicePort"] as? Int) ?: 48080
+            port = (args["controlPort"] as? Int) ?: (args["servicePort"] as? Int) ?: 48080
             setAttribute("monitorId", args["monitorId"]?.toString() ?: "")
             setAttribute("monitorName", args["monitorName"]?.toString() ?: "")
             setAttribute(
@@ -405,6 +448,10 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        // Clean up audio playback
+        audioPlaybackService?.stop()
+        audioPlaybackService = null
+
         if (serviceBound) {
             unbindService(serviceConnection)
             serviceBound = false

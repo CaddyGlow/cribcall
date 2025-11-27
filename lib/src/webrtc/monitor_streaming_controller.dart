@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:developer' as developer;
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../control/control_messages.dart';
+import '../state/app_state.dart';
 import 'monitor_webrtc_session.dart';
 
 /// State for a single streaming session.
@@ -126,11 +128,20 @@ class MonitorStreamingController extends Notifier<MonitorStreamingState> {
   ) async {
     _log('Creating WebRTC session: $sessionId');
 
+    // Get audio data provider from AudioCaptureController (for Android data channel mode)
+    Stream<Uint8List> audioDataProvider() {
+      final audioCapture = ref.read(audioCaptureProvider.notifier);
+      final stream = audioCapture.rawAudioStream;
+      _log('audioDataProvider: rawAudioStream=${stream != null ? "available" : "null"}');
+      return stream ?? const Stream.empty();
+    }
+
     final webrtcSession = MonitorWebRtcSession(
       sessionId: sessionId,
       mediaType: mediaType,
       onIceCandidate: (candidate) => _sendIceCandidate(connectionId, sessionId, candidate),
       onConnectionState: (state) => _onConnectionState(sessionId, state),
+      audioDataProvider: audioDataProvider,
     );
 
     _webrtcSessions[sessionId] = webrtcSession;

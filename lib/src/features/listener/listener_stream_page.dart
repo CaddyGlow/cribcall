@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../sound/audio_playback.dart';
 import '../../theme.dart';
 import '../../webrtc/webrtc_controller.dart';
 
@@ -40,6 +42,8 @@ class ListenerStreamPage extends ConsumerStatefulWidget {
 class _ListenerStreamPageState extends ConsumerState<ListenerStreamPage> {
   RTCVideoRenderer? _renderer;
   StreamSubscription<MediaStream?>? _streamSubscription;
+  StreamSubscription<Uint8List>? _audioDataSubscription;
+  AudioPlaybackService? _audioPlayback;
   bool _rendererInitialized = false;
   Timer? _pinTimer;
 
@@ -49,11 +53,42 @@ class _ListenerStreamPageState extends ConsumerState<ListenerStreamPage> {
     if (isWebRtcSupported) {
       _initRenderer();
     }
+    _initAudioPlayback();
     if (widget.autoStart) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         ref.read(streamingProvider.notifier).requestStream();
       });
     }
+  }
+
+  void _initAudioPlayback() {
+    debugPrint('[listener_stream] _initAudioPlayback: subscribing to audioDataStream');
+    // Subscribe to audio data from data channel
+    _audioDataSubscription = ref
+        .read(streamingProvider.notifier)
+        .audioDataStream
+        .listen(_onAudioData);
+  }
+
+  int _audioPacketCount = 0;
+  bool _startingPlayback = false;
+
+  void _onAudioData(Uint8List data) {
+    _audioPacketCount++;
+    if (_audioPacketCount == 1 || _audioPacketCount % 100 == 0) {
+      debugPrint('[listener_stream] _onAudioData #$_audioPacketCount (${data.length} bytes, isRunning=${_audioPlayback?.isRunning}, starting=$_startingPlayback)');
+    }
+    // Start audio playback on first data if not already started or if stopped
+    if (_audioPlayback == null || (!_audioPlayback!.isRunning && !_startingPlayback)) {
+      debugPrint('[listener_stream] Starting AudioPlaybackService (was ${_audioPlayback == null ? "null" : "stopped"})');
+      _audioPlayback ??= AudioPlaybackService();
+      _startingPlayback = true;
+      _audioPlayback!.start().then((success) {
+        _startingPlayback = false;
+        debugPrint('[listener_stream] AudioPlaybackService started: $success');
+      });
+    }
+    _audioPlayback?.write(data);
   }
 
   Future<void> _initRenderer() async {
@@ -99,6 +134,8 @@ class _ListenerStreamPageState extends ConsumerState<ListenerStreamPage> {
   void dispose() {
     _stopPinTimer();
     _streamSubscription?.cancel();
+    _audioDataSubscription?.cancel();
+    _audioPlayback?.stop();
     _renderer?.dispose();
     super.dispose();
   }
