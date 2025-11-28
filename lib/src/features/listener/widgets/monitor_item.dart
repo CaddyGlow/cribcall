@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../domain/models.dart';
+import '../../../state/app_state.dart';
 import '../../../theme.dart';
 import '../../../util/format_utils.dart';
 import '../../../webrtc/webrtc_controller.dart';
+import '../../monitor/widgets/audio_waveform.dart';
 import '../../shared/widgets/widgets.dart';
 import 'live_sound_wave.dart';
 
@@ -103,19 +105,43 @@ class TrustedMonitorItem extends ConsumerWidget {
       ),
       child: Padding(
         padding: const EdgeInsets.all(14),
-        child: Row(
+        child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Left side: Monitor info
-            Expanded(child: _buildInfo(context)),
+            // Top row: Monitor info on left, controls on right
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Left side: Monitor info
+                Expanded(child: _buildInfo(context)),
 
-            const SizedBox(width: 12),
+                const SizedBox(width: 12),
 
-            // Right side: Stream controls or action buttons
-            _buildRightSide(context, ref, showStreamingUI, isConnected, isConnecting),
+                // Right side: Stream controls or action buttons
+                _buildRightSide(context, ref, showStreamingUI, isConnected, isConnecting),
+              ],
+            ),
+
+            // Center waveform when streaming
+            if (showStreamingUI && isConnected) ...[
+              const SizedBox(height: 12),
+              _buildCenterWaveform(ref),
+            ],
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildCenterWaveform(WidgetRef ref) {
+    final audioCaptureState = ref.watch(audioCaptureProvider);
+    final settingsAsync = ref.watch(monitorSettingsProvider);
+    final settings = settingsAsync.asData?.value ?? MonitorSettings.defaults;
+
+    return AudioWaveform(
+      levelHistory: audioCaptureState.levelHistory,
+      currentLevel: audioCaptureState.level,
+      threshold: settings.noise.threshold,
     );
   }
 

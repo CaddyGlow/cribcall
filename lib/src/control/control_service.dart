@@ -697,7 +697,9 @@ class ControlServerController extends Notifier<ControlServerState> {
       'Unpairing listener ${peer.remoteDeviceId} via fingerprint '
       '${shortFingerprint(peer.certFingerprint)} (deviceId=$deviceId ignored)',
     );
-    await ref.read(trustedListenersProvider.notifier).revoke(peer.remoteDeviceId);
+    await ref
+        .read(trustedListenersProvider.notifier)
+        .revoke(peer.remoteDeviceId);
     await ref
         .read(noiseSubscriptionsProvider.notifier)
         .clearForFingerprint(peer.certFingerprint);
@@ -737,9 +739,15 @@ class ControlServerController extends Notifier<ControlServerState> {
           autoStreamDurationSec: autoStreamDurationSec,
         );
 
+    final deliveryMode = isWebsocketOnlyNoiseToken(fcmToken)
+        ? 'ws-only'
+        : platform;
     _logControl(
       'Noise subscribe: device=${peer.remoteDeviceId} remote=$remoteAddress '
-      'expiresAt=${DateTime.fromMillisecondsSinceEpoch(result.subscription.expiresAtEpochSec * 1000, isUtc: true)}',
+      'expiresAt=${DateTime.fromMillisecondsSinceEpoch(result.subscription.expiresAtEpochSec * 1000, isUtc: true)} '
+      'delivery=$deliveryMode threshold=${result.subscription.threshold} '
+      'cooldown=${result.subscription.cooldownSeconds} '
+      'autoStream=${result.subscription.autoStreamType?.name ?? 'default'}',
     );
 
     return (
@@ -893,7 +901,8 @@ class ControlServerController extends Notifier<ControlServerState> {
       }
 
       // Check cooldown
-      final lastBroadcast = _lastBroadcastPerSubscription[sub.subscriptionId] ?? 0;
+      final lastBroadcast =
+          _lastBroadcastPerSubscription[sub.subscriptionId] ?? 0;
       final cooldownMs = sub.effectiveCooldownSeconds * 1000;
       if (timestampMs - lastBroadcast < cooldownMs) {
         continue;
@@ -905,7 +914,9 @@ class ControlServerController extends Notifier<ControlServerState> {
     }
 
     if (eligibleSubs.isEmpty) {
-      _logControl('No eligible subscriptions for noise event (level=$peakLevel)');
+      _logControl(
+        'No eligible subscriptions for noise event (level=$peakLevel)',
+      );
       return;
     }
 
@@ -916,7 +927,9 @@ class ControlServerController extends Notifier<ControlServerState> {
 
     // Path 1: WebSocket broadcast to connected clients
     // (only to those whose subscription is eligible)
-    final eligibleFingerprints = eligibleSubs.map((s) => s.certFingerprint).toSet();
+    final eligibleFingerprints = eligibleSubs
+        .map((s) => s.certFingerprint)
+        .toSet();
     for (final conn in _connections.values) {
       if (eligibleFingerprints.contains(conn.peerFingerprint)) {
         try {
@@ -945,14 +958,33 @@ class ControlServerController extends Notifier<ControlServerState> {
     required List<NoiseSubscription> eligibleSubs,
   }) async {
     // Filter out subscriptions that have active WebSocket connections
-    final connectedFingerprints =
-        _connections.values.map((c) => c.peerFingerprint).toSet();
-    final subsNeedingFcm = eligibleSubs
+    final connectedFingerprints = _connections.values
+        .map((c) => c.peerFingerprint)
+        .toSet();
+    final subsWithoutWebSocket = eligibleSubs
         .where((s) => !connectedFingerprints.contains(s.certFingerprint))
         .toList();
 
-    if (subsNeedingFcm.isEmpty) {
+    final wsOnlyCount = subsWithoutWebSocket
+        .where((s) => s.isWebsocketOnly)
+        .length;
+    _logControl(
+      'Noise FCM filter: eligible=${eligibleSubs.length} '
+      'noWs=${subsWithoutWebSocket.length} wsOnly=$wsOnlyCount '
+      'connectedWs=${connectedFingerprints.length}',
+    );
+
+    if (subsWithoutWebSocket.isEmpty) {
       _logControl('All eligible subs have WebSocket, skipping FCM');
+      return;
+    }
+
+    final subsNeedingFcm = subsWithoutWebSocket
+        .where((s) => !s.isWebsocketOnly)
+        .toList();
+
+    if (subsNeedingFcm.isEmpty) {
+      _logControl('Eligible subs without WebSocket are ws-only, skipping FCM');
       return;
     }
 
@@ -1097,6 +1129,7 @@ class ControlClientController extends Notifier<ControlClientState> {
   DateTime? _activeSubscriptionExpiry;
   String? _lastSubscribedToken;
   Timer? _leaseRenewTimer;
+  String? _listenerDeviceId;
 
   /// Stream controller for noise events - UI can subscribe to receive alerts.
   final _noiseEventController = StreamController<NoiseEventData>.broadcast();
@@ -1133,6 +1166,7 @@ class ControlClientController extends Notifier<ControlClientState> {
     await disconnect();
     _disposed = false; // Reset after disconnect cleanup
     _clearLeaseState();
+    _listenerDeviceId = identity.deviceId;
 
     final ip = advertisement.ip;
     if (ip == null) {
@@ -1347,11 +1381,12 @@ class ControlClientController extends Notifier<ControlClientState> {
       _logClient('Noise subscribe skipped: missing monitor address');
       return;
     }
-    final token = FcmService.instance.currentToken;
+    final token = _resolveNoiseToken();
     if (token == null || token.isEmpty) {
-      _logClient('Noise subscribe skipped: no FCM token');
+      _logClient('Noise subscribe skipped: no push token');
       return;
     }
+    final usingWebsocketOnly = isWebsocketOnlyNoiseToken(token);
     if (_client == null) {
       _logClient('Noise subscribe skipped: client not initialized');
       return;
@@ -1371,8 +1406,7 @@ class ControlClientController extends Notifier<ControlClientState> {
       final platform = _platformLabel();
 
       // Get listener's noise preferences
-      final listenerSettings =
-          await ref.read(listenerSettingsProvider.future);
+      final listenerSettings = await ref.read(listenerSettingsProvider.future);
       final globalPrefs = listenerSettings.noisePreferences;
 
       // Get per-monitor overrides if connected
@@ -1383,7 +1417,9 @@ class ControlClientController extends Notifier<ControlClientState> {
       int effectiveAutoStreamDuration = globalPrefs.autoStreamDurationSec;
 
       if (connectedDeviceId != null) {
-        final perMonitorData = await ref.read(perMonitorSettingsProvider.future);
+        final perMonitorData = await ref.read(
+          perMonitorSettingsProvider.future,
+        );
         final perMonitor = perMonitorData.getOrDefault(connectedDeviceId);
         effectiveThreshold = perMonitor.thresholdOverride ?? effectiveThreshold;
         effectiveCooldown =
@@ -1391,7 +1427,8 @@ class ControlClientController extends Notifier<ControlClientState> {
         effectiveAutoStreamType =
             perMonitor.autoStreamTypeOverride ?? effectiveAutoStreamType;
         effectiveAutoStreamDuration =
-            perMonitor.autoStreamDurationSecOverride ?? effectiveAutoStreamDuration;
+            perMonitor.autoStreamDurationSecOverride ??
+            effectiveAutoStreamDuration;
       }
 
       final response = await _client!.subscribeNoise(
@@ -1415,7 +1452,8 @@ class ControlClientController extends Notifier<ControlClientState> {
         'expiresAt=${response.expiresAt.toIso8601String()} '
         'lease=${response.acceptedLeaseSeconds}s '
         'threshold=$effectiveThreshold cooldown=$effectiveCooldown '
-        'autoStream=${effectiveAutoStreamType.name}',
+        'autoStream=${effectiveAutoStreamType.name} '
+        'delivery=${usingWebsocketOnly ? 'ws-only' : 'fcm'}',
       );
     } catch (e) {
       _logClient('Noise subscribe failed: $e');
@@ -1466,6 +1504,24 @@ class ControlClientController extends Notifier<ControlClientState> {
     _lastSubscribedToken = null;
     _leaseRenewTimer?.cancel();
     _leaseRenewTimer = null;
+  }
+
+  String? _resolveNoiseToken() {
+    final fcmToken = FcmService.instance.currentToken;
+    if (fcmToken != null && fcmToken.isNotEmpty) {
+      return fcmToken;
+    }
+
+    if (Platform.isLinux) {
+      final deviceId =
+          _listenerDeviceId ??
+          ref.read(identityProvider).asData?.value?.deviceId;
+      if (deviceId != null && deviceId.isNotEmpty) {
+        return websocketOnlyNoiseToken(deviceId);
+      }
+    }
+
+    return null;
   }
 
   String _platformLabel() {

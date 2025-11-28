@@ -523,8 +523,7 @@ class AndroidAudioCaptureService extends AudioCaptureService {
       if (mdnsAdvertisement != null) {
         params['remoteDeviceId'] = mdnsAdvertisement!.remoteDeviceId;
         params['monitorName'] = mdnsAdvertisement!.monitorName;
-        params['monitorCertFingerprint'] =
-            mdnsAdvertisement!.certFingerprint;
+        params['certFingerprint'] = mdnsAdvertisement!.certFingerprint;
         params['controlPort'] = mdnsAdvertisement!.controlPort;
         params['pairingPort'] = mdnsAdvertisement!.pairingPort;
         params['version'] = mdnsAdvertisement!.version;

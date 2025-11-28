@@ -4,6 +4,8 @@ import 'package:crypto/crypto.dart';
 
 import 'models.dart';
 
+const kWebsocketOnlyNoiseTokenPrefix = 'ws-only:';
+
 class NoiseSubscription {
   const NoiseSubscription({
     required this.deviceId,
@@ -39,8 +41,12 @@ class NoiseSubscription {
   /// Listener's auto-stream duration preference. Null means use monitor default.
   final int? autoStreamDurationSec;
 
+  /// Whether this subscription can only receive events over WebSocket.
+  bool get isWebsocketOnly => isWebsocketOnlyNoiseToken(fcmToken);
+
   /// Get effective threshold, with fallback to default.
-  int get effectiveThreshold => threshold ?? NoisePreferences.defaults.threshold;
+  int get effectiveThreshold =>
+      threshold ?? NoisePreferences.defaults.threshold;
 
   /// Get effective cooldown, with fallback to default.
   int get effectiveCooldownSeconds =>
@@ -75,7 +81,8 @@ class NoiseSubscription {
       threshold: threshold ?? this.threshold,
       cooldownSeconds: cooldownSeconds ?? this.cooldownSeconds,
       autoStreamType: autoStreamType ?? this.autoStreamType,
-      autoStreamDurationSec: autoStreamDurationSec ?? this.autoStreamDurationSec,
+      autoStreamDurationSec:
+          autoStreamDurationSec ?? this.autoStreamDurationSec,
     );
   }
 
@@ -121,3 +128,9 @@ String noiseSubscriptionId(String deviceId, String fcmToken) {
   final digest = sha256.convert(utf8.encode('$deviceId|$fcmToken'));
   return digest.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 }
+
+String websocketOnlyNoiseToken(String deviceId) =>
+    '$kWebsocketOnlyNoiseTokenPrefix$deviceId';
+
+bool isWebsocketOnlyNoiseToken(String token) =>
+    token.startsWith(kWebsocketOnlyNoiseTokenPrefix);

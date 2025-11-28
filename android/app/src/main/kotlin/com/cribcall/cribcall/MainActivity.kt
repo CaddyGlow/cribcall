@@ -20,6 +20,7 @@ import android.provider.Settings
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 
 class MainActivity : FlutterActivity() {
     private val mdnsChannel = "cribcall/mdns"
@@ -57,6 +58,15 @@ class MainActivity : FlutterActivity() {
 
     // Pending mDNS params to pass to AudioCaptureService
     private var pendingMdnsParams: Map<*, *>? = null
+
+    // Track pending advertise-only service starts when backgrounded
+    private var pendingAdvertiseStart = false
+
+    private enum class AdvertiseStartResult {
+        STARTED,
+        DEFERRED,
+        FAILED
+    }
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -101,13 +111,28 @@ class MainActivity : FlutterActivity() {
                     if (args != null) {
                         pendingMdnsParams = args
                         Log.i(logTag, "Stored mDNS params for AudioCaptureService")
-                        startAdvertiseService()
+                        when (startAdvertiseService()) {
+                            AdvertiseStartResult.STARTED -> result.success(null)
+                            AdvertiseStartResult.DEFERRED -> result.error(
+                                "foreground_service_not_allowed",
+                                "Cannot start advertise foreground service while app is in background. " +
+                                    "Open CribCall to resume advertising.",
+                                null
+                            )
+                            AdvertiseStartResult.FAILED -> result.error(
+                                "service_start_failed",
+                                "Failed to start advertise foreground service.",
+                                null
+                            )
+                        }
+                    } else {
+                        result.success(null)
                     }
-                    result.success(null)
                 }
                 "stop" -> {
                     stopMdns()
                     pendingMdnsParams = null
+                    pendingAdvertiseStart = false
                     stopAdvertiseService()
                     result.success(null)
                 }
@@ -444,6 +469,11 @@ class MainActivity : FlutterActivity() {
         // Note: mDNS advertising is stopped by AudioCaptureService
     }
 
+    override fun onResume() {
+        super.onResume()
+        resumeAdvertiseIfPending()
+    }
+
     // Audio permission methods
     private fun checkAudioPermission(): Boolean {
         return ContextCompat.checkSelfPermission(
@@ -510,13 +540,37 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun startAdvertiseService() {
+    private fun startAdvertiseService(): AdvertiseStartResult {
         Log.i(audioLogTag, "Starting advertise-only foreground service")
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        ) {
+            Log.w(audioLogTag, "Deferring advertise-only start: activity not in foreground")
+            pendingAdvertiseStart = true
+            return AdvertiseStartResult.DEFERRED
+        }
+
         val intent = buildMdnsIntent(AudioCaptureService.ACTION_ADVERTISE_ONLY)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+            pendingAdvertiseStart = false
+            AdvertiseStartResult.STARTED
+        } catch (e: android.app.ForegroundServiceStartNotAllowedException) {
+            pendingAdvertiseStart = true
+            Log.e(
+                audioLogTag,
+                "Cannot start advertise-only foreground service while backgrounded: ${e.message}"
+            )
+            AdvertiseStartResult.DEFERRED
+        } catch (e: Exception) {
+            pendingAdvertiseStart = false
+            Log.e(audioLogTag, "Failed to start advertise-only service: ${e.message}")
+            AdvertiseStartResult.FAILED
         }
     }
 
@@ -534,6 +588,21 @@ class MainActivity : FlutterActivity() {
             action = AudioCaptureService.ACTION_STOP
         }
         startService(intent)
+    }
+
+    private fun resumeAdvertiseIfPending() {
+        if (!pendingAdvertiseStart) return
+        if (pendingMdnsParams == null) {
+            Log.w(audioLogTag, "No pending mDNS params; skipping advertise resume")
+            pendingAdvertiseStart = false
+            return
+        }
+
+        Log.i(audioLogTag, "Resuming pending advertise-only foreground service start")
+        val result = startAdvertiseService()
+        if (result == AdvertiseStartResult.STARTED) {
+            Log.i(audioLogTag, "Advertise-only foreground service started after resume")
+        }
     }
 
     // Listener foreground service methods

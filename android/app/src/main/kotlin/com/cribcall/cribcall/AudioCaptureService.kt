@@ -192,17 +192,55 @@ class AudioCaptureService : Service() {
             }
         }.build()
 
+        val wantsMicType = useMicServiceType
+        var started = false
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val serviceType = if (useMicServiceType) {
+            val serviceType = if (wantsMicType) {
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             } else {
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
             }
-            startForeground(NOTIFICATION_ID, notification, serviceType)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+            try {
+                startForeground(NOTIFICATION_ID, notification, serviceType)
+                started = true
+                Log.i(
+                    logTag,
+                    "Foreground notification started for $monitorName type=${if (wantsMicType) "mic" else "dataSync"}"
+                )
+            } catch (e: SecurityException) {
+                Log.e(
+                    logTag,
+                    "Foreground service start failed with mic type: ${e.message}. Falling back to dataSync type."
+                )
+                try {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                    )
+                    started = true
+                    Log.i(
+                        logTag,
+                        "Foreground notification started for $monitorName with dataSync fallback"
+                    )
+                } catch (fallback: Exception) {
+                    Log.e(
+                        logTag,
+                        "Foreground service fallback failed: ${fallback.message}"
+                    )
+                }
+            }
         }
-        Log.i(logTag, "Foreground notification started for $monitorName")
+
+        if (!started) {
+            try {
+                startForeground(NOTIFICATION_ID, notification)
+                Log.i(logTag, "Foreground notification started for $monitorName (no type)")
+            } catch (e: Exception) {
+                Log.e(logTag, "Foreground service start failed: ${e.message}")
+            }
+        }
     }
 
     private fun startAudioCapture() {

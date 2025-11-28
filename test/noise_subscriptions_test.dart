@@ -80,5 +80,23 @@ void main() {
       expect(removed, isNotNull);
       expect(container.read(noiseSubscriptionsProvider).value, isEmpty);
     });
+
+    test('websocket-only helpers flag ws-only tokens', () {
+      final token = websocketOnlyNoiseToken(peer.remoteDeviceId);
+      final now = DateTime.now();
+      final sub = NoiseSubscription(
+        deviceId: peer.remoteDeviceId,
+        certFingerprint: peer.certFingerprint,
+        fcmToken: token,
+        platform: 'linux',
+        expiresAtEpochSec:
+            now.add(const Duration(hours: 1)).millisecondsSinceEpoch ~/ 1000,
+        createdAtEpochSec: now.millisecondsSinceEpoch ~/ 1000,
+        subscriptionId: noiseSubscriptionId(peer.remoteDeviceId, token),
+      );
+
+      expect(isWebsocketOnlyNoiseToken(token), isTrue);
+      expect(sub.isWebsocketOnly, isTrue);
+    });
   });
 }

@@ -645,14 +645,24 @@ final audioCaptureAutoStartProvider = Provider<void>((ref) {
       return;
     }
 
-    // Stop if monitoring disabled, settings not ready, or no demand
-    if (!monitoringEnabled || !monitorSettings.hasValue || !demand.hasDemand) {
+    // On Android, keep audio capture running when monitoring is enabled,
+    // regardless of demand. This is because:
+    // 1. Android foreground services can't be restarted from background
+    // 2. The foreground service is needed for mDNS advertising anyway
+    // On other platforms, stop if no demand to save resources.
+    final isAndroid = !kIsWeb && Platform.isAndroid;
+    final shouldStop = !monitoringEnabled ||
+        !monitorSettings.hasValue ||
+        (!isAndroid && !demand.hasDemand);
+
+    if (shouldStop) {
       developer.log(
         'Audio capture skipped: monitoring=$monitoringEnabled '
         'settingsReady=${monitorSettings.hasValue} '
         'hasDemand=${demand.hasDemand} '
         'subs=${demand.noiseSubscriptionCount} '
-        'streams=${demand.activeStreamCount}',
+        'streams=${demand.activeStreamCount} '
+        'isAndroid=$isAndroid',
         name: 'audio_capture',
       );
       await ref.read(audioCaptureProvider.notifier).stop();

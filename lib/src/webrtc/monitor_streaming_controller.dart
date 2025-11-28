@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:developer' as developer;
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -129,11 +128,10 @@ class MonitorStreamingController extends Notifier<MonitorStreamingState> {
     _log('Creating WebRTC session: $sessionId');
 
     // Get audio data provider from AudioCaptureController (for Android data channel mode)
+    // This is called when peer connection reaches connected state, so audio capture
+    // should be running by then. If not available yet, poll until it is.
     Stream<Uint8List> audioDataProvider() {
-      final audioCapture = ref.read(audioCaptureProvider.notifier);
-      final stream = audioCapture.rawAudioStream;
-      _log('audioDataProvider: rawAudioStream=${stream != null ? "available" : "null"}');
-      return stream ?? const Stream.empty();
+      return _getAudioStream();
     }
 
     final webrtcSession = MonitorWebRtcSession(
@@ -315,6 +313,65 @@ class MonitorStreamingController extends Notifier<MonitorStreamingState> {
   void _log(String message) {
     developer.log(message, name: 'monitor_streaming');
     debugPrint('[monitor_streaming] $message');
+  }
+
+  /// Get audio stream from AudioCaptureController with auto-reconnect.
+  /// This handles:
+  /// 1. Race condition where WebRTC session is created before audio capture starts
+  /// 2. Audio capture restarts (which create new stream instances)
+  Stream<Uint8List> _getAudioStream() {
+    _log('_getAudioStream: creating resilient audio stream');
+    return _createResilientAudioStream();
+  }
+
+  /// Create a stream that automatically reconnects to the audio capture stream.
+  /// This handles audio capture restarts by re-fetching the stream when it ends.
+  Stream<Uint8List> _createResilientAudioStream() async* {
+    int reconnectCount = 0;
+    const maxReconnects = 100; // Allow many reconnects over session lifetime
+
+    while (reconnectCount < maxReconnects) {
+      final audioCapture = ref.read(audioCaptureProvider.notifier);
+      var stream = audioCapture.rawAudioStream;
+
+      // Poll for stream if not immediately available
+      if (stream == null) {
+        _log('_createResilientAudioStream: waiting for stream (attempt ${reconnectCount + 1})');
+        for (var i = 0; i < 50; i++) {
+          await Future.delayed(const Duration(milliseconds: 100));
+          stream = ref.read(audioCaptureProvider.notifier).rawAudioStream;
+          if (stream != null) {
+            _log('_createResilientAudioStream: stream available after ${i * 100}ms');
+            break;
+          }
+        }
+        if (stream == null) {
+          _log('_createResilientAudioStream: stream not available after 5s, retrying...');
+          reconnectCount++;
+          continue;
+        }
+      }
+
+      // Yield from the stream until it ends
+      _log('_createResilientAudioStream: connected to audio stream');
+      int packetCount = 0;
+      await for (final data in stream) {
+        packetCount++;
+        if (packetCount == 1 || packetCount % 500 == 0) {
+          _log('_createResilientAudioStream: forwarded $packetCount packets');
+        }
+        yield data;
+      }
+
+      // Stream ended - this happens when audio capture restarts
+      _log('_createResilientAudioStream: stream ended after $packetCount packets, reconnecting...');
+      reconnectCount++;
+
+      // Small delay before reconnecting to avoid tight loop
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+
+    _log('_createResilientAudioStream: max reconnects reached');
   }
 }
 

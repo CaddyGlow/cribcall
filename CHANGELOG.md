@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+ - Task: android-fgs-mic-fallback — Guarded microphone foreground-service start on Android 15/SDK 36 with a dataSync fallback so monitoring doesn’t crash when MIC FGS permissions are denied at runtime.
+ - Task: linux-noise-ws-only — Allow Linux listeners to register websocket-only noise leases when FCM is unavailable, skip FCM pushes for ws-only subscriptions, and prefer the ws-only token during subscription renewal so noise events still flow over WebSocket.
+ - Task: android-fgs-advertise — Deferred Android advertise-only foreground service starts when the app is backgrounded, surfaced a clear platform error instead of throwing, and retried pending starts on resume so mDNS ads recover once the activity is foreground.
  - Task: android-mdns-wait-identity — Wait for Android identity/session to load before stopping mDNS advertise attempts, retrying after a short delay and starting an advertise-only foreground service on Android so ads publish even when audio capture demand is zero.
  - Task: plan-sound-levels — Added monitor mic input gain (0–200%) applied to detection and streamed PCM, listener playback volume control (0–200%) with platform hooks (Android AudioTrack channel + Linux software gain), and UI sliders tied to persisted settings.
  - Task: monitor-input-device — Restored the recording device picker on the monitor dashboard, persisted the selected input, and passed the chosen Linux source into audio capture so microphone selection works again.
