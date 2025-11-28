@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:developer' as developer;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -13,14 +12,12 @@ import '../../identity/device_identity.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
 import '../../util/format_utils.dart';
+import '../../utils/logger.dart';
 import '../../utils/network_utils.dart';
 import '../shared/widgets/widgets.dart';
 import 'widgets/widgets.dart';
 
-void _log(String message) {
-  developer.log(message, name: 'monitor_dashboard');
-  debugPrint('[monitor_dashboard] $message');
-}
+const _log = Logger('monitor_dashboard');
 
 /// Refactored Monitor Dashboard using shared components.
 class MonitorDashboard extends ConsumerStatefulWidget {

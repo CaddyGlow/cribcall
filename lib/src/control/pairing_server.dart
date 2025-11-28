@@ -1,14 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:developer' as developer;
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:pointycastle/export.dart' as pc;
-import '../foundation/foundation_stub.dart'
-    if (dart.library.ui) 'package:flutter/foundation.dart';
 
 import '../config/build_flags.dart';
 import '../domain/models.dart';
@@ -17,6 +14,7 @@ import '../identity/pem.dart';
 import '../identity/pkcs8.dart';
 import '../util/format_utils.dart';
 import '../utils/canonical_json.dart';
+import '../utils/logger.dart';
 import 'pairing_messages.dart';
 
 /// Callback when pairing is successfully completed.
@@ -618,10 +616,7 @@ Future<SecurityContext> _buildSecurityContext(DeviceIdentity identity) async {
   return ctx;
 }
 
-void _log(String message) {
-  developer.log(message, name: 'pairing_server');
-  debugPrint('[pairing_server] $message');
-}
+const _log = Logger('pairing_server');
 
 /// Computes ECDH shared secret using P-256 curve via pointycastle.
 Future<List<int>> _computeEcdhSharedSecret({

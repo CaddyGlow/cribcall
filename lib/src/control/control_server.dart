@@ -1,12 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:developer' as developer;
 import 'dart:io';
 
-import 'package:crypto/crypto.dart';
 import 'package:cryptography/cryptography.dart';
-import '../foundation/foundation_stub.dart'
-    if (dart.library.ui) 'package:flutter/foundation.dart';
 
 import '../config/build_flags.dart';
 import '../domain/models.dart';
@@ -15,6 +11,8 @@ import '../identity/pem.dart';
 import '../identity/pkcs8.dart';
 import '../util/format_utils.dart';
 import '../utils/canonical_json.dart';
+import '../utils/crypto_utils.dart';
+import '../utils/logger.dart';
 import 'control_connection.dart';
 
 typedef UnpairRequestHandler =
@@ -876,15 +874,9 @@ class ControlServer {
   }
 }
 
-void _log(String message) {
-  developer.log(message, name: 'control_server');
-  debugPrint('[control_server] $message');
-}
+const _log = Logger('control_server');
 
-String _fingerprintHex(List<int> bytes) {
-  final digest = sha256.convert(bytes);
-  return digest.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-}
+String _fingerprintHex(List<int> bytes) => fingerprintHex(bytes);
 
 Future<Map<String, dynamic>> _decodeJsonBody(HttpRequest request) async {
   final body = await utf8.decodeStream(request);

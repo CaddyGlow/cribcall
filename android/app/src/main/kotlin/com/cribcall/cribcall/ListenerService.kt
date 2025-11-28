@@ -1,9 +1,5 @@
 package com.cribcall.cribcall
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -12,7 +8,6 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
-import androidx.core.app.NotificationCompat
 
 /**
  * Foreground service for the Listener role.
@@ -24,7 +19,6 @@ class ListenerService : Service() {
         const val ACTION_START = "com.cribcall.listener.START"
         const val ACTION_STOP = "com.cribcall.listener.STOP"
         const val NOTIFICATION_ID = 2002
-        const val CHANNEL_ID = "cribcall_listener"
         private const val TAG = "cribcall_listener"
     }
 
@@ -32,7 +26,7 @@ class ListenerService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannel()
+        NotificationHelper.createNotificationChannels(this)
         Log.i(TAG, "ListenerService created")
     }
 
@@ -62,50 +56,17 @@ class ListenerService : Service() {
         super.onDestroy()
     }
 
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Baby Monitor Listener",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Listening for baby monitor alerts"
-                setShowBadge(false)
-            }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
-        }
-    }
-
     private fun startForegroundWithNotification(monitorName: String) {
-        val stopIntent = Intent(this, ListenerService::class.java).apply {
-            action = ACTION_STOP
-        }
-        val stopPendingIntent = PendingIntent.getService(
-            this,
-            0,
-            stopIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val notification = NotificationHelper.buildForegroundNotification(
+            context = this,
+            channelId = NotificationHelper.CHANNEL_ID_LISTENER,
+            title = "CribCall Listening",
+            text = "Connected to $monitorName",
+            serviceClass = ListenerService::class.java,
+            stopAction = ACTION_STOP,
+            notificationId = NOTIFICATION_ID,
+            smallIcon = android.R.drawable.ic_dialog_info
         )
-
-        val openIntent = packageManager.getLaunchIntentForPackage(packageName)
-        val openPendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            openIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("CribCall Listening")
-            .setContentText("Connected to $monitorName")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setOngoing(true)
-            .setContentIntent(openPendingIntent)
-            .addAction(android.R.drawable.ic_media_pause, "Disconnect", stopPendingIntent)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setCategory(Notification.CATEGORY_SERVICE)
-            .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)

@@ -4,9 +4,9 @@ import '../foundation/foundation_stub.dart'
     if (dart.library.ui) 'package:flutter/foundation.dart';
 
 import 'package:asn1lib/asn1lib.dart';
-import 'package:crypto/crypto.dart';
 import 'package:cryptography/cryptography.dart';
 
+import '../utils/crypto_utils.dart';
 import 'device_identity.dart';
 import 'identity_store.dart';
 
@@ -94,10 +94,7 @@ class IdentityRepository {
     };
   }
 
-  String _fingerprintHex(List<int> bytes) {
-    final digest = sha256.convert(bytes);
-    return digest.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-  }
+  String _fingerprintHex(List<int> bytes) => fingerprintHex(bytes);
 
   /// Validates that a certificate has issuer == subject (required for self-signed
   /// certificates to work as their own trust anchor in mTLS).

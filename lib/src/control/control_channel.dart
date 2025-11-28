@@ -1,9 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
-import 'dart:developer' as developer;
-import '../foundation/foundation_stub.dart'
-    if (dart.library.ui) 'package:flutter/foundation.dart';
 
+import '../utils/logger.dart';
 import 'control_message.dart';
 import 'control_transport.dart';
 
@@ -336,10 +334,7 @@ class _OutboundRequest {
   final Completer<void> completer = Completer<void>();
 }
 
-void _log(String message) {
-  developer.log(message, name: 'control_channel');
-  debugPrint('[control_channel] $message');
-}
+const _log = Logger('control_channel');
 
 String _shortFingerprint(String fingerprint) {
   if (fingerprint.length <= 12) return fingerprint;

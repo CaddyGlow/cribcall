@@ -1,15 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:developer' as developer;
 
-import '../foundation/foundation_stub.dart'
-    if (dart.library.ui) 'package:flutter/foundation.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/services.dart';
 
 import '../domain/models.dart';
 import '../identity/device_identity.dart';
 import '../identity/pkcs8.dart';
+import '../utils/logger.dart';
 
 // -----------------------------------------------------------------------------
 // Android Control Server (Platform Channel Bridge)
@@ -308,7 +306,4 @@ class AndroidControlServer {
   }
 }
 
-void _log(String message) {
-  developer.log(message, name: 'android_ctrl_server');
-  debugPrint('[android_ctrl_server] $message');
-}
+const _log = Logger('android_ctrl_server');

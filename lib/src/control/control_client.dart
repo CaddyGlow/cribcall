@@ -1,19 +1,17 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:developer' as developer;
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:crypto/crypto.dart' show sha256;
 import 'package:cryptography/cryptography.dart';
 import 'package:pointycastle/export.dart' as pc;
-import '../foundation/foundation_stub.dart'
-    if (dart.library.ui) 'package:flutter/foundation.dart';
 
 import '../identity/device_identity.dart';
 import '../identity/pem.dart';
 import '../identity/pkcs8.dart';
 import '../utils/canonical_json.dart';
+import '../utils/crypto_utils.dart';
+import '../utils/logger.dart';
 import 'control_connection.dart';
 import 'pairing_messages.dart';
 
@@ -665,15 +663,9 @@ class ControlClient {
   }
 }
 
-void _log(String message) {
-  developer.log(message, name: 'control_client');
-  debugPrint('[control_client] $message');
-}
+const _log = Logger('control_client');
 
-String _fingerprintHex(List<int> bytes) {
-  final digest = sha256.convert(bytes);
-  return digest.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-}
+String _fingerprintHex(List<int> bytes) => fingerprintHex(bytes);
 
 String _shortFp(String fp) {
   if (fp.length <= 12) return fp;

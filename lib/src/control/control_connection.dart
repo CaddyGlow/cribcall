@@ -1,12 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:developer' as developer;
 import 'dart:io';
 import 'dart:typed_data';
 
-import '../foundation/foundation_stub.dart'
-    if (dart.library.ui) 'package:flutter/foundation.dart';
-
+import '../utils/logger.dart';
 import 'control_frame_codec.dart';
 import 'control_messages.dart';
 
@@ -106,10 +103,7 @@ class ControlConnection {
   }
 }
 
-void _log(String message) {
-  developer.log(message, name: 'control_conn');
-  debugPrint('[control_conn] $message');
-}
+const _log = Logger('control_conn');
 
 String _shortFp(String fp) {
   if (fp.length <= 12) return fp;
