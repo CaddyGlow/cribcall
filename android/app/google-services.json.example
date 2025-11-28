@@ -1,13 +1,13 @@
 {
   "project_info": {
-    "project_number": "1007127889622",
-    "project_id": "cribcall-3a8e0",
-    "storage_bucket": "cribcall-3a8e0.firebasestorage.app"
+    "project_number": "YOUR_PROJECT_NUMBER",
+    "project_id": "YOUR_PROJECT_ID",
+    "storage_bucket": "YOUR_STORAGE_BUCKET"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:1007127889622:android:84fb12371da7acc401ab77",
+        "mobilesdk_app_id": "YOUR_MOBILESDK_APP_ID",
         "android_client_info": {
           "package_name": "com.cribcall.cribcall"
         }
@@ -15,7 +15,7 @@
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyDAAi8_nWN7ZYEInn-mN7JOUYnM_JLJMzQ"
+          "current_key": "YOUR_API_KEY"
         }
       ],
       "services": {

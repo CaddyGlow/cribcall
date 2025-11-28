@@ -1198,7 +1198,18 @@ final discoveredMonitorsProvider = Provider<List<MdnsAdvertisement>>((ref) {
   final browse = ref
       .watch(mdnsBrowseProvider)
       .maybeWhen(data: (list) => list, orElse: () => <MdnsAdvertisement>[]);
-  return browse;
+
+  // Filter out our own device to avoid discovering ourselves
+  final identity = ref.watch(identityProvider);
+  final localDeviceId = identity.maybeWhen(
+    data: (id) => id.deviceId,
+    orElse: () => null,
+  );
+  if (localDeviceId == null) return browse;
+
+  return browse
+      .where((ad) => ad.remoteDeviceId != localDeviceId)
+      .toList();
 });
 
 class IdentityController extends AsyncNotifier<DeviceIdentity> {

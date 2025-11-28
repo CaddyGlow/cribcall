@@ -27,6 +27,14 @@ result
 *.p12
 *.der
 
+# Firebase configs (keep secrets local)
+android/app/google-services.json
+ios/Runner/GoogleService-Info.plist
+functions/.runtimeconfig.json
+
+# API key rotation output (secrets)
+rotated_api_keys_*.txt
+
 # Platform artifacts
 *.apk
 *.aab

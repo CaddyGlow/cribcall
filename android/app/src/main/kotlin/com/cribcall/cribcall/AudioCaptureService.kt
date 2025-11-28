@@ -77,8 +77,14 @@ class AudioCaptureService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 val monitorName = intent.getStringExtra(EXTRA_MONITOR_NAME) ?: "Monitor"
-                startForegroundWithNotification(monitorName, useMicServiceType = true)
-                startAudioCapture()
+                val started = startForegroundWithNotification(monitorName, useMicServiceType = true)
+                if (started) {
+                    startAudioCapture()
+                } else {
+                    Log.w(logTag, "Foreground not started, skipping audio capture")
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
 
                 // Start mDNS advertising if parameters provided
                 val remoteDeviceId = intent.getStringExtra(EXTRA_REMOTE_DEVICE_ID)
@@ -97,7 +103,12 @@ class AudioCaptureService : Service() {
             }
             ACTION_ADVERTISE_ONLY -> {
                 val monitorName = intent.getStringExtra(EXTRA_MONITOR_NAME) ?: "Monitor"
-                startForegroundWithNotification(monitorName, useMicServiceType = false)
+                val started = startForegroundWithNotification(monitorName, useMicServiceType = false)
+                if (!started) {
+                    Log.w(logTag, "Foreground not started for advertise-only; stopping service")
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
 
                 val remoteDeviceId = intent.getStringExtra(EXTRA_REMOTE_DEVICE_ID)
                 if (remoteDeviceId != null) {
@@ -149,7 +160,7 @@ class AudioCaptureService : Service() {
     private fun startForegroundWithNotification(
         monitorName: String,
         useMicServiceType: Boolean,
-    ) {
+    ): Boolean {
         val notificationIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
@@ -211,25 +222,32 @@ class AudioCaptureService : Service() {
             } catch (e: SecurityException) {
                 Log.e(
                     logTag,
-                    "Foreground service start failed with mic type: ${e.message}. Falling back to dataSync type."
+                    "Foreground service start failed with ${if (wantsMicType) "mic" else "dataSync"} type: ${e.message}"
                 )
-                try {
-                    startForeground(
-                        NOTIFICATION_ID,
-                        notification,
-                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-                    )
-                    started = true
-                    Log.i(
-                        logTag,
-                        "Foreground notification started for $monitorName with dataSync fallback"
-                    )
-                } catch (fallback: Exception) {
-                    Log.e(
-                        logTag,
-                        "Foreground service fallback failed: ${fallback.message}"
-                    )
+                if (wantsMicType) {
+                    try {
+                        startForeground(
+                            NOTIFICATION_ID,
+                            notification,
+                            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                        )
+                        started = true
+                        Log.i(
+                            logTag,
+                            "Foreground notification started for $monitorName with dataSync fallback"
+                        )
+                    } catch (fallback: Exception) {
+                        Log.e(
+                            logTag,
+                            "Foreground service fallback failed: ${fallback.message}"
+                        )
+                    }
                 }
+            } catch (e: android.app.ForegroundServiceStartNotAllowedException) {
+                Log.e(
+                    logTag,
+                    "Foreground service start not allowed (SDK guards): ${e.message}"
+                )
             }
         }
 
@@ -241,6 +259,7 @@ class AudioCaptureService : Service() {
                 Log.e(logTag, "Foreground service start failed: ${e.message}")
             }
         }
+        return started
     }
 
     private fun startAudioCapture() {

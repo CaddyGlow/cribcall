@@ -472,9 +472,12 @@ class DesktopMdnsService implements MdnsService {
       await _killAvahiProcess();
 
       // Use avahi-publish-service if available.
+      // Wrap with setsid so it runs in its own session.
       try {
         final serviceName = '${advertisement.monitorName}-${advertisement.remoteDeviceId}';
         final args = [
+          '--fork',
+          'avahi-publish-service',
           serviceName,
           '_baby-monitor._tcp',
           advertisement.controlPort.toString(),
@@ -486,8 +489,8 @@ class DesktopMdnsService implements MdnsService {
           'version=${advertisement.version}',
           'transport=${advertisement.transport}',
         ];
-        _mdnsTrace('Starting avahi-publish-service with args: $args');
-        final process = await Process.start('avahi-publish-service', args);
+        _mdnsTrace('Starting setsid avahi-publish-service with args: $args');
+        final process = await Process.start('setsid', args);
         _avahiPid = process.pid;
         _mdnsLog('Advertising via avahi PID $_avahiPid');
 

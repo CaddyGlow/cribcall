@@ -52,6 +52,14 @@ class MainActivity : FlutterActivity() {
     private val audioPlaybackLogTag = "cribcall_audio_playback"
     private var audioPlaybackService: AudioPlaybackService? = null
 
+    // Monitor server (control server foreground service)
+    private val monitorServerChannel = "cribcall/monitor_server"
+    private val monitorEventsChannel = "cribcall/monitor_events"
+    private val monitorLogTag = "cribcall_monitor"
+    private var monitorEventSink: EventChannel.EventSink? = null
+    private var monitorService: MonitorService? = null
+    private var monitorServiceBound = false
+
     // Service binding
     private var audioCaptureService: AudioCaptureService? = null
     private var serviceBound = false
@@ -89,6 +97,90 @@ class MainActivity : FlutterActivity() {
             audioCaptureService = null
             serviceBound = false
             Log.i(audioLogTag, "AudioCaptureService unbound")
+        }
+    }
+
+    private val monitorServiceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as MonitorService.LocalBinder
+            monitorService = binder.getService()
+            monitorServiceBound = true
+            Log.i(monitorLogTag, "MonitorService bound")
+
+            // Set up callbacks to forward events to Flutter
+            setupMonitorServiceCallbacks()
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            monitorService = null
+            monitorServiceBound = false
+            Log.i(monitorLogTag, "MonitorService unbound")
+        }
+    }
+
+    private fun setupMonitorServiceCallbacks() {
+        val handler = Handler(Looper.getMainLooper())
+
+        monitorService?.onServerStarted = { port ->
+            handler.post {
+                monitorEventSink?.success(mapOf(
+                    "event" to "serverStarted",
+                    "port" to port
+                ))
+            }
+        }
+
+        monitorService?.onServerError = { error ->
+            handler.post {
+                monitorEventSink?.success(mapOf(
+                    "event" to "serverError",
+                    "error" to error
+                ))
+            }
+        }
+
+        monitorService?.onClientConnected = { connectionId, fingerprint, remoteAddress ->
+            handler.post {
+                monitorEventSink?.success(mapOf(
+                    "event" to "clientConnected",
+                    "connectionId" to connectionId,
+                    "fingerprint" to fingerprint,
+                    "remoteAddress" to remoteAddress
+                ))
+            }
+        }
+
+        monitorService?.onClientDisconnected = { connectionId, reason ->
+            handler.post {
+                monitorEventSink?.success(mapOf(
+                    "event" to "clientDisconnected",
+                    "connectionId" to connectionId,
+                    "reason" to reason
+                ))
+            }
+        }
+
+        monitorService?.onWsMessage = { connectionId, messageJson ->
+            handler.post {
+                monitorEventSink?.success(mapOf(
+                    "event" to "wsMessage",
+                    "connectionId" to connectionId,
+                    "message" to messageJson
+                ))
+            }
+        }
+
+        monitorService?.onHttpRequest = { requestId, method, path, fingerprint, bodyJson ->
+            handler.post {
+                monitorEventSink?.success(mapOf(
+                    "event" to "httpRequest",
+                    "requestId" to requestId,
+                    "method" to method,
+                    "path" to path,
+                    "fingerprint" to fingerprint,
+                    "body" to bodyJson
+                ))
+            }
         }
     }
 
@@ -290,6 +382,117 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+
+        // Monitor server channel (control server for baby monitor)
+        MethodChannel(messenger, monitorServerChannel).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "start" -> {
+                    val port = call.argument<Int>("port") ?: 48080
+                    val identityJson = call.argument<String>("identityJson")
+                    val trustedPeersJson = call.argument<String>("trustedPeersJson") ?: "[]"
+
+                    if (identityJson == null) {
+                        result.error("invalid_args", "Missing identityJson", null)
+                        return@setMethodCallHandler
+                    }
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !checkNotificationPermission()) {
+                        requestNotificationPermission()
+                    }
+
+                    try {
+                        startMonitorService(port, identityJson, trustedPeersJson)
+                        result.success(null)
+                    } catch (e: android.app.ForegroundServiceStartNotAllowedException) {
+                        Log.e(monitorLogTag, "Cannot start monitor service from background: ${e.message}")
+                        result.error(
+                            "foreground_service_not_allowed",
+                            "Cannot start monitor server while app is in background.",
+                            e.message
+                        )
+                    } catch (e: Exception) {
+                        Log.e(monitorLogTag, "Failed to start monitor service: ${e.message}")
+                        result.error("service_start_failed", e.message, null)
+                    }
+                }
+                "stop" -> {
+                    stopMonitorService()
+                    result.success(null)
+                }
+                "addTrustedPeer" -> {
+                    val peerJson = call.argument<String>("peerJson")
+                    if (peerJson != null) {
+                        monitorService?.addTrustedPeer(peerJson)
+                        result.success(null)
+                    } else {
+                        result.error("invalid_args", "Missing peerJson", null)
+                    }
+                }
+                "removeTrustedPeer" -> {
+                    val fingerprint = call.argument<String>("fingerprint")
+                    if (fingerprint != null) {
+                        monitorService?.removeTrustedPeer(fingerprint)
+                        result.success(null)
+                    } else {
+                        result.error("invalid_args", "Missing fingerprint", null)
+                    }
+                }
+                "broadcast" -> {
+                    val messageJson = call.argument<String>("messageJson")
+                    if (messageJson != null) {
+                        monitorService?.broadcast(messageJson)
+                        result.success(null)
+                    } else {
+                        result.error("invalid_args", "Missing messageJson", null)
+                    }
+                }
+                "sendTo" -> {
+                    val connectionId = call.argument<String>("connectionId")
+                    val messageJson = call.argument<String>("messageJson")
+                    if (connectionId != null && messageJson != null) {
+                        monitorService?.sendTo(connectionId, messageJson)
+                        result.success(null)
+                    } else {
+                        result.error("invalid_args", "Missing connectionId or messageJson", null)
+                    }
+                }
+                "respondHttp" -> {
+                    val requestId = call.argument<String>("requestId")
+                    val statusCode = call.argument<Int>("statusCode") ?: 200
+                    val bodyJson = call.argument<String>("bodyJson")
+                    if (requestId != null) {
+                        monitorService?.respondHttp(requestId, statusCode, bodyJson)
+                        result.success(null)
+                    } else {
+                        result.error("invalid_args", "Missing requestId", null)
+                    }
+                }
+                "isRunning" -> {
+                    result.success(monitorService?.isRunning() == true)
+                }
+                "getPort" -> {
+                    result.success(monitorService?.getPort())
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        // Monitor events channel
+        EventChannel(messenger, monitorEventsChannel).setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                monitorEventSink = events
+                Log.i(monitorLogTag, "Monitor event channel connected")
+                // If service is already bound, reconnect callbacks
+                if (monitorServiceBound) {
+                    setupMonitorServiceCallbacks()
+                }
+            }
+
+            override fun onCancel(arguments: Any?) {
+                monitorEventSink = null
+                Log.i(monitorLogTag, "Monitor event channel disconnected")
+            }
+        })
     }
 
     private fun bindAudioService() {
@@ -582,6 +785,48 @@ class MainActivity : FlutterActivity() {
         startService(intent)
     }
 
+    // Monitor service methods
+    private fun startMonitorService(port: Int, identityJson: String, trustedPeersJson: String) {
+        Log.i(monitorLogTag, "Starting monitor foreground service on port $port")
+        val intent = Intent(this, MonitorService::class.java).apply {
+            action = MonitorService.ACTION_START
+            putExtra(MonitorService.EXTRA_PORT, port)
+            putExtra(MonitorService.EXTRA_IDENTITY_JSON, identityJson)
+            putExtra(MonitorService.EXTRA_TRUSTED_PEERS_JSON, trustedPeersJson)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+        // Bind to get callbacks
+        bindMonitorService()
+    }
+
+    private fun stopMonitorService() {
+        Log.i(monitorLogTag, "Stopping monitor foreground service")
+        val intent = Intent(this, MonitorService::class.java).apply {
+            action = MonitorService.ACTION_STOP
+        }
+        startService(intent)
+        unbindMonitorService()
+    }
+
+    private fun bindMonitorService() {
+        if (!monitorServiceBound) {
+            val intent = Intent(this, MonitorService::class.java)
+            bindService(intent, monitorServiceConnection, Context.BIND_AUTO_CREATE)
+        }
+    }
+
+    private fun unbindMonitorService() {
+        if (monitorServiceBound) {
+            unbindService(monitorServiceConnection)
+            monitorServiceBound = false
+            monitorService = null
+        }
+    }
+
     private fun stopAdvertiseService() {
         Log.i(audioLogTag, "Stopping advertise-only foreground service")
         val intent = Intent(this, AudioCaptureService::class.java).apply {
@@ -592,17 +837,13 @@ class MainActivity : FlutterActivity() {
 
     private fun resumeAdvertiseIfPending() {
         if (!pendingAdvertiseStart) return
-        if (pendingMdnsParams == null) {
-            Log.w(audioLogTag, "No pending mDNS params; skipping advertise resume")
-            pendingAdvertiseStart = false
-            return
-        }
-
-        Log.i(audioLogTag, "Resuming pending advertise-only foreground service start")
-        val result = startAdvertiseService()
-        if (result == AdvertiseStartResult.STARTED) {
-            Log.i(audioLogTag, "Advertise-only foreground service started after resume")
-        }
+        // Do not auto-start from resume; leave it to the Flutter app to decide
+        // based on current monitoring state.
+        Log.i(
+            audioLogTag,
+            "Pending advertise-only start will be handled by Flutter; skipping auto-resume"
+        )
+        pendingAdvertiseStart = false
     }
 
     // Listener foreground service methods
@@ -636,6 +877,13 @@ class MainActivity : FlutterActivity() {
             unbindService(serviceConnection)
             serviceBound = false
         }
+
+        // Clean up monitor service binding (but don't stop the service - it should survive)
+        if (monitorServiceBound) {
+            unbindService(monitorServiceConnection)
+            monitorServiceBound = false
+        }
+
         stopMdns()
         super.onDestroy()
     }

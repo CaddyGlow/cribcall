@@ -50,9 +50,10 @@ Uint8List p256PrivateKeyPkcs8({
   final params = ASN1ObjectIdentifier.fromComponents(_prime256v1Oid);
   final paramsWrapper = ASN1Sequence(tag: 0xa0)..add(params);
   ecPrivateKey.add(paramsWrapper);
-  final pubKeyBitString = ASN1Sequence(tag: 0xa1)
+  // Context-specific [1] BIT STRING containing the uncompressed public key
+  final pubKey = ASN1Sequence(tag: 0xa1)
     ..add(ASN1BitString(Uint8List.fromList(publicKeyBytes)));
-  ecPrivateKey.add(pubKeyBitString);
+  ecPrivateKey.add(pubKey);
 
   // PrivateKeyInfo (PKCS#8)
   final pkcs8 = ASN1Sequence();

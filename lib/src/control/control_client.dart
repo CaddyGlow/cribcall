@@ -459,7 +459,9 @@ class ControlClient {
         if (autoStreamDurationSec != null)
           'autoStreamDurationSec': autoStreamDurationSec,
       };
-      request.write(canonicalizeJson(payload));
+      final bodyBytes = utf8.encode(canonicalizeJson(payload));
+      request.contentLength = bodyBytes.length;
+      request.add(bodyBytes);
 
       final response = await request.close().timeout(
         const Duration(seconds: 5),
@@ -517,7 +519,9 @@ class ControlClient {
         if (fcmToken != null) 'fcmToken': fcmToken,
         if (subscriptionId != null) 'subscriptionId': subscriptionId,
       };
-      request.write(canonicalizeJson(payload));
+      final bodyBytes = utf8.encode(canonicalizeJson(payload));
+      request.contentLength = bodyBytes.length;
+      request.add(bodyBytes);
 
       final response = await request.close().timeout(
         const Duration(seconds: 5),

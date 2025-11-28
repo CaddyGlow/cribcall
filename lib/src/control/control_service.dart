@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:developer' as developer;
 import 'dart:io';
 
@@ -16,6 +17,8 @@ import '../notifications/notification_service.dart';
 import '../state/app_state.dart';
 import '../state/per_monitor_settings.dart';
 import '../util/format_utils.dart';
+import '../utils/canonical_json.dart';
+import 'android_control_server.dart';
 import 'control_connection.dart';
 import 'control_messages.dart';
 import 'control_server.dart' as server;
@@ -209,6 +212,7 @@ class PairingServerController extends Notifier<PairingServerState> {
     NotificationService.instance.showPairingRequest(
       listenerName: listenerName,
       comparisonCode: comparisonCode,
+      sessionId: sessionId,
     );
 
     // Update state with active session
@@ -412,11 +416,21 @@ bool _setEquals<T>(Set<T> a, Set<T> b) {
 }
 
 class ControlServerController extends Notifier<ControlServerState> {
+  // Dart-only server (non-Android platforms)
   server.ControlServer? _server;
+  // Android native server (foreground service)
+  AndroidControlServer? _androidServer;
+
   bool _starting = false;
   final Map<String, ControlConnection> _connections = {};
+  // Android connections don't have ControlConnection, track by connectionId->fingerprint
+  final Map<String, String> _androidConnections = {};
   StreamSubscription<server.ControlServerEvent>? _eventSub;
+  StreamSubscription<AndroidControlServerEvent>? _androidEventSub;
   FcmSender? _fcmSender;
+
+  /// Whether we're using the Android native server.
+  bool get _useAndroidServer => Platform.isAndroid;
 
   /// Track last noise broadcast timestamp per subscription (for per-listener cooldown).
   final Map<String, int> _lastBroadcastPerSubscription = {};
@@ -457,7 +471,8 @@ class ControlServerController extends Notifier<ControlServerState> {
     _logControl(
       'Starting control server port=$port '
       'trusted=${trustedFingerprints.length} '
-      'fingerprint=${shortFingerprint(identity.certFingerprint)}',
+      'fingerprint=${shortFingerprint(identity.certFingerprint)} '
+      'platform=${_useAndroidServer ? 'android-native' : 'dart'}',
     );
 
     state = ControlServerState.starting(
@@ -468,28 +483,28 @@ class ControlServerController extends Notifier<ControlServerState> {
     );
 
     try {
-      _server ??= server.ControlServer(
-        onUnpairRequest: _handleUnpairRequest,
-        onNoiseSubscribe: _handleNoiseSubscribeRequest,
-        onNoiseUnsubscribe: _handleNoiseUnsubscribeRequest,
-      );
-
-      await _server!.start(
-        port: port,
-        identity: identity,
-        trustedPeers: trustedPeers,
-      );
-
-      // Listen for server events (new connections, etc.)
-      _eventSub?.cancel();
-      _eventSub = _server!.events.listen(_handleServerEvent);
+      if (_useAndroidServer) {
+        await _startAndroidServer(
+          port: port,
+          identity: identity,
+          trustedPeers: trustedPeers,
+        );
+      } else {
+        await _startDartServer(
+          port: port,
+          identity: identity,
+          trustedPeers: trustedPeers,
+        );
+      }
 
       // Set up streaming controller send callback
       ref
           .read(monitorStreamingProvider.notifier)
           .setSendCallback(_sendToConnection);
 
-      final actualPort = _server!.boundPort ?? port;
+      final actualPort = _useAndroidServer
+          ? (_androidServer?.boundPort ?? port)
+          : (_server?.boundPort ?? port);
       _logControl(
         'Control server running on port $actualPort '
         'trusted=${trustedFingerprints.length} '
@@ -516,6 +531,48 @@ class ControlServerController extends Notifier<ControlServerState> {
     }
   }
 
+  /// Start the Dart-only control server (non-Android platforms).
+  Future<void> _startDartServer({
+    required int port,
+    required DeviceIdentity identity,
+    required List<TrustedPeer> trustedPeers,
+  }) async {
+    _server ??= server.ControlServer(
+      onUnpairRequest: _handleUnpairRequest,
+      onNoiseSubscribe: _handleNoiseSubscribeRequest,
+      onNoiseUnsubscribe: _handleNoiseUnsubscribeRequest,
+    );
+
+    await _server!.start(
+      port: port,
+      identity: identity,
+      trustedPeers: trustedPeers,
+    );
+
+    // Listen for server events (new connections, etc.)
+    _eventSub?.cancel();
+    _eventSub = _server!.events.listen(_handleServerEvent);
+  }
+
+  /// Start the Android native control server (foreground service).
+  Future<void> _startAndroidServer({
+    required int port,
+    required DeviceIdentity identity,
+    required List<TrustedPeer> trustedPeers,
+  }) async {
+    _androidServer ??= AndroidControlServer();
+
+    await _androidServer!.start(
+      port: port,
+      identity: identity,
+      trustedPeers: trustedPeers,
+    );
+
+    // Listen for server events
+    _androidEventSub?.cancel();
+    _androidEventSub = _androidServer!.events.listen(_handleAndroidServerEvent);
+  }
+
   void _handleServerEvent(server.ControlServerEvent event) {
     switch (event) {
       case server.ClientConnected(:final connection):
@@ -539,18 +596,545 @@ class ControlServerController extends Notifier<ControlServerState> {
     }
   }
 
+  /// Handle events from the Android native control server.
+  void _handleAndroidServerEvent(AndroidControlServerEvent event) {
+    switch (event) {
+      case AndroidServerStarted(:final port):
+        _logControl('Android server started on port $port');
+
+      case AndroidServerError(:final error):
+        _logControl('Android server error: $error');
+        state = ControlServerState.error(
+          error: error,
+          port: state.port,
+          trustedFingerprints: state.trustedFingerprints,
+          fingerprint: state.fingerprint,
+          deviceId: state.deviceId,
+        );
+
+      case AndroidClientConnected(
+        :final connectionId,
+        :final fingerprint,
+        :final remoteAddress,
+      ):
+        _logControl(
+          'Android client connected: $connectionId '
+          'peer=${shortFingerprint(fingerprint)} remote=$remoteAddress',
+        );
+        _androidConnections[connectionId] = fingerprint;
+        state = state.copyWithConnectionCount(_androidConnections.length);
+
+      case AndroidClientDisconnected(:final connectionId, :final reason):
+        _logControl('Android client disconnected: $connectionId reason=$reason');
+        _androidConnections.remove(connectionId);
+        // Clean up any streaming sessions for this connection
+        ref
+            .read(monitorStreamingProvider.notifier)
+            .endSessionsForConnection(connectionId);
+        state = state.copyWithConnectionCount(_androidConnections.length);
+
+      case AndroidWsMessage(:final connectionId, :final messageJson):
+        _handleAndroidWsMessage(connectionId, messageJson);
+
+      case AndroidHttpRequest(
+        :final requestId,
+        :final method,
+        :final path,
+        :final fingerprint,
+        :final bodyJson,
+      ):
+        unawaited(_handleAndroidHttpRequest(
+          requestId: requestId,
+          method: method,
+          path: path,
+          fingerprint: fingerprint,
+          bodyJson: bodyJson,
+        ));
+    }
+  }
+
+  /// Handle WebSocket messages from Android native server.
+  void _handleAndroidWsMessage(String connectionId, String messageJson) {
+    final fingerprint = _androidConnections[connectionId];
+    if (fingerprint == null) {
+      _logControl('WS message from unknown Android connection: $connectionId');
+      return;
+    }
+
+    try {
+      final json = jsonDecode(messageJson) as Map<String, dynamic>;
+      final message = ControlMessageFactory.fromWireJson(json);
+      _logControl(
+        'Android WS received ${message.type.name} from $connectionId',
+      );
+      _handleAndroidMessage(connectionId, fingerprint, message);
+    } catch (e) {
+      _logControl('Failed to parse Android WS message: $e');
+    }
+  }
+
+  /// Handle a control message from Android connection.
+  void _handleAndroidMessage(
+    String connectionId,
+    String fingerprint,
+    ControlMessage message,
+  ) {
+    switch (message) {
+      case FcmTokenUpdateMessage(:final fcmToken, :final deviceId):
+        unawaited(
+          _handleAndroidFcmTokenUpdate(
+            connectionId: connectionId,
+            fingerprint: fingerprint,
+            claimedDeviceId: deviceId,
+            fcmToken: fcmToken,
+          ),
+        );
+
+      // WebRTC signaling messages
+      case StartStreamRequestMessage(:final sessionId, :final mediaType):
+        _handleStreamRequest(connectionId, sessionId, mediaType);
+
+      case WebRtcAnswerMessage(:final sessionId, :final sdp):
+        _handleWebRtcAnswer(sessionId, sdp);
+
+      case WebRtcIceMessage(:final sessionId, :final candidate):
+        _handleWebRtcIce(sessionId, candidate);
+
+      case EndStreamMessage(:final sessionId):
+        _handleEndStream(sessionId);
+
+      default:
+        // Other message types handled as needed
+        break;
+    }
+  }
+
+  /// Handle FCM token update from Android connection.
+  Future<void> _handleAndroidFcmTokenUpdate({
+    required String connectionId,
+    required String fingerprint,
+    required String fcmToken,
+    String? claimedDeviceId,
+  }) async {
+    final listeners = await ref.read(trustedListenersProvider.future);
+    final peer = listeners.firstWhereOrNull(
+      (p) => p.certFingerprint == fingerprint,
+    );
+    if (peer == null) {
+      _logControl(
+        'FCM token update rejected: fingerprint not trusted '
+        'fp=${shortFingerprint(fingerprint)}',
+      );
+      return;
+    }
+
+    if (claimedDeviceId != null && claimedDeviceId != peer.remoteDeviceId) {
+      _logControl(
+        'FCM token update rejected: device mismatch '
+        'claimed=$claimedDeviceId derived=${peer.remoteDeviceId}',
+      );
+      return;
+    }
+
+    _logControl(
+      'FCM token update from listener=${peer.remoteDeviceId} '
+      'fp=${shortFingerprint(peer.certFingerprint)}',
+    );
+    await ref
+        .read(trustedListenersProvider.notifier)
+        .updateFcmToken(peer.remoteDeviceId, fcmToken);
+    await ref
+        .read(noiseSubscriptionsProvider.notifier)
+        .upsert(
+          peer: peer,
+          fcmToken: fcmToken,
+          platform: 'ws',
+          leaseSeconds: null,
+        );
+  }
+
+  /// Handle HTTP request from Android native server.
+  Future<void> _handleAndroidHttpRequest({
+    required String requestId,
+    required String method,
+    required String path,
+    String? fingerprint,
+    String? bodyJson,
+  }) async {
+    _logControl('Android HTTP $method $path requestId=$requestId');
+
+    try {
+      switch (path) {
+        case '/health':
+          await _respondAndroidHealth(requestId, fingerprint);
+
+        case '/test':
+          await _respondAndroidTest(requestId, fingerprint);
+
+        case '/unpair':
+          if (method == 'POST') {
+            await _respondAndroidUnpair(requestId, fingerprint, bodyJson);
+          } else {
+            await _androidServer?.respondHttp(requestId, 405, null);
+          }
+
+        case '/noise/subscribe':
+          if (method == 'POST') {
+            await _respondAndroidNoiseSubscribe(
+              requestId,
+              fingerprint,
+              bodyJson,
+            );
+          } else {
+            await _androidServer?.respondHttp(requestId, 405, null);
+          }
+
+        case '/noise/unsubscribe':
+          if (method == 'POST') {
+            await _respondAndroidNoiseUnsubscribe(
+              requestId,
+              fingerprint,
+              bodyJson,
+            );
+          } else {
+            await _androidServer?.respondHttp(requestId, 405, null);
+          }
+
+        default:
+          await _androidServer?.respondHttp(
+            requestId,
+            404,
+            jsonEncode({'error': 'not_found'}),
+          );
+      }
+    } catch (e) {
+      _logControl('Android HTTP error: $e');
+      await _androidServer?.respondHttp(
+        requestId,
+        500,
+        jsonEncode({'error': 'internal_error', 'message': '$e'}),
+      );
+    }
+  }
+
+  Future<void> _respondAndroidHealth(
+    String requestId,
+    String? fingerprint,
+  ) async {
+    final body = canonicalizeJson({
+      'status': 'ok',
+      'role': 'monitor',
+      'protocol': kTransportHttpWs,
+      'activeConnections': _androidConnections.length,
+      'mTLS': fingerprint != null,
+      'trusted': fingerprint != null,
+      if (state.fingerprint != null) 'fingerprint': state.fingerprint,
+      if (fingerprint != null) 'clientFingerprint': fingerprint,
+    });
+    await _androidServer?.respondHttp(requestId, 200, body);
+  }
+
+  Future<void> _respondAndroidTest(
+    String requestId,
+    String? fingerprint,
+  ) async {
+    if (fingerprint == null) {
+      await _androidServer?.respondHttp(
+        requestId,
+        401,
+        canonicalizeJson({
+          'error': 'client_certificate_required',
+          'message': 'This endpoint requires mTLS authentication',
+        }),
+      );
+      return;
+    }
+
+    await _androidServer?.respondHttp(
+      requestId,
+      200,
+      canonicalizeJson({
+        'status': 'ok',
+        'message': 'mTLS authentication successful',
+        'clientFingerprint': fingerprint,
+        'trusted': true,
+      }),
+    );
+  }
+
+  Future<void> _respondAndroidUnpair(
+    String requestId,
+    String? fingerprint,
+    String? bodyJson,
+  ) async {
+    if (fingerprint == null) {
+      await _androidServer?.respondHttp(
+        requestId,
+        401,
+        canonicalizeJson({
+          'error': 'client_certificate_required',
+          'message': 'This endpoint requires mTLS authentication',
+        }),
+      );
+      return;
+    }
+
+    String? deviceId;
+    if (bodyJson != null && bodyJson.isNotEmpty) {
+      try {
+        final payload = jsonDecode(bodyJson);
+        if (payload is Map && payload['deviceId'] is String) {
+          deviceId = payload['deviceId'] as String;
+        }
+      } catch (e) {
+        await _androidServer?.respondHttp(
+          requestId,
+          400,
+          canonicalizeJson({
+            'error': 'invalid_body',
+            'message': 'Body must be JSON with optional deviceId',
+          }),
+        );
+        return;
+      }
+    }
+
+    final unpaired = await _handleUnpairRequest(fingerprint, deviceId);
+    await _androidServer?.respondHttp(
+      requestId,
+      200,
+      canonicalizeJson({
+        'status': 'ok',
+        'unpaired': unpaired,
+        if (deviceId != null) 'deviceId': deviceId,
+        if (!unpaired) 'reason': 'device_not_found',
+      }),
+    );
+  }
+
+  Future<void> _respondAndroidNoiseSubscribe(
+    String requestId,
+    String? fingerprint,
+    String? bodyJson,
+  ) async {
+    if (fingerprint == null) {
+      await _androidServer?.respondHttp(
+        requestId,
+        401,
+        canonicalizeJson({
+          'error': 'unauthenticated',
+          'message': 'Client certificate required',
+        }),
+      );
+      return;
+    }
+
+    if (bodyJson == null || bodyJson.isEmpty) {
+      await _androidServer?.respondHttp(
+        requestId,
+        400,
+        canonicalizeJson({'error': 'invalid_json', 'message': 'Body required'}),
+      );
+      return;
+    }
+
+    Map<String, dynamic> body;
+    try {
+      body = jsonDecode(bodyJson) as Map<String, dynamic>;
+    } catch (e) {
+      await _androidServer?.respondHttp(
+        requestId,
+        400,
+        canonicalizeJson({'error': 'invalid_json', 'message': '$e'}),
+      );
+      return;
+    }
+
+    final fcmToken = body['fcmToken'];
+    final platform = body['platform'];
+    final leaseSeconds = body['leaseSeconds'];
+    final threshold = body['threshold'];
+    final cooldownSeconds = body['cooldownSeconds'];
+    final autoStreamTypeName = body['autoStreamType'];
+    final autoStreamDurationSec = body['autoStreamDurationSec'];
+
+    if (fcmToken is! String || fcmToken.isEmpty) {
+      await _androidServer?.respondHttp(
+        requestId,
+        400,
+        canonicalizeJson({
+          'error': 'invalid_fcm_token',
+          'message': 'fcmToken is required',
+        }),
+      );
+      return;
+    }
+
+    if (platform is! String || platform.isEmpty) {
+      await _androidServer?.respondHttp(
+        requestId,
+        400,
+        canonicalizeJson({
+          'error': 'invalid_platform',
+          'message': 'platform is required',
+        }),
+      );
+      return;
+    }
+
+    AutoStreamType? autoStreamType;
+    if (autoStreamTypeName is String) {
+      try {
+        autoStreamType = AutoStreamType.values.byName(autoStreamTypeName);
+      } catch (_) {
+        await _androidServer?.respondHttp(
+          requestId,
+          400,
+          canonicalizeJson({
+            'error': 'invalid_auto_stream_type',
+            'message': 'autoStreamType must be one of: none, audio, audioVideo',
+          }),
+        );
+        return;
+      }
+    }
+
+    try {
+      final result = await _handleNoiseSubscribeRequest(
+        fingerprint: fingerprint,
+        fcmToken: fcmToken,
+        platform: platform,
+        leaseSeconds: leaseSeconds as int?,
+        remoteAddress: 'android-native',
+        threshold: threshold as int?,
+        cooldownSeconds: cooldownSeconds as int?,
+        autoStreamType: autoStreamType,
+        autoStreamDurationSec: autoStreamDurationSec as int?,
+      );
+
+      await _androidServer?.respondHttp(
+        requestId,
+        200,
+        canonicalizeJson({
+          'subscriptionId': result.subscriptionId,
+          'deviceId': result.deviceId,
+          'expiresAt': result.expiresAt.toUtc().toIso8601String(),
+          'acceptedLeaseSeconds': result.acceptedLeaseSeconds,
+        }),
+      );
+    } catch (e) {
+      _logControl('Android noise subscribe error: $e');
+      await _androidServer?.respondHttp(
+        requestId,
+        500,
+        canonicalizeJson({'error': 'internal_error', 'message': '$e'}),
+      );
+    }
+  }
+
+  Future<void> _respondAndroidNoiseUnsubscribe(
+    String requestId,
+    String? fingerprint,
+    String? bodyJson,
+  ) async {
+    if (fingerprint == null) {
+      await _androidServer?.respondHttp(
+        requestId,
+        401,
+        canonicalizeJson({
+          'error': 'unauthenticated',
+          'message': 'Client certificate required',
+        }),
+      );
+      return;
+    }
+
+    if (bodyJson == null || bodyJson.isEmpty) {
+      await _androidServer?.respondHttp(
+        requestId,
+        400,
+        canonicalizeJson({'error': 'invalid_json', 'message': 'Body required'}),
+      );
+      return;
+    }
+
+    Map<String, dynamic> body;
+    try {
+      body = jsonDecode(bodyJson) as Map<String, dynamic>;
+    } catch (e) {
+      await _androidServer?.respondHttp(
+        requestId,
+        400,
+        canonicalizeJson({'error': 'invalid_json', 'message': '$e'}),
+      );
+      return;
+    }
+
+    final fcmToken = body['fcmToken'] as String?;
+    final subscriptionId = body['subscriptionId'] as String?;
+
+    if (fcmToken == null && subscriptionId == null) {
+      await _androidServer?.respondHttp(
+        requestId,
+        400,
+        canonicalizeJson({
+          'error': 'missing_identifier',
+          'message': 'fcmToken or subscriptionId required',
+        }),
+      );
+      return;
+    }
+
+    try {
+      final result = await _handleNoiseUnsubscribeRequest(
+        fingerprint: fingerprint,
+        fcmToken: fcmToken,
+        subscriptionId: subscriptionId,
+        remoteAddress: 'android-native',
+      );
+
+      await _androidServer?.respondHttp(
+        requestId,
+        200,
+        canonicalizeJson({
+          'deviceId': result.deviceId,
+          'unsubscribed': result.removed,
+          if (result.subscriptionId != null)
+            'subscriptionId': result.subscriptionId,
+          if (result.expiresAt != null)
+            'expiresAt': result.expiresAt!.toUtc().toIso8601String(),
+        }),
+      );
+    } catch (e) {
+      _logControl('Android noise unsubscribe error: $e');
+      await _androidServer?.respondHttp(
+        requestId,
+        500,
+        canonicalizeJson({'error': 'internal_error', 'message': '$e'}),
+      );
+    }
+  }
+
   /// Send a message to a specific connection.
   Future<void> _sendToConnection(
     String connectionId,
     ControlMessage message,
   ) async {
-    final connection = _connections[connectionId];
-    if (connection == null) {
-      _logControl('Cannot send to unknown connection: $connectionId');
-      return;
+    if (_useAndroidServer) {
+      // Android: send via platform channel (toWireJson includes 'type' field)
+      final messageJson = jsonEncode(message.toWireJson());
+      _logControl('Sending ${message.type.name} to Android $connectionId');
+      await _androidServer?.sendTo(connectionId, messageJson);
+    } else {
+      // Dart: send via WebSocket connection
+      final connection = _connections[connectionId];
+      if (connection == null) {
+        _logControl('Cannot send to unknown connection: $connectionId');
+        return;
+      }
+      _logControl('Sending ${message.type.name} to $connectionId');
+      connection.send(message);
     }
-    _logControl('Sending ${message.type.name} to $connectionId');
-    connection.send(message);
   }
 
   void _listenToConnection(ControlConnection connection) {
@@ -803,14 +1387,20 @@ class ControlServerController extends Notifier<ControlServerState> {
   /// Add a newly paired peer to the trusted list.
   /// Uses hot reload to update the server without restart.
   Future<void> addTrustedPeer(TrustedPeer peer) async {
-    final srv = _server;
-    if (srv == null) return;
-
     _logControl(
       'Adding trusted peer: ${peer.remoteDeviceId} '
       'fingerprint=${shortFingerprint(peer.certFingerprint)}',
     );
-    await srv.addTrustedPeer(peer);
+
+    if (_useAndroidServer) {
+      final androidSrv = _androidServer;
+      if (androidSrv == null) return;
+      await androidSrv.addTrustedPeer(peer);
+    } else {
+      final srv = _server;
+      if (srv == null) return;
+      await srv.addTrustedPeer(peer);
+    }
 
     // Update state with new trusted list
     final newFingerprints = [
@@ -827,13 +1417,20 @@ class ControlServerController extends Notifier<ControlServerState> {
 
   /// Remove a peer from the trusted list.
   Future<void> removeTrustedPeer(String fingerprint) async {
-    final srv = _server;
-    if (srv == null) return;
-
     _logControl(
       'Removing trusted peer: fingerprint=${shortFingerprint(fingerprint)}',
     );
-    await srv.removeTrustedPeer(fingerprint);
+
+    if (_useAndroidServer) {
+      final androidSrv = _androidServer;
+      if (androidSrv == null) return;
+      await androidSrv.removeTrustedPeer(fingerprint);
+    } else {
+      final srv = _server;
+      if (srv == null) return;
+      await srv.removeTrustedPeer(fingerprint);
+    }
+
     await ref
         .read(noiseSubscriptionsProvider.notifier)
         .clearForFingerprint(fingerprint);
@@ -852,26 +1449,40 @@ class ControlServerController extends Notifier<ControlServerState> {
 
   /// Broadcast a message to all connected clients.
   Future<void> broadcast(ControlMessage message) async {
-    _logControl(
-      'Broadcasting ${message.type.name} to ${_connections.length} clients',
-    );
-    for (final conn in _connections.values) {
-      try {
-        await conn.send(message);
-      } catch (e) {
-        _logControl('Broadcast to ${conn.connectionId} failed: $e');
+    if (_useAndroidServer) {
+      final count = _androidConnections.length;
+      _logControl('Broadcasting ${message.type.name} to $count Android clients');
+      // toWireJson includes 'type' field required for deserialization
+      final messageJson = jsonEncode(message.toWireJson());
+      await _androidServer?.broadcast(messageJson);
+    } else {
+      _logControl(
+        'Broadcasting ${message.type.name} to ${_connections.length} clients',
+      );
+      for (final conn in _connections.values) {
+        try {
+          await conn.send(message);
+        } catch (e) {
+          _logControl('Broadcast to ${conn.connectionId} failed: $e');
+        }
       }
     }
   }
 
   /// Send a message to a specific connection.
   Future<void> sendTo(String connectionId, ControlMessage message) async {
-    final conn = _connections[connectionId];
-    if (conn == null) {
-      _logControl('Cannot send to $connectionId - not connected');
-      return;
+    if (_useAndroidServer) {
+      // toWireJson includes 'type' field required for deserialization
+      final messageJson = jsonEncode(message.toWireJson());
+      await _androidServer?.sendTo(connectionId, messageJson);
+    } else {
+      final conn = _connections[connectionId];
+      if (conn == null) {
+        _logControl('Cannot send to $connectionId - not connected');
+        return;
+      }
+      await conn.send(message);
     }
-    await conn.send(message);
   }
 
   /// Broadcast a noise event to eligible listeners via WebSocket AND FCM.
@@ -930,12 +1541,29 @@ class ControlServerController extends Notifier<ControlServerState> {
     final eligibleFingerprints = eligibleSubs
         .map((s) => s.certFingerprint)
         .toSet();
-    for (final conn in _connections.values) {
-      if (eligibleFingerprints.contains(conn.peerFingerprint)) {
-        try {
-          await conn.send(message);
-        } catch (e) {
-          _logControl('Failed to send to ${conn.connectionId}: $e');
+
+    if (_useAndroidServer) {
+      // Android: send to eligible connections via platform channel
+      // toWireJson includes 'type' field required for deserialization
+      final messageJson = jsonEncode(message.toWireJson());
+      for (final entry in _androidConnections.entries) {
+        if (eligibleFingerprints.contains(entry.value)) {
+          try {
+            await _androidServer?.sendTo(entry.key, messageJson);
+          } catch (e) {
+            _logControl('Failed to send to Android ${entry.key}: $e');
+          }
+        }
+      }
+    } else {
+      // Dart: send to eligible connections directly
+      for (final conn in _connections.values) {
+        if (eligibleFingerprints.contains(conn.peerFingerprint)) {
+          try {
+            await conn.send(message);
+          } catch (e) {
+            _logControl('Failed to send to ${conn.connectionId}: $e');
+          }
         }
       }
     }
@@ -958,9 +1586,9 @@ class ControlServerController extends Notifier<ControlServerState> {
     required List<NoiseSubscription> eligibleSubs,
   }) async {
     // Filter out subscriptions that have active WebSocket connections
-    final connectedFingerprints = _connections.values
-        .map((c) => c.peerFingerprint)
-        .toSet();
+    final connectedFingerprints = _useAndroidServer
+        ? _androidConnections.values.toSet()
+        : _connections.values.map((c) => c.peerFingerprint).toSet();
     final subsWithoutWebSocket = eligibleSubs
         .where((s) => !connectedFingerprints.contains(s.certFingerprint))
         .toList();
@@ -1041,13 +1669,25 @@ class ControlServerController extends Notifier<ControlServerState> {
     _logControl('Stopping control server');
     _eventSub?.cancel();
     _eventSub = null;
+    _androidEventSub?.cancel();
+    _androidEventSub = null;
     _connections.clear();
+    _androidConnections.clear();
     _fcmSender?.dispose();
     _fcmSender = null;
+
+    // Stop platform-specific server
     try {
       await _server?.stop();
     } catch (_) {}
     _server = null;
+
+    try {
+      await _androidServer?.stop();
+      _androidServer?.dispose();
+    } catch (_) {}
+    _androidServer = null;
+
     if (state.status != ControlServerStatus.stopped) {
       state = const ControlServerState.stopped();
     }

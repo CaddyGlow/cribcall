@@ -12,6 +12,48 @@ import 'sound_detector.dart';
 typedef NoiseEventSink = FutureOr<void> Function(DetectedNoise event);
 typedef LevelSink = void Function(int level);
 
+/// Kill any stale pw-record/parec processes targeting [targetDevice].
+/// This handles orphaned processes left behind when the app restarts.
+Future<void> _killStalePwRecordProcesses(String targetDevice) async {
+  if (!Platform.isLinux) return;
+
+  try {
+    // Find all pw-record and parec processes
+    final result = await Process.run('pgrep', ['-f', 'pw-record|parec']);
+    if (result.exitCode != 0) return;
+
+    final lines = (result.stdout as String)
+        .split('\n')
+        .where((line) => line.trim().isNotEmpty);
+
+    for (final line in lines) {
+      final pid = int.tryParse(line.trim());
+      if (pid == null) continue;
+
+      // Check if this process targets our device
+      final cmd = await Process.run('ps', ['-o', 'cmd=', '-p', '$pid']);
+      final cmdline = (cmd.stdout as String?)?.trim() ?? '';
+
+      if (!cmdline.contains(targetDevice)) continue;
+
+      developer.log(
+        'Killing stale audio capture process PID $pid (cmd="$cmdline")',
+        name: 'audio_capture',
+      );
+      try {
+        Process.killPid(pid, ProcessSignal.sigterm);
+      } catch (_) {
+        // Ignore failures; best effort
+      }
+    }
+  } catch (e) {
+    developer.log(
+      'Could not check for stale audio capture processes: $e',
+      name: 'audio_capture',
+    );
+  }
+}
+
 /// Platform-agnostic audio capture shim. Platform code should implement
 /// [start] to stream PCM frames into the provided [SoundDetector].
 abstract class AudioCaptureService {
@@ -132,6 +174,9 @@ class DebugAudioCaptureService extends AudioCaptureService {
     super.inputGain,
   });
 
+  /// Static PID tracking survives provider recreation during hot restart.
+  static int? _staticRecordPid;
+
   Process? _recordProcess;
   StreamSubscription<List<int>>? _stdoutSub;
   final _buffer = BytesBuilder(copy: false);
@@ -149,9 +194,18 @@ class DebugAudioCaptureService extends AudioCaptureService {
       name: 'audio_capture',
     );
 
-    // Capture from the virtual mic monitor using pw-record or parec
+    // Kill any stale pw-record processes from previous runs
+    await _killStalePwRecordProcesses('cribcall_virtual.monitor');
+
+    // Kill existing process tracked by static PID (survives provider recreation)
+    await _killStaticProcess();
+
+    // Capture from the virtual mic monitor using pw-record or parec.
+    // Wrap with setsid so it runs in its own session.
     final commands = [
       [
+        'setsid',
+        '--fork',
         'pw-record',
         '--rate=$sampleRate',
         '--channels=1',
@@ -160,6 +214,8 @@ class DebugAudioCaptureService extends AudioCaptureService {
         '-',
       ],
       [
+        'setsid',
+        '--fork',
         'parec',
         '--rate=$sampleRate',
         '--channels=1',
@@ -172,14 +228,27 @@ class DebugAudioCaptureService extends AudioCaptureService {
     for (final cmd in commands) {
       try {
         developer.log(
-          'Trying debug capture with: ${cmd.first}',
+          'Trying debug capture with: ${cmd.join(" ")}',
           name: 'audio_capture',
         );
         _recordProcess = await Process.start(cmd.first, cmd.skip(1).toList());
+        _staticRecordPid = _recordProcess!.pid;
         developer.log(
-          'Started debug capture with ${cmd.first} (pid=${_recordProcess!.pid})',
+          'Started debug capture with ${cmd[2]} (pid=${_recordProcess!.pid})',
           name: 'audio_capture',
         );
+
+        // Clear static PID when process exits
+        _recordProcess!.exitCode.then((code) {
+          developer.log(
+            'Debug capture process exited with code $code',
+            name: 'audio_capture',
+          );
+          if (_staticRecordPid == _recordProcess?.pid) {
+            _staticRecordPid = null;
+          }
+        });
+
         break;
       } catch (e) {
         developer.log('${cmd.first} not available: $e', name: 'audio_capture');
@@ -296,13 +365,42 @@ class DebugAudioCaptureService extends AudioCaptureService {
   Future<void> stop() async {
     await _stdoutSub?.cancel();
     _stdoutSub = null;
-    _recordProcess?.kill(ProcessSignal.sigterm);
+
+    // Kill via static PID to ensure cleanup even after provider recreation
+    await _killStaticProcess();
     _recordProcess = null;
+
     _buffer.clear();
     _toneProcess?.kill();
     _toneProcess = null;
     developer.log('Debug audio capture stopped', name: 'audio_capture');
     await super.stop();
+  }
+
+  /// Kill the process tracked by static PID.
+  static Future<void> _killStaticProcess() async {
+    if (_staticRecordPid == null) return;
+
+    developer.log(
+      'Killing debug capture process PID $_staticRecordPid',
+      name: 'audio_capture',
+    );
+    try {
+      Process.killPid(_staticRecordPid!, ProcessSignal.sigterm);
+      await Future.delayed(const Duration(milliseconds: 100));
+      // Force kill if still alive
+      try {
+        final stillAlive = Process.killPid(_staticRecordPid!, ProcessSignal.sigcont);
+        if (stillAlive) {
+          Process.killPid(_staticRecordPid!, ProcessSignal.sigkill);
+        }
+      } catch (_) {
+        // Process already dead
+      }
+    } catch (e) {
+      developer.log('Error killing process: $e', name: 'audio_capture');
+    }
+    _staticRecordPid = null;
   }
 }
 
@@ -318,6 +416,9 @@ class LinuxSubprocessAudioCaptureService extends AudioCaptureService {
     super.inputGain,
     this.deviceId,
   });
+
+  /// Static PID tracking survives provider recreation during hot restart.
+  static int? _staticProcessPid;
 
   final String? deviceId;
   Process? _process;
@@ -338,9 +439,18 @@ class LinuxSubprocessAudioCaptureService extends AudioCaptureService {
       name: 'audio_capture',
     );
 
-    // Try pw-record first (PipeWire native), fall back to parec (PulseAudio)
+    // Kill any stale pw-record processes from previous runs
+    await _killStalePwRecordProcesses(pipewireTarget);
+
+    // Kill existing process tracked by static PID (survives provider recreation)
+    await _killStaticProcess();
+
+    // Try pw-record first (PipeWire native), fall back to parec (PulseAudio).
+    // Wrap with setsid so it runs in its own session.
     final commands = [
       [
+        'setsid',
+        '--fork',
         'pw-record',
         '--rate=$sampleRate',
         '--channels=1',
@@ -349,6 +459,8 @@ class LinuxSubprocessAudioCaptureService extends AudioCaptureService {
         '-',
       ],
       [
+        'setsid',
+        '--fork',
         'parec',
         '--rate=$sampleRate',
         '--channels=1',
@@ -361,14 +473,27 @@ class LinuxSubprocessAudioCaptureService extends AudioCaptureService {
     for (final cmd in commands) {
       try {
         developer.log(
-          'Trying audio capture with: ${cmd.first}',
+          'Trying audio capture with: ${cmd.join(" ")}',
           name: 'audio_capture',
         );
         _process = await Process.start(cmd.first, cmd.skip(1).toList());
+        _staticProcessPid = _process!.pid;
         developer.log(
-          'Started audio capture with ${cmd.first} (pid=${_process!.pid})',
+          'Started audio capture with ${cmd[2]} (pid=${_process!.pid})',
           name: 'audio_capture',
         );
+
+        // Clear static PID when process exits
+        _process!.exitCode.then((code) {
+          developer.log(
+            'Audio capture process exited with code $code',
+            name: 'audio_capture',
+          );
+          if (_staticProcessPid == _process?.pid) {
+            _staticProcessPid = null;
+          }
+        });
+
         break;
       } catch (e) {
         developer.log('${cmd.first} not available: $e', name: 'audio_capture');
@@ -453,11 +578,40 @@ class LinuxSubprocessAudioCaptureService extends AudioCaptureService {
   Future<void> stop() async {
     await _stdoutSub?.cancel();
     _stdoutSub = null;
-    _process?.kill(ProcessSignal.sigterm);
+
+    // Kill via static PID to ensure cleanup even after provider recreation
+    await _killStaticProcess();
     _process = null;
+
     _buffer.clear();
     developer.log('Audio capture stopped', name: 'audio_capture');
     await super.stop();
+  }
+
+  /// Kill the process tracked by static PID.
+  static Future<void> _killStaticProcess() async {
+    if (_staticProcessPid == null) return;
+
+    developer.log(
+      'Killing audio capture process PID $_staticProcessPid',
+      name: 'audio_capture',
+    );
+    try {
+      Process.killPid(_staticProcessPid!, ProcessSignal.sigterm);
+      await Future.delayed(const Duration(milliseconds: 100));
+      // Force kill if still alive
+      try {
+        final stillAlive = Process.killPid(_staticProcessPid!, ProcessSignal.sigcont);
+        if (stillAlive) {
+          Process.killPid(_staticProcessPid!, ProcessSignal.sigkill);
+        }
+      } catch (_) {
+        // Process already dead
+      }
+    } catch (e) {
+      developer.log('Error killing process: $e', name: 'audio_capture');
+    }
+    _staticProcessPid = null;
   }
 }
 

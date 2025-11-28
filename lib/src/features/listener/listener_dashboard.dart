@@ -546,10 +546,7 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
     );
   }
 
-  void _showDiscoveredMonitorsDrawer(
-    BuildContext context,
-    List<MonitorItemData> monitors,
-  ) {
+  void _showDiscoveredMonitorsDrawer(BuildContext context) {
     showModalBottomSheet(
       context: context,
       showDragHandle: true,
@@ -559,97 +556,126 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
         minChildSize: 0.3,
         maxChildSize: 0.85,
         expand: false,
-        builder: (context, scrollController) => Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'Discovered monitors',
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w800,
-                    ),
+        builder: (context, scrollController) => Consumer(
+          builder: (context, ref, _) {
+            // Watch providers reactively so drawer updates in real-time
+            final advertisements = ref.watch(discoveredMonitorsProvider);
+            final trustedMonitors = ref.watch(trustedMonitorsProvider);
+            final pinned = trustedMonitors.maybeWhen(
+              data: (list) => list,
+              orElse: () => <TrustedMonitor>[],
+            );
+            final pinnedIds = pinned.map((m) => m.remoteDeviceId).toSet();
+
+            // Filter to only unpaired monitors
+            final monitors = advertisements
+                .where((ad) => !pinnedIds.contains(ad.remoteDeviceId))
+                .map(
+                  (ad) => MonitorItemData(
+                    remoteDeviceId: ad.remoteDeviceId,
+                    name: ad.monitorName,
+                    status: 'Online',
+                    fingerprint: ad.certFingerprint,
+                    trusted: false,
+                    advertisement: ad,
+                    onPair: () => _showPairSheet(ad),
                   ),
+                )
+                .toList();
+
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
                   Row(
-                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      CcBadge(
-                        label: '${monitors.length} found',
-                        color: AppColors.primary,
-                        size: CcBadgeSize.small,
-                      ),
-                      const SizedBox(width: 8),
-                      IconButton(
-                        onPressed: () {
-                          ref.invalidate(discoveredMonitorsProvider);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Refreshing mDNS discovery...'),
-                              duration: Duration(seconds: 1),
-                            ),
-                          );
-                        },
-                        icon: const Icon(Icons.refresh, size: 20),
-                        tooltip: 'Refresh',
-                        style: IconButton.styleFrom(
-                          padding: const EdgeInsets.all(8),
-                          minimumSize: const Size(32, 32),
+                      Text(
+                        'Discovered monitors',
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w800,
                         ),
+                      ),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          CcBadge(
+                            label: '${monitors.length} found',
+                            color: AppColors.primary,
+                            size: CcBadgeSize.small,
+                          ),
+                          const SizedBox(width: 8),
+                          IconButton(
+                            onPressed: () {
+                              ref.invalidate(mdnsBrowseProvider);
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Refreshing mDNS discovery...'),
+                                  duration: Duration(seconds: 1),
+                                ),
+                              );
+                            },
+                            icon: const Icon(Icons.refresh, size: 20),
+                            tooltip: 'Refresh',
+                            style: IconButton.styleFrom(
+                              padding: const EdgeInsets.all(8),
+                              minimumSize: const Size(32, 32),
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Monitors found on your network that are not yet paired.',
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+                  ),
+                  const SizedBox(height: 12),
+                  Expanded(
+                    child: monitors.isEmpty
+                        ? Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.wifi_find,
+                                  size: 48,
+                                  color: AppColors.muted.withValues(alpha: 0.5),
+                                ),
+                                const SizedBox(height: 12),
+                                Text(
+                                  'No monitors found',
+                                  style: Theme.of(context).textTheme.titleSmall
+                                      ?.copyWith(
+                                        fontWeight: FontWeight.w700,
+                                        color: AppColors.muted,
+                                      ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Make sure monitors are running on your network',
+                                  style: Theme.of(context).textTheme.bodySmall
+                                      ?.copyWith(color: AppColors.muted),
+                                ),
+                              ],
+                            ),
+                          )
+                        : ListView.builder(
+                            controller: scrollController,
+                            itemCount: monitors.length,
+                            itemBuilder: (context, index) =>
+                                DiscoveredMonitorItem(data: monitors[index]),
+                          ),
+                  ),
+                  const SizedBox(height: 16),
                 ],
               ),
-              const SizedBox(height: 6),
-              Text(
-                'Monitors found on your network that are not yet paired.',
-                style: Theme.of(
-                  context,
-                ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-              ),
-              const SizedBox(height: 12),
-              Expanded(
-                child: monitors.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.wifi_find,
-                              size: 48,
-                              color: AppColors.muted.withValues(alpha: 0.5),
-                            ),
-                            const SizedBox(height: 12),
-                            Text(
-                              'No monitors found',
-                              style: Theme.of(context).textTheme.titleSmall
-                                  ?.copyWith(
-                                    fontWeight: FontWeight.w700,
-                                    color: AppColors.muted,
-                                  ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              'Make sure monitors are running on your network',
-                              style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(color: AppColors.muted),
-                            ),
-                          ],
-                        ),
-                      )
-                    : ListView.builder(
-                        controller: scrollController,
-                        itemCount: monitors.length,
-                        itemBuilder: (context, index) =>
-                            DiscoveredMonitorItem(data: monitors[index]),
-                      ),
-              ),
-              const SizedBox(height: 16),
-            ],
-          ),
+            );
+          },
         ),
       ),
     );
@@ -712,10 +738,7 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
               children: [
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: () => _showDiscoveredMonitorsDrawer(
-                      context,
-                      discoveredMonitors,
-                    ),
+                    onPressed: () => _showDiscoveredMonitorsDrawer(context),
                     icon: const Icon(Icons.wifi_find),
                     label: Text(
                       discoveredMonitors.isEmpty

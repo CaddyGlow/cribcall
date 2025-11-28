@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+ - Task: firebase-secret-cleanup — Removed the tracked Android `google-services.json`, added an ignore and example template, and require developers to supply local Firebase config to keep keys out of git.
+ - Task: firebase-api-key-rotation-script — Added a script to clone/rotate GCP API keys with copied restrictions, handles async key creation to capture key strings, and guides keeping outputs local.
  - Task: android-fgs-mic-fallback — Guarded microphone foreground-service start on Android 15/SDK 36 with a dataSync fallback so monitoring doesn’t crash when MIC FGS permissions are denied at runtime.
  - Task: linux-noise-ws-only — Allow Linux listeners to register websocket-only noise leases when FCM is unavailable, skip FCM pushes for ws-only subscriptions, and prefer the ws-only token during subscription renewal so noise events still flow over WebSocket.
  - Task: android-fgs-advertise — Deferred Android advertise-only foreground service starts when the app is backgrounded, surfaced a clear platform error instead of throwing, and retried pending starts on resume so mDNS ads recover once the activity is foreground.

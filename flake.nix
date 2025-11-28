@@ -117,6 +117,7 @@
             pkgs.rustup
             pkgs.sysprof
             pkgs.lua54Packages.lua
+            pkgs.google-cloud-sdk
           ];
 
           RUSTC_VERSION = rustcChannel;

@@ -24,7 +24,17 @@ void _log(String message) {
 
 /// Refactored Monitor Dashboard using shared components.
 class MonitorDashboard extends ConsumerStatefulWidget {
-  const MonitorDashboard({super.key});
+  const MonitorDashboard({
+    super.key,
+    this.showPairingDrawer = false,
+    this.onPairingDrawerShown,
+  });
+
+  /// If true, will show the pairing drawer on build if there's an active session.
+  final bool showPairingDrawer;
+
+  /// Called after the pairing drawer is shown due to [showPairingDrawer].
+  final VoidCallback? onPairingDrawerShown;
 
   @override
   ConsumerState<MonitorDashboard> createState() => _MonitorDashboardState();
@@ -36,6 +46,8 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
   bool _refreshInProgress = false;
   Timer? _refreshDebounce;
   late final MdnsService _mdnsService;
+  bool _drawerShownFromRoute = false;
+  bool _drawerCurrentlyOpen = false;
 
   bool get _isAndroid =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
@@ -44,6 +56,47 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
   void initState() {
     super.initState();
     _mdnsService = ref.read(mdnsServiceProvider);
+
+    // Show pairing drawer if requested via route parameter
+    if (widget.showPairingDrawer) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _showPairingDrawerIfNeeded(fromRoute: true);
+      });
+    }
+  }
+
+  @override
+  void didUpdateWidget(MonitorDashboard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Handle route-triggered drawer show
+    if (widget.showPairingDrawer &&
+        !oldWidget.showPairingDrawer &&
+        !_drawerShownFromRoute) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _showPairingDrawerIfNeeded(fromRoute: true);
+      });
+    }
+  }
+
+  void _showPairingDrawerIfNeeded({bool fromRoute = false}) {
+    if (_drawerCurrentlyOpen) return;
+
+    final session = ref.read(pairingServerProvider).activeSession;
+    if (session == null) return;
+
+    _drawerCurrentlyOpen = true;
+    if (fromRoute) {
+      _drawerShownFromRoute = true;
+    }
+
+    showPairingConfirmationDrawer(
+      context,
+      ref,
+      onDismissed: () {
+        _drawerCurrentlyOpen = false;
+        widget.onPairingDrawerShown?.call();
+      },
+    );
   }
 
   @override
@@ -227,6 +280,19 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
     ref.listen<bool>(monitoringStatusProvider, (prev, next) {
       _scheduleRefresh();
     });
+
+    // Auto-show pairing drawer when a new session arrives
+    ref.listen(
+      pairingServerProvider.select((s) => s.activeSession),
+      (prev, next) {
+        if (prev == null && next != null) {
+          // New session arrived - show drawer
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _showPairingDrawerIfNeeded();
+          });
+        }
+      },
+    );
 
     // Schedule initial advertisement for non-Android platforms
     if (identityForAd.hasValue &&
@@ -611,31 +677,77 @@ class _PairingIdentityCard extends ConsumerWidget {
         ),
         if (pairingServer.activeSession != null) ...[
           const SizedBox(height: 8),
-          PairingSessionBanner(
-            session: pairingServer.activeSession!,
-            onAccept: () {
-              ref
-                  .read(pairingServerProvider.notifier)
-                  .confirmSession(pairingServer.activeSession!.sessionId);
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text(
-                    'Pairing accepted - waiting for listener to confirm',
-                  ),
-                ),
-              );
-            },
-            onReject: () {
-              ref
-                  .read(pairingServerProvider.notifier)
-                  .rejectSession(pairingServer.activeSession!.sessionId);
-              ScaffoldMessenger.of(
-                context,
-              ).showSnackBar(const SnackBar(content: Text('Pairing rejected')));
-            },
-          ),
+          _PairingRequestIndicator(session: pairingServer.activeSession!),
         ],
       ],
+    );
+  }
+}
+
+/// Compact indicator for active pairing requests.
+/// Tapping opens the full pairing confirmation drawer.
+class _PairingRequestIndicator extends ConsumerWidget {
+  const _PairingRequestIndicator({required this.session});
+
+  final ActivePairingSession session;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Material(
+      color: AppColors.warning.withValues(alpha: 0.1),
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: () => showPairingConfirmationDrawer(context, ref),
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppColors.warning.withValues(alpha: 0.3)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: AppColors.warning.withValues(alpha: 0.2),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.phonelink_lock,
+                  color: AppColors.warning,
+                  size: 16,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Pairing request pending',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                            fontWeight: FontWeight.w600,
+                          ),
+                    ),
+                    Text(
+                      '${session.listenerName} - tap to respond',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: AppColors.muted,
+                          ),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(
+                Icons.chevron_right,
+                color: AppColors.muted,
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

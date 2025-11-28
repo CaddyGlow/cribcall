@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../domain/models.dart';
 import '../../identity/device_identity.dart';
+import '../../routing/app_router.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
 import '../../util/format_utils.dart';
@@ -32,67 +34,23 @@ List<DropdownMenuItem<int>> monitorDropdownItems({
       .toList();
 }
 
-class RoleSelectionPage extends ConsumerStatefulWidget {
-  const RoleSelectionPage({super.key});
+class RoleSelectionPage extends ConsumerWidget {
+  const RoleSelectionPage({
+    super.key,
+    required this.selectedIndex,
+    required this.onTabSelected,
+    this.showPairingDrawer = false,
+  });
+
+  final int selectedIndex;
+  final ValueChanged<int> onTabSelected;
+  final bool showPairingDrawer;
 
   @override
-  ConsumerState<RoleSelectionPage> createState() => _RoleSelectionPageState();
-}
-
-class _RoleSelectionPageState extends ConsumerState<RoleSelectionPage> {
-  int _selectedIndex = 0;
-  bool _sessionRestored = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _restoreSession();
-  }
-
-  Future<void> _restoreSession() async {
-    // Wait for session to load
-    final session = await ref.read(appSessionProvider.future);
-
-    if (!mounted) return;
-
-    setState(() {
-      // Restore tab selection based on last role
-      if (session.lastRole == DeviceRole.listener) {
-        _selectedIndex = 1;
-      } else {
-        _selectedIndex = 0;
-      }
-      _sessionRestored = true;
-    });
-
-    // Restore monitoring status
-    ref
-        .read(monitoringStatusProvider.notifier)
-        .restoreFromSession(session.monitoringEnabled);
-
-    // Restore role
-    if (session.lastRole != null) {
-      ref.read(roleProvider.notifier).restoreFromSession(session.lastRole);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final identityAsync = ref.watch(identityProvider);
-    // Keep roleProvider in sync for other parts of the app
-    final currentRole = _selectedIndex == 0
-        ? DeviceRole.monitor
-        : DeviceRole.listener;
-
-    // Update role provider when tab changes (only after session is restored)
-    if (_sessionRestored) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        final role = ref.read(roleProvider);
-        if (role != currentRole) {
-          ref.read(roleProvider.notifier).select(currentRole);
-        }
-      });
-    }
+    final currentRole =
+        selectedIndex == 0 ? DeviceRole.monitor : DeviceRole.listener;
 
     return Scaffold(
       appBar: AppBar(
@@ -118,25 +76,29 @@ class _RoleSelectionPageState extends ConsumerState<RoleSelectionPage> {
         ],
       ),
       body: IndexedStack(
-        index: _selectedIndex,
-        children: const [
+        index: selectedIndex,
+        children: [
           SingleChildScrollView(
-            padding: EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-            child: MonitorDashboard(),
+            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+            child: MonitorDashboard(
+              showPairingDrawer: showPairingDrawer,
+              onPairingDrawerShown: () {
+                // Navigate back to /monitor to clear the pairing flag
+                if (context.mounted) {
+                  context.go(AppRoutes.monitor);
+                }
+              },
+            ),
           ),
-          SingleChildScrollView(
+          const SingleChildScrollView(
             padding: EdgeInsets.symmetric(horizontal: 18, vertical: 16),
             child: ListenerDashboard(),
           ),
         ],
       ),
       bottomNavigationBar: NavigationBar(
-        selectedIndex: _selectedIndex,
-        onDestinationSelected: (index) {
-          setState(() {
-            _selectedIndex = index;
-          });
-        },
+        selectedIndex: selectedIndex,
+        onDestinationSelected: onTabSelected,
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.sensors_outlined),

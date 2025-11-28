@@ -49,6 +49,10 @@ class IdentityRepository {
     final certificateDer = base64Decode(data['certificateDer'] as String);
     final storedFingerprint = data['certFingerprint'] as String;
 
+    if (privateKeyBytes.isEmpty) {
+      throw const FormatException('Stored identity missing private key bytes');
+    }
+
     final publicKey = SimplePublicKey(publicKeyBytes, type: KeyPairType.p256);
     final keyPair = SimpleKeyPairData(
       privateKeyBytes,

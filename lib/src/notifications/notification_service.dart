@@ -1,6 +1,10 @@
+import 'dart:convert';
 import 'dart:developer' as developer;
 
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+/// Callback type for notification responses.
+typedef NotificationResponseCallback = void Function(NotificationResponse);
 
 /// Singleton service for showing local notifications.
 class NotificationService {
@@ -13,6 +17,10 @@ class NotificationService {
 
   bool _initialized = false;
 
+  /// Callback for handling notification responses (taps and actions).
+  /// Set this to handle navigation and pairing actions from notifications.
+  NotificationResponseCallback? onNotificationResponse;
+
   // Noise alerts channel
   static const _channelId = 'cribcall_alerts';
   static const _channelName = 'Noise Alerts';
@@ -24,6 +32,13 @@ class NotificationService {
   static const _pairingChannelDescription =
       'Notifications for incoming pairing requests';
   static const _linuxDefaultActionName = 'Open notification';
+
+  // Notification action IDs
+  static const actionAccept = 'accept_pairing';
+  static const actionDeny = 'deny_pairing';
+
+  // Notification IDs
+  static const pairingNotificationId = 1001;
 
   /// Initialize the notification plugin.
   /// Call this early in app startup.
@@ -124,13 +139,22 @@ class NotificationService {
   /// Show a pairing request notification.
   /// [listenerName] is the name of the device requesting to pair.
   /// [comparisonCode] is the 6-digit code to verify.
+  /// [sessionId] is used to identify the pairing session for actions.
   Future<void> showPairingRequest({
     required String listenerName,
     required String comparisonCode,
+    required String sessionId,
   }) async {
     if (!_initialized) {
       await initialize();
     }
+
+    // Encode session info in payload for action handling
+    final payload = jsonEncode({
+      'type': 'pairing',
+      'sessionId': sessionId,
+      'listenerName': listenerName,
+    });
 
     const androidDetails = AndroidNotificationDetails(
       _pairingChannelId,
@@ -144,6 +168,19 @@ class NotificationService {
       // Use ongoing to make it sticky until user responds
       ongoing: true,
       autoCancel: false,
+      // Add action buttons
+      actions: <AndroidNotificationAction>[
+        AndroidNotificationAction(
+          actionAccept,
+          'Accept',
+          showsUserInterface: true,
+        ),
+        AndroidNotificationAction(
+          actionDeny,
+          'Deny',
+          cancelNotification: true,
+        ),
+      ],
     );
 
     const linuxDetails = LinuxNotificationDetails(
@@ -159,14 +196,12 @@ class NotificationService {
       linux: linuxDetails,
     );
 
-    // Use a fixed ID so we can cancel/replace it
-    const notificationId = 1001;
-
     await _plugin.show(
-      notificationId,
+      pairingNotificationId,
       'Pairing Request',
       '$listenerName wants to pair. Code: $comparisonCode',
       details,
+      payload: payload,
     );
 
     _log('Showed pairing request notification for $listenerName');
@@ -174,14 +209,17 @@ class NotificationService {
 
   /// Cancel the pairing request notification.
   Future<void> cancelPairingRequest() async {
-    const notificationId = 1001;
-    await _plugin.cancel(notificationId);
+    await _plugin.cancel(pairingNotificationId);
     _log('Cancelled pairing request notification');
   }
 
   void _onNotificationTapped(NotificationResponse response) {
-    _log('Notification tapped: ${response.payload}');
-    // App will be brought to foreground automatically
+    _log(
+      'Notification response: actionId=${response.actionId}, '
+      'payload=${response.payload}',
+    );
+    // Forward to the registered callback
+    onNotificationResponse?.call(response);
   }
 
   void _log(String message) {
