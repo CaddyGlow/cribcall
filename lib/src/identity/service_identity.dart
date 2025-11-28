@@ -27,10 +27,9 @@ class ServiceIdentityBuilder {
     String? pairingToken,
   }) {
     return MonitorQrPayload(
-      monitorId: identity.deviceId,
+      remoteDeviceId: identity.deviceId,
       monitorName: monitorName,
-      monitorCertFingerprint: identity.certFingerprint,
-      monitorPublicKey: base64Encode(identity.publicKey.bytes),
+      certFingerprint: identity.certFingerprint,
       ips: ips,
       pairingToken: pairingToken,
       service: QrServiceInfo(
@@ -65,9 +64,9 @@ class ServiceIdentityBuilder {
     required int pairingPort,
   }) {
     return MdnsAdvertisement(
-      monitorId: identity.deviceId,
+      remoteDeviceId: identity.deviceId,
       monitorName: monitorName,
-      monitorCertFingerprint: identity.certFingerprint,
+      certFingerprint: identity.certFingerprint,
       controlPort: controlPort,
       pairingPort: pairingPort,
       version: serviceVersion,

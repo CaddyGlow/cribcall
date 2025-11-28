@@ -13,10 +13,9 @@ void main() {
       transport: kTransportHttpWs,
     );
     const payload = MonitorQrPayload(
-      monitorId: 'M1-UUID',
+      remoteDeviceId: 'M1-UUID',
       monitorName: 'Nursery',
-      monitorCertFingerprint: 'hex-sha256',
-      monitorPublicKey: 'pub',
+      certFingerprint: 'hex-sha256',
       service: service,
     );
 
@@ -24,11 +23,8 @@ void main() {
     expect(json['type'], equals(MonitorQrPayload.payloadType));
 
     final decoded = MonitorQrPayload.fromJson(json);
-    expect(decoded.monitorId, equals(payload.monitorId));
-    expect(
-      decoded.monitorCertFingerprint,
-      equals(payload.monitorCertFingerprint),
-    );
+    expect(decoded.remoteDeviceId, equals(payload.remoteDeviceId));
+    expect(decoded.certFingerprint, equals(payload.certFingerprint));
     expect(decoded.service.controlPort, equals(kControlDefaultPort));
     expect(decoded.service.pairingPort, equals(kPairingDefaultPort));
     expect(decoded.service.transport, equals(kTransportHttpWs));
@@ -48,10 +44,9 @@ void main() {
       transport: kTransportHttpWs,
     );
     const payload = MonitorQrPayload(
-      monitorId: 'M1-UUID',
+      remoteDeviceId: 'M1-UUID',
       monitorName: 'Nursery',
-      monitorCertFingerprint: 'hex-sha256',
-      monitorPublicKey: 'pub',
+      certFingerprint: 'hex-sha256',
       ips: ['192.168.1.100', '10.0.0.5'],
       service: service,
     );
@@ -72,9 +67,9 @@ void main() {
       transport: kTransportHttpWs,
     );
     const payload = MonitorQrPayload(
-      monitorId: 'M1-UUID',
+      remoteDeviceId: 'M1-UUID',
       monitorName: 'Nursery',
-      monitorCertFingerprint: 'hex-sha256',
+      certFingerprint: 'hex-sha256',
       service: service,
     );
 
@@ -94,6 +89,8 @@ void main() {
       ),
       autoStreamType: AutoStreamType.audioVideo,
       autoStreamDurationSec: 20,
+      audioInputGain: 100,
+      audioInputDeviceId: 'alsa_input.test',
     );
 
     final json = settings.toJson();
@@ -102,13 +99,14 @@ void main() {
     expect(parsed.noise.threshold, 55);
     expect(parsed.autoStreamType, AutoStreamType.audioVideo);
     expect(parsed.autoStreamDurationSec, 20);
+    expect(parsed.audioInputDeviceId, 'alsa_input.test');
   });
 
   test('mDNS advertisement round-trips', () {
     const ad = MdnsAdvertisement(
-      monitorId: 'monitor-1',
+      remoteDeviceId: 'monitor-1',
       monitorName: 'Nursery',
-      monitorCertFingerprint: 'fp',
+      certFingerprint: 'fp',
       controlPort: kControlDefaultPort,
       pairingPort: kPairingDefaultPort,
       version: 1,
@@ -124,7 +122,7 @@ void main() {
 
   test('TrustedMonitor round-trips with knownIps', () {
     final monitor = TrustedMonitor(
-      monitorId: 'monitor-1',
+      remoteDeviceId: 'monitor-1',
       monitorName: 'Nursery',
       certFingerprint: 'sha256:abc123',
       controlPort: kControlDefaultPort,
@@ -141,7 +139,7 @@ void main() {
     expect(json['lastKnownIp'], equals('192.168.1.100'));
 
     final parsed = TrustedMonitor.fromJson(json);
-    expect(parsed.monitorId, 'monitor-1');
+    expect(parsed.remoteDeviceId, 'monitor-1');
     expect(parsed.monitorName, 'Nursery');
     expect(parsed.knownIps, equals(['192.168.1.100', '10.0.0.5']));
     expect(parsed.lastKnownIp, '192.168.1.100');
@@ -149,7 +147,7 @@ void main() {
 
   test('TrustedMonitor without knownIps omits field in JSON', () {
     final monitor = TrustedMonitor(
-      monitorId: 'monitor-1',
+      remoteDeviceId: 'monitor-1',
       monitorName: 'Nursery',
       certFingerprint: 'sha256:abc123',
       addedAtEpochSec: 1700000000,
@@ -164,7 +162,7 @@ void main() {
 
   test('TrustedMonitor copyWith preserves and updates fields', () {
     final monitor = TrustedMonitor(
-      monitorId: 'monitor-1',
+      remoteDeviceId: 'monitor-1',
       monitorName: 'Nursery',
       certFingerprint: 'sha256:abc123',
       knownIps: ['192.168.1.100'],
@@ -176,7 +174,7 @@ void main() {
       knownIps: ['192.168.1.100', '10.0.0.5'],
     );
 
-    expect(updated.monitorId, 'monitor-1');
+    expect(updated.remoteDeviceId, 'monitor-1');
     expect(updated.monitorName, 'Nursery');
     expect(updated.lastKnownIp, '10.0.0.5');
     expect(updated.knownIps, equals(['192.168.1.100', '10.0.0.5']));

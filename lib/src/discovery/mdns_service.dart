@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 
 import '../config/build_flags.dart';
 import '../domain/models.dart';
+import '../util/format_utils.dart';
 
 /// Set to true to enable verbose mDNS trace logging.
 const _kMdnsTrace = false;
@@ -65,25 +66,30 @@ class MethodChannelMdnsService implements MdnsService {
     return _events
         .receiveBroadcastStream()
         .handleError(
-          (Object error, _) =>
-              _mdnsLog('mDNS browse error: $error'),
+          (Object error, StackTrace stack) =>
+              _mdnsLog('mDNS platform stream error: $error\n$stack'),
         )
         .where((event) {
           final isMap = event is Map;
           if (!isMap) {
-            _mdnsTrace('mDNS browse: ignoring non-Map event: ${event.runtimeType}');
+            _mdnsLog('mDNS browse: ignoring non-Map event: ${event.runtimeType}');
           }
           return isMap;
         })
         .map((event) {
           final map = Map<String, dynamic>.from(event as Map);
-          final isOnline = map['isOnline'] as bool? ?? true;
-          final advertisement = MdnsAdvertisement.fromJson(map);
-          _mdnsLog(
-            'Platform mDNS event: ${isOnline ? "ONLINE" : "OFFLINE"} '
-            'monitorId=${advertisement.monitorId} ip=${advertisement.ip}',
-          );
-          return MdnsEvent(advertisement: advertisement, isOnline: isOnline);
+          try {
+            final isOnline = map['isOnline'] as bool? ?? true;
+            final advertisement = MdnsAdvertisement.fromJson(map);
+            _mdnsLog(
+              'Platform mDNS event: ${isOnline ? "ONLINE" : "OFFLINE"} '
+              'remoteDeviceId=${advertisement.remoteDeviceId} ip=${advertisement.ip}',
+            );
+            return MdnsEvent(advertisement: advertisement, isOnline: isOnline);
+          } catch (e, stack) {
+            _mdnsLog('FAILED to parse mDNS event: $e\nPayload: $map\n$stack');
+            rethrow;
+          }
         });
   }
 
@@ -91,10 +97,10 @@ class MethodChannelMdnsService implements MdnsService {
   Future<void> startAdvertise(MdnsAdvertisement advertisement) async {
     _mdnsTrace(
       'MethodChannelMdnsService.startAdvertise() '
-      'monitorId=${advertisement.monitorId} '
+      'remoteDeviceId=${advertisement.remoteDeviceId} '
       'controlPort=${advertisement.controlPort} '
       'pairingPort=${advertisement.pairingPort} '
-      'fp=${_shortFingerprint(advertisement.monitorCertFingerprint)}',
+      'fp=${shortFingerprint(advertisement.certFingerprint)}',
     );
     await _method.invokeMethod('startAdvertise', advertisement.toJson());
   }
@@ -109,8 +115,8 @@ class MethodChannelMdnsService implements MdnsService {
 /// Desktop (Linux) using raw multicast sockets for continuous mDNS listening
 /// and avahi-publish-service for advertising.
 class DesktopMdnsService implements MdnsService {
-  // Cache instanceName -> monitorId for goodbye packets
-  final _instanceToMonitorId = <String, String>{};
+  // Cache instanceName -> remoteDeviceId for goodbye packets
+  final _instanceToDeviceId = <String, String>{};
 
   // Static to survive provider recreation
   static int? _avahiPid;
@@ -317,17 +323,20 @@ class DesktopMdnsService implements MdnsService {
           _MdnsRecord? srvRecord;
           _MdnsRecord? txtRecord;
           _MdnsRecord? aRecord;
+          _MdnsRecord? aaaaRecord;
 
           for (final r in records) {
             if (r.name == instanceName) {
               if (r.type == _DnsRecordType.srv) srvRecord = r;
               if (r.type == _DnsRecordType.txt) txtRecord = r;
             }
-            // A record might be for the target hostname
-            if (r.type == _DnsRecordType.a) {
-              if (srvRecord?.srvTarget != null &&
-                  r.name == srvRecord!.srvTarget) {
+            // Address records might be for the target hostname
+            if (srvRecord?.srvTarget != null &&
+                r.name == srvRecord!.srvTarget) {
+              if (r.type == _DnsRecordType.a) {
                 aRecord = r;
+              } else if (r.type == _DnsRecordType.aaaa) {
+                aaaaRecord = r;
               }
             }
           }
@@ -335,25 +344,29 @@ class DesktopMdnsService implements MdnsService {
           // For goodbye packets, we may not have full records, but we need
           // to extract what we can from the instance name
           if (isGoodbye) {
-            // Parse TXT attributes if available, or use cached monitorId
+            // Parse TXT attributes if available, or use cached remoteDeviceId
             final attrs = txtRecord?.txtAttributes ?? {};
-            final cachedMonitorId = _instanceToMonitorId[instanceName];
-            final monitorId = attrs['monitorId'] ?? cachedMonitorId ?? instanceName;
+            final cachedDeviceId = _instanceToDeviceId[instanceName];
+            final remoteDeviceId = attrs['remoteDeviceId'] ?? cachedDeviceId ?? instanceName;
             final monitorName = attrs['monitorName'] ?? instanceName;
             final fingerprint = attrs['monitorCertFingerprint'] ?? '';
-            final ip = aRecord?.aAddress ?? source.address;
+            final ip = _selectBestIp(
+              ipv4: aRecord?.aAddress,
+              ipv6: aaaaRecord?.aaaaAddress,
+              fallback: source.address,
+            );
 
             // Remove from caches
-            _instanceToMonitorId.remove(instanceName);
-            final keyPrefix = '$monitorId:';
+            _instanceToDeviceId.remove(instanceName);
+            final keyPrefix = '$remoteDeviceId:';
             seenServices.removeWhere((key, _) => key.startsWith(keyPrefix));
 
             if (!controller.isClosed) {
-              _mdnsLog('OFFLINE monitor=$monitorId ip=$ip');
+              _mdnsLog('OFFLINE remoteDeviceId=$remoteDeviceId ip=$ip');
               controller.add(MdnsEvent.offline(MdnsAdvertisement(
-                monitorId: monitorId,
+                remoteDeviceId: remoteDeviceId,
                 monitorName: monitorName,
-                monitorCertFingerprint: fingerprint,
+                certFingerprint: fingerprint,
                 controlPort: srvRecord?.srvPort ?? kControlDefaultPort,
                 pairingPort: kPairingDefaultPort,
                 version: 1,
@@ -365,20 +378,22 @@ class DesktopMdnsService implements MdnsService {
 
           if (srvRecord == null) continue;
 
-          // Also look for A record matching SRV target
-          if (aRecord == null && srvRecord.srvTarget != null) {
+          // Also look for address records matching SRV target
+          if ((aRecord == null || aaaaRecord == null) &&
+              srvRecord.srvTarget != null) {
             for (final r in records) {
-              if (r.type == _DnsRecordType.a &&
-                  r.name == srvRecord.srvTarget) {
+              if (r.name != srvRecord.srvTarget) continue;
+              if (r.type == _DnsRecordType.a && aRecord == null) {
                 aRecord = r;
-                break;
+              } else if (r.type == _DnsRecordType.aaaa && aaaaRecord == null) {
+                aaaaRecord = r;
               }
             }
           }
 
           // Parse TXT attributes
           final attrs = txtRecord?.txtAttributes ?? {};
-          final monitorId = attrs['monitorId'] ?? instanceName;
+          final remoteDeviceId = attrs['remoteDeviceId'] ?? instanceName;
           final monitorName = attrs['monitorName'] ?? instanceName;
           final fingerprint = attrs['monitorCertFingerprint'] ?? '';
           final transport = attrs['transport'] ?? kTransportHttpWs;
@@ -388,13 +403,17 @@ class DesktopMdnsService implements MdnsService {
           final pairingPort = int.tryParse(attrs['pairingPort'] ?? '') ??
               kPairingDefaultPort;
           final version = int.tryParse(attrs['version'] ?? '1') ?? 1;
-          final ip = aRecord?.aAddress ?? source.address;
+          final ip = _selectBestIp(
+            ipv4: aRecord?.aAddress,
+            ipv6: aaaaRecord?.aaaaAddress,
+            fallback: source.address,
+          );
 
-          // Cache instanceName -> monitorId for goodbye packets
-          _instanceToMonitorId[instanceName] = monitorId;
+          // Cache instanceName -> remoteDeviceId for goodbye packets
+          _instanceToDeviceId[instanceName] = remoteDeviceId;
 
           // Dedupe check (only for online events)
-          final key = '$monitorId:$ip:$controlPort';
+          final key = '$remoteDeviceId:$ip:$controlPort';
           final now = DateTime.now();
           final lastSeen = seenServices[key];
           if (lastSeen != null && now.difference(lastSeen) < dedupeWindow) {
@@ -409,13 +428,13 @@ class DesktopMdnsService implements MdnsService {
 
           if (!controller.isClosed) {
             _mdnsLog(
-              'ONLINE monitor=$monitorId ip=$ip port=$controlPort '
-              'fp=${_shortFingerprint(fingerprint)}',
+              'ONLINE remoteDeviceId=$remoteDeviceId ip=$ip port=$controlPort '
+              'fp=${shortFingerprint(fingerprint)}',
             );
             controller.add(MdnsEvent.online(MdnsAdvertisement(
-              monitorId: monitorId,
+              remoteDeviceId: remoteDeviceId,
               monitorName: monitorName,
-              monitorCertFingerprint: fingerprint,
+              certFingerprint: fingerprint,
               controlPort: controlPort,
               pairingPort: pairingPort,
               version: version,
@@ -434,7 +453,7 @@ class DesktopMdnsService implements MdnsService {
   @override
   Future<void> startAdvertise(MdnsAdvertisement advertisement) async {
     _mdnsTrace('DesktopMdnsService.startAdvertise() called for '
-        'monitorId=${advertisement.monitorId}');
+        'remoteDeviceId=${advertisement.remoteDeviceId}');
 
     // Wait for any in-progress advertise operation to complete
     if (_advertiseLock != null) {
@@ -446,19 +465,22 @@ class DesktopMdnsService implements MdnsService {
     _advertiseLock = Completer<void>();
 
     try {
+      // Best-effort cleanup of stale avahi publishers from previous runs
+      await _killStaleAvahiProcesses(advertisement.remoteDeviceId);
+
       // Kill any existing avahi process first (use static PID to survive provider recreation)
       await _killAvahiProcess();
 
       // Use avahi-publish-service if available.
       try {
-        final serviceName = '${advertisement.monitorName}-${advertisement.monitorId}';
+        final serviceName = '${advertisement.monitorName}-${advertisement.remoteDeviceId}';
         final args = [
           serviceName,
           '_baby-monitor._tcp',
           advertisement.controlPort.toString(),
-          'monitorId=${advertisement.monitorId}',
+          'remoteDeviceId=${advertisement.remoteDeviceId}',
           'monitorName=${advertisement.monitorName}',
-          'monitorCertFingerprint=${advertisement.monitorCertFingerprint}',
+          'monitorCertFingerprint=${advertisement.certFingerprint}',
           'controlPort=${advertisement.controlPort}',
           'pairingPort=${advertisement.pairingPort}',
           'version=${advertisement.version}',
@@ -528,6 +550,55 @@ class DesktopMdnsService implements MdnsService {
     _avahiPid = null;
   }
 
+  /// Kill any avahi-publish-service processes that include [remoteDeviceId] in the cmdline.
+  /// This handles stale publishers left behind when the app restarts.
+  Future<void> _killStaleAvahiProcesses(String remoteDeviceId) async {
+    try {
+      final result = await Process.run('pgrep', ['-f', 'avahi-publish-service']);
+      if (result.exitCode != 0) return;
+      final lines = (result.stdout as String)
+          .split('\n')
+          .where((line) => line.trim().isNotEmpty);
+      for (final line in lines) {
+        final pid = int.tryParse(line.trim());
+        if (pid == null || pid == _avahiPid) continue;
+        final cmd = await Process.run('ps', ['-o', 'cmd=', '-p', '$pid']);
+        final cmdline = (cmd.stdout as String?)?.trim() ?? '';
+        if (!cmdline.contains(remoteDeviceId)) continue;
+        _mdnsTrace('Killing stale avahi-publish-service PID $pid (cmd="$cmdline")');
+        try {
+          Process.killPid(pid, ProcessSignal.sigterm);
+        } catch (_) {
+          // Ignore failures; best effort.
+        }
+      }
+    } catch (e) {
+      _mdnsTrace('Could not check for stale avahi publishers: $e');
+    }
+  }
+
+  String? _selectBestIp({String? ipv4, String? ipv6, String? fallback}) {
+    if (_isUsableIp(ipv4)) return ipv4;
+    if (_isUsableIpv6(ipv6)) return ipv6;
+    if (_isUsableIp(fallback)) return fallback;
+    return null;
+  }
+
+  bool _isUsableIp(String? ip) {
+    if (ip == null || ip.isEmpty) return false;
+    if (ip == '0.0.0.0' || ip == '::' || ip == '::0') return false;
+    return true;
+  }
+
+  bool _isUsableIpv6(String? ip) {
+    if (!_isUsableIp(ip)) return false;
+    return !_isLinkLocalIpv6(ip!);
+  }
+
+  bool _isLinkLocalIpv6(String ip) {
+    return ip.toLowerCase().startsWith('fe80:');
+  }
+
   @override
   Future<void> stop() async {
     _mdnsTrace('DesktopMdnsService.stop() called - stopping advertising only');
@@ -551,6 +622,7 @@ class _MdnsRecord {
     this.srvTarget,
     this.srvPort,
     this.aAddress,
+    this.aaaaAddress,
   });
 
   final String name;
@@ -562,6 +634,7 @@ class _MdnsRecord {
   final String? srvTarget;
   final int? srvPort;
   final String? aAddress;
+  final String? aaaaAddress;
 }
 
 // Simple mDNS packet parser
@@ -614,6 +687,7 @@ class _MdnsParser {
     String? srvTarget;
     int? srvPort;
     String? aAddress;
+    String? aaaaAddress;
 
     switch (typeValue) {
       case 1: // A
@@ -622,6 +696,7 @@ class _MdnsParser {
           aAddress = '${data[_offset]}.${data[_offset + 1]}.'
               '${data[_offset + 2]}.${data[_offset + 3]}';
         }
+        break;
       case 12: // PTR
         type = _DnsRecordType.ptr;
         ptrDomain = _readName();
@@ -630,8 +705,18 @@ class _MdnsParser {
       case 16: // TXT
         type = _DnsRecordType.txt;
         txtAttrs = _parseTxtRecord(rdLength);
+        break;
       case 28: // AAAA
         type = _DnsRecordType.aaaa;
+        if (rdLength >= 16) {
+          final raw = Uint8List.sublistView(data, _offset, _offset + 16);
+          try {
+            aaaaAddress = InternetAddress.fromRawAddress(raw).address;
+          } catch (_) {
+            // Ignore parse errors
+          }
+        }
+        break;
       case 33: // SRV
         type = _DnsRecordType.srv;
         if (rdLength >= 6) {
@@ -648,6 +733,7 @@ class _MdnsParser {
             srvPort: srvPort,
           );
         }
+        break;
       default:
         type = _DnsRecordType.other;
     }
@@ -663,6 +749,7 @@ class _MdnsParser {
       srvTarget: srvTarget,
       srvPort: srvPort,
       aAddress: aAddress,
+      aaaaAddress: aaaaAddress,
     );
   }
 
@@ -738,11 +825,4 @@ class _MdnsParser {
 
     return labels.join('.');
   }
-}
-
-String _shortFingerprint(String fingerprint) {
-  if (fingerprint.length <= 12) return fingerprint;
-  final prefix = fingerprint.substring(0, 6);
-  final suffix = fingerprint.substring(fingerprint.length - 4);
-  return '$prefix...$suffix';
 }

@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../domain/models.dart';
 import '../../../theme.dart';
+import '../../../util/format_utils.dart';
 import '../../../webrtc/webrtc_controller.dart';
 import '../../shared/widgets/widgets.dart';
 import 'live_sound_wave.dart';
@@ -10,7 +11,7 @@ import 'live_sound_wave.dart';
 /// Data for a monitor item display.
 class MonitorItemData {
   MonitorItemData({
-    required this.monitorId,
+    required this.remoteDeviceId,
     required this.name,
     required this.status,
     required this.fingerprint,
@@ -33,7 +34,7 @@ class MonitorItemData {
     this.onSettings,
   });
 
-  final String monitorId;
+  final String remoteDeviceId;
   final String name;
   final String status;
   final String fingerprint;
@@ -177,9 +178,7 @@ class TrustedMonitorItem extends ConsumerWidget {
             const Icon(Icons.fingerprint, size: 12, color: AppColors.muted),
             const SizedBox(width: 4),
             Text(
-              data.fingerprint.length > 12
-                  ? data.fingerprint.substring(0, 12)
-                  : data.fingerprint,
+              shortFingerprint(data.fingerprint),
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                     color: AppColors.muted,
                     fontFamily: 'monospace',

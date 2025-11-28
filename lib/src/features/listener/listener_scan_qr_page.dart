@@ -7,6 +7,7 @@ import '../../domain/models.dart';
 import '../../pairing/qr_payload_parser.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
+import '../../util/format_utils.dart';
 
 class ListenerScanQrPage extends ConsumerStatefulWidget {
   const ListenerScanQrPage({super.key});
@@ -16,9 +17,7 @@ class ListenerScanQrPage extends ConsumerStatefulWidget {
 }
 
 class _ListenerScanQrPageState extends ConsumerState<ListenerScanQrPage> {
-  final MobileScannerController _scannerController = MobileScannerController(
-    autoStart: false,
-  );
+  MobileScannerController? _scannerController;
   final TextEditingController _manualInputController = TextEditingController();
 
   MonitorQrPayload? _payload;
@@ -27,6 +26,7 @@ class _ListenerScanQrPageState extends ConsumerState<ListenerScanQrPage> {
   bool _scannerLocked = false;
   bool _startingScanner = false;
   bool _tokenPairingInProgress = false;
+  bool _scannerReady = false;
 
   void _handleCapture(BarcodeCapture capture) {
     if (_scannerLocked) return;
@@ -109,18 +109,32 @@ class _ListenerScanQrPageState extends ConsumerState<ListenerScanQrPage> {
       _scannerError = null;
     });
     try {
-      await _scannerController.start();
+      // Create controller only when starting - this defers plugin initialization
+      // until we're ready to handle errors
+      _scannerController = MobileScannerController(autoStart: false);
+      await _scannerController!.start();
+      if (mounted) {
+        setState(() {
+          _scannerReady = true;
+        });
+      }
     } on MissingPluginException {
+      _scannerController?.dispose();
+      _scannerController = null;
       setState(() {
         _scannerError =
             'Camera scanning is not available on this device. Paste the QR JSON instead.';
       });
     } on PlatformException catch (e) {
+      _scannerController?.dispose();
+      _scannerController = null;
       setState(() {
         _scannerError =
             'Camera unavailable (${e.code}): ${e.message ?? 'check permissions'}';
       });
     } catch (e) {
+      _scannerController?.dispose();
+      _scannerController = null;
       setState(() {
         _scannerError = 'Camera unavailable: $e';
       });
@@ -141,7 +155,7 @@ class _ListenerScanQrPageState extends ConsumerState<ListenerScanQrPage> {
 
   @override
   void dispose() {
-    _scannerController.dispose();
+    _scannerController?.dispose();
     _manualInputController.dispose();
     super.dispose();
   }
@@ -170,22 +184,27 @@ class _ListenerScanQrPageState extends ConsumerState<ListenerScanQrPage> {
                     message: _scannerError!,
                     isLoading: _startingScanner,
                   )
-                : MobileScanner(
-                    controller: _scannerController,
-                    fit: BoxFit.cover,
-                    onDetect: _handleCapture,
-                  ),
+                : _scannerReady && _scannerController != null
+                    ? MobileScanner(
+                        controller: _scannerController!,
+                        fit: BoxFit.cover,
+                        onDetect: _handleCapture,
+                      )
+                    : _ScannerUnavailableMessage(
+                        message: 'Starting camera...',
+                        isLoading: true,
+                      ),
           ),
           if (_tokenPairingInProgress)
             _PairingProgressCard(
               title: _payload?.monitorName ?? 'Monitor',
-              fingerprint: _payload?.monitorCertFingerprint ?? '',
+              fingerprint: _payload?.certFingerprint ?? '',
             )
           else if (_payload != null)
             _ResultCard(
               title: _payload!.monitorName,
-              fingerprint: _payload!.monitorCertFingerprint,
-              monitorId: _payload!.monitorId,
+              fingerprint: _payload!.certFingerprint,
+              remoteDeviceId: _payload!.remoteDeviceId,
               ips: _payload!.ips,
               hasToken: _payload!.hasToken,
               onUse: () => Navigator.of(context).pop(_payload),
@@ -262,7 +281,7 @@ class _ResultCard extends StatelessWidget {
   const _ResultCard({
     required this.title,
     required this.fingerprint,
-    required this.monitorId,
+    required this.remoteDeviceId,
     required this.onUse,
     this.ips,
     this.hasToken = false,
@@ -270,7 +289,7 @@ class _ResultCard extends StatelessWidget {
 
   final String title;
   final String fingerprint;
-  final String monitorId;
+  final String remoteDeviceId;
   final List<String>? ips;
   final bool hasToken;
   final VoidCallback onUse;
@@ -326,8 +345,8 @@ class _ResultCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 6),
-          Text('Monitor ID: $monitorId'),
-          Text('Fingerprint: ${fingerprint.substring(0, 12)}'),
+          Text('Monitor ID: $remoteDeviceId'),
+          Text('Fingerprint: ${shortFingerprint(fingerprint)}'),
           if (ips != null && ips!.isNotEmpty)
             Text('IPs: ${ips!.join(', ')}'),
           const SizedBox(height: 10),
@@ -378,7 +397,7 @@ class _PairingProgressCard extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           if (fingerprint.isNotEmpty)
-            Text('Fingerprint: ${fingerprint.substring(0, 12)}'),
+            Text('Fingerprint: ${shortFingerprint(fingerprint)}'),
           const SizedBox(height: 16),
           Row(
             children: [

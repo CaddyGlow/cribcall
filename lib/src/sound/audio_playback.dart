@@ -17,6 +17,9 @@ abstract class AudioPlaybackService {
   /// Stop the audio playback service.
   Future<void> stop();
 
+  /// Set playback volume multiplier (0.0 - 2.0).
+  Future<void> setVolume(double volume);
+
   /// Write raw PCM audio data (16-bit signed little-endian mono 16kHz).
   Future<void> write(Uint8List data);
 
@@ -41,6 +44,7 @@ class AndroidAudioPlaybackService implements AudioPlaybackService {
 
   final MethodChannel _method;
   bool _isRunning = false;
+  double _volume = 1.0;
 
   @override
   bool get isRunning => _isRunning;
@@ -53,6 +57,9 @@ class AndroidAudioPlaybackService implements AudioPlaybackService {
       final result = await _method.invokeMethod<bool>('start');
       _isRunning = result == true;
       debugPrint('[audio_playback] Audio playback started: $_isRunning');
+      if (_isRunning) {
+        await _applyVolume();
+      }
       return _isRunning;
     } catch (e) {
       debugPrint('[audio_playback] Failed to start audio playback: $e');
@@ -74,6 +81,12 @@ class AndroidAudioPlaybackService implements AudioPlaybackService {
   }
 
   @override
+  Future<void> setVolume(double volume) async {
+    _volume = volume.clamp(0.0, 2.0);
+    await _applyVolume();
+  }
+
+  @override
   Future<void> write(Uint8List data) async {
     if (!_isRunning) return;
 
@@ -81,6 +94,15 @@ class AndroidAudioPlaybackService implements AudioPlaybackService {
       await _method.invokeMethod<void>('write', {'data': data});
     } catch (e) {
       // Don't log every write error to avoid spam
+    }
+  }
+
+  Future<void> _applyVolume() async {
+    if (!_isRunning) return;
+    try {
+      await _method.invokeMethod<void>('setVolume', {'volume': _volume});
+    } catch (e) {
+      debugPrint('[audio_playback] Failed to set volume: $e');
     }
   }
 }
@@ -92,6 +114,7 @@ class LinuxAudioPlaybackService implements AudioPlaybackService {
   IOSink? _stdin;
   bool _isRunning = false;
   int _writeCount = 0;
+  double _volume = 1.0;
 
   @override
   bool get isRunning => _isRunning;
@@ -180,17 +203,24 @@ class LinuxAudioPlaybackService implements AudioPlaybackService {
       return;
     }
 
+    final payload = _volume == 1.0 ? data : _applyVolume(data);
+
     try {
-      _stdin!.add(data);
+      _stdin!.add(payload);
       _writeCount++;
       if (_writeCount == 1 || _writeCount % 100 == 0) {
         // Calculate peak level to verify audio isn't silent
-        final peak = _calculatePeakLevel(data);
-        debugPrint('[audio_playback] write #$_writeCount (${data.length} bytes, peak=$peak)');
+        final peak = _calculatePeakLevel(payload);
+        debugPrint('[audio_playback] write #$_writeCount (${payload.length} bytes, peak=$peak volume=${_volume.toStringAsFixed(2)})');
       }
     } catch (e) {
       debugPrint('[audio_playback] write error: $e');
     }
+  }
+
+  @override
+  Future<void> setVolume(double volume) async {
+    _volume = volume.clamp(0.0, 2.0);
   }
 
   /// Calculate peak audio level from PCM data (0-32768 range).
@@ -204,6 +234,20 @@ class LinuxAudioPlaybackService implements AudioPlaybackService {
     }
     return peak;
   }
+
+  Uint8List _applyVolume(Uint8List data) {
+    final out = Uint8List(data.length);
+    final input = ByteData.sublistView(data);
+    final output = ByteData.sublistView(out);
+
+    for (var i = 0; i < data.length - 1; i += 2) {
+      final sample = input.getInt16(i, Endian.little);
+      final scaled = (sample * _volume).round().clamp(-32768, 32767);
+      output.setInt16(i, scaled, Endian.little);
+    }
+
+    return out;
+  }
 }
 
 /// No-op fallback for platforms without playback implemented.
@@ -216,6 +260,9 @@ class NoopAudioPlaybackService implements AudioPlaybackService {
 
   @override
   Future<void> stop() async {}
+
+  @override
+  Future<void> setVolume(double volume) async {}
 
   @override
   Future<void> write(Uint8List data) async {}

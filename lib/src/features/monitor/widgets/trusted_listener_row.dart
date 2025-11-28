@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../theme.dart';
+import '../../../util/format_utils.dart';
 
 /// A row displaying a trusted listener's information with a revoke button.
 class TrustedListenerRow extends StatelessWidget {
@@ -31,10 +32,14 @@ class TrustedListenerRow extends StatelessWidget {
               ),
             ),
           ),
-          Text(
-            fingerprint,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: AppColors.muted,
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              shortFingerprint(fingerprint),
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: AppColors.muted,
+              ),
             ),
           ),
           if (onRevoke != null) ...[

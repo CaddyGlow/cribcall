@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../theme.dart';
+import '../../../util/format_utils.dart';
 
 class PinnedBadge extends StatelessWidget {
   const PinnedBadge({super.key, this.fingerprint});
@@ -11,7 +12,7 @@ class PinnedBadge extends StatelessWidget {
   Widget build(BuildContext context) {
     final display = fingerprint == null
         ? 'Pinned certs'
-        : 'This device ${fingerprint!.substring(0, 12)}';
+        : 'This device ${shortFingerprint(fingerprint!)}';
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(

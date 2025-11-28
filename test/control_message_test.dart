@@ -6,10 +6,10 @@ void main() {
   test('control message factory parses known types', () {
     final raw = {
       'type': 'PAIR_REQUEST',
-      'listenerId': 'L1',
-      'listenerName': 'Parent',
-      'listenerPublicKey': 'pub',
-      'listenerCertFingerprint': 'ff',
+      'deviceId': 'L1',
+      'deviceName': 'Parent',
+      'publicKey': 'pub',
+      'certFingerprint': 'ff',
     };
 
     final message = ControlMessageFactory.fromWireJson(raw);

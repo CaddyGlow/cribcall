@@ -15,6 +15,7 @@ import '../domain/models.dart';
 import '../identity/device_identity.dart';
 import '../identity/pem.dart';
 import '../identity/pkcs8.dart';
+import '../util/format_utils.dart';
 import '../utils/canonical_json.dart';
 import 'pairing_messages.dart';
 
@@ -25,7 +26,7 @@ typedef PairingCompleteCallback = void Function(TrustedPeer peer);
 /// The UI should display this code for the user to verify it matches the listener.
 typedef PairingSessionCreatedCallback = void Function(
   String sessionId,
-  String listenerName,
+  String deviceName,
   String comparisonCode,
   DateTime expiresAt,
 );
@@ -116,7 +117,7 @@ class PairingServer {
       try {
         _log(
           'Binding pairing server on ${address.address}:$port '
-          'fingerprint=${_shortFingerprint(identity.certFingerprint)}',
+          'fingerprint=${shortFingerprint(identity.certFingerprint)}',
         );
 
         // TLS with server cert only - no client cert required
@@ -138,7 +139,7 @@ class PairingServer {
 
         _log(
           'Pairing server running on ${address.address}:${server.port} '
-          'fingerprint=${_shortFingerprint(identity.certFingerprint)}',
+          'fingerprint=${shortFingerprint(identity.certFingerprint)}',
         );
 
         // IPv6 dual-stack succeeded, no need to try IPv4
@@ -276,13 +277,13 @@ class PairingServer {
     }
 
     _log(
-      'Pair init from listener=${initRequest.listenerId} '
-      'name=${initRequest.listenerName} '
-      'fingerprint=${_shortFingerprint(initRequest.listenerCertFingerprint)}',
+      'Pair init from device=${initRequest.deviceId} '
+      'name=${initRequest.deviceName} '
+      'fingerprint=${shortFingerprint(initRequest.certFingerprint)}',
     );
 
     // Parse listener's P-256 identity public key (uncompressed format: 0x04 + x + y)
-    final listenerPublicKeyBytes = base64Decode(initRequest.listenerPublicKey);
+    final listenerPublicKeyBytes = base64Decode(initRequest.publicKey);
     if (listenerPublicKeyBytes.length != 65 || listenerPublicKeyBytes[0] != 0x04) {
       _sendError(request, HttpStatus.badRequest, 'invalid_key', 'Invalid public key format');
       return;
@@ -312,11 +313,11 @@ class PairingServer {
 
     final session = _PairingSession(
       sessionId: sessionId,
-      listenerId: initRequest.listenerId,
-      listenerName: initRequest.listenerName,
-      listenerCertFingerprint: initRequest.listenerCertFingerprint,
-      listenerCertificateDer: initRequest.listenerCertificateDer,
-      listenerPublicKey: listenerPublicKeyBytes,
+      remoteDeviceId: initRequest.deviceId,
+      deviceName: initRequest.deviceName,
+      certFingerprint: initRequest.certFingerprint,
+      certificateDer: initRequest.certificateDer,
+      publicKey: listenerPublicKeyBytes,
       comparisonCode: comparisonCode,
       pairingKey: pairingKey,
       expiresAt: expiresAt,
@@ -325,13 +326,13 @@ class PairingServer {
 
     _log(
       'Created pairing session=$sessionId comparisonCode=$comparisonCode '
-      'for listener=${initRequest.listenerId}',
+      'for device=${initRequest.deviceId}',
     );
 
     // Notify UI to display comparison code
     onSessionCreated?.call(
       sessionId,
-      initRequest.listenerName,
+      initRequest.deviceName,
       comparisonCode,
       expiresAt,
     );
@@ -408,15 +409,15 @@ class PairingServer {
     _sessions.remove(session.sessionId);
     _log(
       'Pairing successful session=${session.sessionId} '
-      'listener=${session.listenerId}',
+      'device=${session.remoteDeviceId}',
     );
 
     final peer = TrustedPeer(
-      deviceId: session.listenerId,
-      name: session.listenerName,
-      certFingerprint: session.listenerCertFingerprint,
+      remoteDeviceId: session.remoteDeviceId,
+      name: session.deviceName,
+      certFingerprint: session.certFingerprint,
       addedAtEpochSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-      certificateDer: session.listenerCertificateDer,
+      certificateDer: session.certificateDer,
     );
 
     // Notify callback
@@ -424,10 +425,10 @@ class PairingServer {
 
     // Send success response with monitor's certificate
     final response = PairConfirmResponse.accepted(
-      monitorId: _identity!.deviceId,
+      remoteDeviceId: _identity!.deviceId,
       monitorName: _monitorName!,
-      monitorCertFingerprint: _identity!.certFingerprint,
-      monitorCertificateDer: _identity!.certificateDer,
+      certFingerprint: _identity!.certFingerprint,
+      certificateDer: _identity!.certificateDer,
     );
 
     _sendConfirmResponse(request, response);
@@ -454,9 +455,9 @@ class PairingServer {
     }
 
     _log(
-      'Pair token from listener=${tokenRequest.listenerId} '
-      'name=${tokenRequest.listenerName} '
-      'fingerprint=${_shortFingerprint(tokenRequest.listenerCertFingerprint)}',
+      'Pair token from device=${tokenRequest.deviceId} '
+      'name=${tokenRequest.deviceName} '
+      'fingerprint=${shortFingerprint(tokenRequest.certFingerprint)}',
     );
 
     // Validate token
@@ -486,16 +487,16 @@ class PairingServer {
 
     // Pairing successful
     _log(
-      'Token pairing successful listener=${tokenRequest.listenerId} '
-      'name=${tokenRequest.listenerName}',
+      'Token pairing successful device=${tokenRequest.deviceId} '
+      'name=${tokenRequest.deviceName}',
     );
 
     final peer = TrustedPeer(
-      deviceId: tokenRequest.listenerId,
-      name: tokenRequest.listenerName,
-      certFingerprint: tokenRequest.listenerCertFingerprint,
+      remoteDeviceId: tokenRequest.deviceId,
+      name: tokenRequest.deviceName,
+      certFingerprint: tokenRequest.certFingerprint,
       addedAtEpochSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-      certificateDer: tokenRequest.listenerCertificateDer,
+      certificateDer: tokenRequest.certificateDer,
     );
 
     // Notify callback
@@ -503,10 +504,10 @@ class PairingServer {
 
     // Send success response with monitor's certificate
     final response = PairTokenResponse.accepted(
-      monitorId: _identity!.deviceId,
+      remoteDeviceId: _identity!.deviceId,
       monitorName: _monitorName!,
-      monitorCertFingerprint: _identity!.certFingerprint,
-      monitorCertificateDer: _identity!.certificateDer,
+      certFingerprint: _identity!.certFingerprint,
+      certificateDer: _identity!.certificateDer,
     );
 
     _sendTokenResponse(request, response);
@@ -537,8 +538,8 @@ class PairingServer {
       // Compare auth tags
       final valid = expectedAuthTag == confirmRequest.authTag;
       _log(
-        'Auth validation: expected=${_shortFingerprint(expectedAuthTag)} '
-        'got=${_shortFingerprint(confirmRequest.authTag)} valid=$valid',
+        'Auth validation: expected=${shortFingerprint(expectedAuthTag)} '
+        'got=${shortFingerprint(confirmRequest.authTag)} valid=$valid',
       );
       return valid;
     } catch (e) {
@@ -574,22 +575,22 @@ class PairingServer {
 class _PairingSession {
   _PairingSession({
     required this.sessionId,
-    required this.listenerId,
-    required this.listenerName,
-    required this.listenerCertFingerprint,
-    required this.listenerCertificateDer,
-    required this.listenerPublicKey,
+    required this.remoteDeviceId,
+    required this.deviceName,
+    required this.certFingerprint,
+    required this.certificateDer,
+    required this.publicKey,
     required this.comparisonCode,
     required this.pairingKey,
     required this.expiresAt,
   });
 
   final String sessionId;
-  final String listenerId;
-  final String listenerName;
-  final String listenerCertFingerprint;
-  final List<int> listenerCertificateDer;
-  final List<int> listenerPublicKey;
+  final String remoteDeviceId;
+  final String deviceName;
+  final String certFingerprint;
+  final List<int> certificateDer;
+  final List<int> publicKey;
   /// 6-digit comparison code displayed on both devices
   final String comparisonCode;
   /// Derived key for auth tag verification
@@ -620,11 +621,6 @@ Future<SecurityContext> _buildSecurityContext(DeviceIdentity identity) async {
 void _log(String message) {
   developer.log(message, name: 'pairing_server');
   debugPrint('[pairing_server] $message');
-}
-
-String _shortFingerprint(String fingerprint) {
-  if (fingerprint.length <= 12) return fingerprint;
-  return '${fingerprint.substring(0, 6)}...${fingerprint.substring(fingerprint.length - 4)}';
 }
 
 /// Computes ECDH shared secret using P-256 curve via pointycastle.

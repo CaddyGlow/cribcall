@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:developer' as developer;
+import 'dart:math' show min;
 import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -27,6 +28,8 @@ import '../storage/trusted_listeners_repository.dart';
 import '../storage/trusted_monitors_repository.dart';
 import '../control/control_service.dart';
 import '../fcm/fcm_service.dart';
+import '../util/format_utils.dart';
+import '../webrtc/monitor_streaming_controller.dart';
 
 /// Provider for the app session repository.
 final appSessionRepoProvider = Provider<AppSessionRepository>((ref) {
@@ -64,11 +67,11 @@ class AppSessionController extends AsyncNotifier<AppSessionState> {
     await ref.read(appSessionRepoProvider).save(updated);
   }
 
-  Future<void> setLastConnectedMonitorId(String? monitorId) async {
+  Future<void> setLastConnectedRemoteDeviceId(String? remoteDeviceId) async {
     final current = state.asData?.value ?? AppSessionState.defaults;
-    final updated = monitorId == null
+    final updated = remoteDeviceId == null
         ? current.copyWith(clearLastConnectedMonitorId: true)
-        : current.copyWith(lastConnectedMonitorId: monitorId);
+        : current.copyWith(lastConnectedMonitorId: remoteDeviceId);
     state = AsyncData(updated);
     await ref.read(appSessionRepoProvider).save(updated);
   }
@@ -134,6 +137,10 @@ class MonitorSettingsController extends AsyncNotifier<MonitorSettings> {
   Future<void> setAutoStreamType(AutoStreamType type) =>
       _updateAndPersist((current) => current.copyWith(autoStreamType: type));
 
+  Future<void> setAudioInputDeviceId(String deviceId) => _updateAndPersist(
+    (current) => current.copyWith(audioInputDeviceId: deviceId),
+  );
+
   Future<void> setThreshold(int threshold) => _updateAndPersist(
     (current) =>
         current.copyWith(noise: current.noise.copyWith(threshold: threshold)),
@@ -148,6 +155,12 @@ class MonitorSettingsController extends AsyncNotifier<MonitorSettings> {
   Future<void> setCooldownSeconds(int seconds) => _updateAndPersist(
     (current) => current.copyWith(
       noise: current.noise.copyWith(cooldownSeconds: seconds),
+    ),
+  );
+
+  Future<void> setAudioInputGain(int gain) => _updateAndPersist(
+    (current) => current.copyWith(
+      audioInputGain: gain.clamp(0, 200).toInt(),
     ),
   );
 
@@ -195,6 +208,47 @@ class ListenerSettingsController extends AsyncNotifier<ListenerSettings> {
 
   Future<void> setDefaultAction(ListenerDefaultAction action) =>
       _updateAndPersist((current) => current.copyWith(defaultAction: action));
+
+  Future<void> setPlaybackVolume(int volume) =>
+      _updateAndPersist((current) => current.copyWith(
+        playbackVolume: volume.clamp(0, 200).toInt(),
+      ));
+
+  /// Set the global noise threshold preference.
+  Future<void> setNoiseThreshold(int threshold) => _updateAndPersist(
+        (current) => current.copyWith(
+          noisePreferences: current.noisePreferences.copyWith(
+            threshold: threshold.clamp(10, 100),
+          ),
+        ),
+      );
+
+  /// Set the global cooldown preference.
+  Future<void> setCooldownSeconds(int cooldownSeconds) => _updateAndPersist(
+        (current) => current.copyWith(
+          noisePreferences: current.noisePreferences.copyWith(
+            cooldownSeconds: cooldownSeconds.clamp(1, 120),
+          ),
+        ),
+      );
+
+  /// Set the global auto-stream type preference.
+  Future<void> setAutoStreamType(AutoStreamType type) => _updateAndPersist(
+        (current) => current.copyWith(
+          noisePreferences: current.noisePreferences.copyWith(
+            autoStreamType: type,
+          ),
+        ),
+      );
+
+  /// Set the global auto-stream duration preference.
+  Future<void> setAutoStreamDurationSec(int durationSec) => _updateAndPersist(
+        (current) => current.copyWith(
+          noisePreferences: current.noisePreferences.copyWith(
+            autoStreamDurationSec: durationSec.clamp(5, 120),
+          ),
+        ),
+      );
 
   Future<ListenerSettings> _ensureValue() async {
     final current = state.asData?.value;
@@ -428,6 +482,8 @@ class AudioCaptureController extends Notifier<AudioCaptureState> {
     required NoiseSettings settings,
     required NoiseEventSink onNoise,
     MdnsAdvertisement? mdnsAdvertisement,
+    String? inputDeviceId,
+    int inputGainPercent = 100,
   }) async {
     if (_service != null) {
       developer.log(
@@ -438,6 +494,7 @@ class AudioCaptureController extends Notifier<AudioCaptureState> {
     }
 
     state = state.copyWith(status: AudioCaptureStatus.starting);
+    final gainFactor = inputGainPercent.clamp(0, 200) / 100.0;
 
     // Select platform-appropriate service
     if (!kIsWeb && Platform.isLinux) {
@@ -451,12 +508,15 @@ class AudioCaptureController extends Notifier<AudioCaptureState> {
           settings: settings,
           onNoise: onNoise,
           onLevel: _onLevel,
+          inputGain: gainFactor,
         );
       } else {
         _service = LinuxSubprocessAudioCaptureService(
           settings: settings,
           onNoise: onNoise,
           onLevel: _onLevel,
+          inputGain: gainFactor,
+          deviceId: inputDeviceId,
         );
       }
     } else if (!kIsWeb && Platform.isAndroid) {
@@ -464,6 +524,7 @@ class AudioCaptureController extends Notifier<AudioCaptureState> {
         settings: settings,
         onNoise: onNoise,
         onLevel: _onLevel,
+        inputGain: gainFactor,
         mdnsAdvertisement: mdnsAdvertisement,
       );
     } else {
@@ -527,12 +588,51 @@ final audioCaptureProvider =
       AudioCaptureController.new,
     );
 
-/// Auto-starts audio capture when monitoring is enabled on the monitor role.
+/// Tracks demand sources for audio capture.
+class AudioCaptureDemandState {
+  const AudioCaptureDemandState({
+    this.noiseSubscriptionCount = 0,
+    this.activeStreamCount = 0,
+  });
+
+  /// Number of active noise subscriptions.
+  final int noiseSubscriptionCount;
+
+  /// Number of active WebRTC streaming sessions.
+  final int activeStreamCount;
+
+  /// Whether there is any demand for audio capture.
+  bool get hasDemand => noiseSubscriptionCount > 0 || activeStreamCount > 0;
+}
+
+/// Provider that derives audio capture demand from subscriptions and streams.
+final audioCaptureDemandsProvider = Provider<AudioCaptureDemandState>((ref) {
+  // Watch noise subscriptions
+  final subs = ref.watch(noiseSubscriptionsProvider);
+  final now = DateTime.now();
+  final activeSubCount = subs.asData?.value
+          .where((s) => !s.isExpired(now))
+          .length ??
+      0;
+
+  // Watch active streaming sessions
+  final streaming = ref.watch(monitorStreamingProvider);
+  final activeStreamCount = streaming.activeSessions.length;
+
+  return AudioCaptureDemandState(
+    noiseSubscriptionCount: activeSubCount,
+    activeStreamCount: activeStreamCount,
+  );
+});
+
+/// Auto-starts audio capture when monitoring is enabled on the monitor role
+/// AND there is demand (subscriptions or streams).
 /// On Android, this also handles mDNS advertising via the foreground service.
 final audioCaptureAutoStartProvider = Provider<void>((ref) {
   final role = ref.watch(roleProvider);
   final monitoringEnabled = ref.watch(monitoringStatusProvider);
   final monitorSettings = ref.watch(monitorSettingsProvider);
+  final demand = ref.watch(audioCaptureDemandsProvider);
 
   // Watch dependencies needed for mDNS advertisement (Android only)
   final identity = ref.watch(identityProvider);
@@ -545,9 +645,14 @@ final audioCaptureAutoStartProvider = Provider<void>((ref) {
       return;
     }
 
-    if (!monitoringEnabled || !monitorSettings.hasValue) {
+    // Stop if monitoring disabled, settings not ready, or no demand
+    if (!monitoringEnabled || !monitorSettings.hasValue || !demand.hasDemand) {
       developer.log(
-        'Audio capture skipped: monitoring=$monitoringEnabled settingsReady=${monitorSettings.hasValue}',
+        'Audio capture skipped: monitoring=$monitoringEnabled '
+        'settingsReady=${monitorSettings.hasValue} '
+        'hasDemand=${demand.hasDemand} '
+        'subs=${demand.noiseSubscriptionCount} '
+        'streams=${demand.activeStreamCount}',
         name: 'audio_capture',
       );
       await ref.read(audioCaptureProvider.notifier).stop();
@@ -571,7 +676,7 @@ final audioCaptureAutoStartProvider = Provider<void>((ref) {
         pairingPort: pairingPort,
       );
       developer.log(
-        'Audio capture with mDNS: monitorId=${mdnsAd.monitorId} controlPort=$controlPort',
+        'Audio capture with mDNS: remoteDeviceId=${mdnsAd.remoteDeviceId} controlPort=$controlPort',
         name: 'audio_capture',
       );
     }
@@ -587,6 +692,8 @@ final audioCaptureAutoStartProvider = Provider<void>((ref) {
         .start(
           settings: settings.noise,
           mdnsAdvertisement: mdnsAd,
+          inputDeviceId: settings.audioInputDeviceId,
+          inputGainPercent: settings.audioInputGain,
           onNoise: (event) {
             developer.log(
               'Noise detected: peak=${event.peakLevel} ts=${event.timestampMs}',
@@ -616,6 +723,10 @@ class NoiseSubscriptionsController
     required String fcmToken,
     required String platform,
     int? leaseSeconds,
+    int? threshold,
+    int? cooldownSeconds,
+    AutoStreamType? autoStreamType,
+    int? autoStreamDurationSec,
   }) async {
     final current = await _ensureValue();
     final now = DateTime.now();
@@ -623,26 +734,30 @@ class NoiseSubscriptionsController
     final expiresAt = now.add(Duration(seconds: accepted));
 
     final subscription = NoiseSubscription(
-      deviceId: peer.deviceId,
+      deviceId: peer.remoteDeviceId,
       certFingerprint: peer.certFingerprint,
       fcmToken: fcmToken,
       platform: platform,
       expiresAtEpochSec: expiresAt.millisecondsSinceEpoch ~/ 1000,
       createdAtEpochSec: now.millisecondsSinceEpoch ~/ 1000,
-      subscriptionId: noiseSubscriptionId(peer.deviceId, fcmToken),
+      subscriptionId: noiseSubscriptionId(peer.remoteDeviceId, fcmToken),
+      threshold: threshold,
+      cooldownSeconds: cooldownSeconds,
+      autoStreamType: autoStreamType,
+      autoStreamDurationSec: autoStreamDurationSec,
     );
 
     final updated = [
       // Only keep one active token per device; drop superseded tokens.
-      ...current.where((s) => s.deviceId != peer.deviceId),
+      ...current.where((s) => s.deviceId != peer.remoteDeviceId),
       subscription,
     ];
 
     state = AsyncData(updated);
     await _save(updated);
     developer.log(
-      'Upserted noise subscription device=${peer.deviceId} '
-      'fp=${_shortFingerprint(peer.certFingerprint)} '
+      'Upserted noise subscription device=${peer.remoteDeviceId} '
+      'fp=${shortFingerprint(peer.certFingerprint)} '
       'expiresAt=${expiresAt.toIso8601String()}',
       name: 'noise_sub',
     );
@@ -662,7 +777,7 @@ class NoiseSubscriptionsController
     NoiseSubscription? removed;
     final updated = <NoiseSubscription>[];
     for (final sub in current) {
-      final matchesDevice = sub.deviceId == peer.deviceId;
+      final matchesDevice = sub.deviceId == peer.remoteDeviceId;
       final matchesToken = fcmToken == null ? true : sub.fcmToken == fcmToken;
       final matchesId = subscriptionId == null
           ? true
@@ -678,8 +793,8 @@ class NoiseSubscriptionsController
       state = AsyncData(updated);
       await _save(updated);
       developer.log(
-        'Unsubscribed noise token device=${peer.deviceId} '
-        'fp=${_shortFingerprint(peer.certFingerprint)}',
+        'Unsubscribed noise token device=${peer.remoteDeviceId} '
+        'fp=${shortFingerprint(peer.certFingerprint)}',
         name: 'noise_sub',
       );
     }
@@ -695,7 +810,7 @@ class NoiseSubscriptionsController
     state = AsyncData(updated);
     await _save(updated);
     developer.log(
-      'Cleared noise subscriptions for fp=${_shortFingerprint(fingerprint)}',
+      'Cleared noise subscriptions for fp=${shortFingerprint(fingerprint)}',
       name: 'noise_sub',
     );
   }
@@ -731,6 +846,23 @@ class NoiseSubscriptionsController
     return data.where((s) => !s.isExpired(clock)).toList();
   }
 
+  /// Returns the minimum threshold across all active subscriptions.
+  /// Returns null if there are no active subscriptions with custom thresholds.
+  int? minimumThreshold({DateTime? now}) {
+    final subs = active(now: now);
+    if (subs.isEmpty) return null;
+
+    int? minThreshold;
+    for (final sub in subs) {
+      final threshold = sub.threshold;
+      if (threshold != null) {
+        minThreshold =
+            minThreshold == null ? threshold : min(minThreshold, threshold);
+      }
+    }
+    return minThreshold;
+  }
+
   Future<List<NoiseSubscription>> _ensureValue() async {
     final current = state.asData?.value;
     if (current != null) return current;
@@ -752,11 +884,6 @@ class NoiseSubscriptionsController
   }
 }
 
-String _shortFingerprint(String fingerprint) {
-  if (fingerprint.length <= 12) return fingerprint;
-  return '${fingerprint.substring(0, 6)}...${fingerprint.substring(fingerprint.length - 4)}';
-}
-
 class TrustedListenersController extends AsyncNotifier<List<TrustedPeer>> {
   @override
   Future<List<TrustedPeer>> build() async {
@@ -766,7 +893,7 @@ class TrustedListenersController extends AsyncNotifier<List<TrustedPeer>> {
 
   Future<void> addListener(TrustedPeer peer) async {
     final current = await _ensureValue();
-    if (current.any((p) => p.deviceId == peer.deviceId)) return;
+    if (current.any((p) => p.remoteDeviceId == peer.remoteDeviceId)) return;
     final updated = [...current, peer];
     state = AsyncData(updated);
     await ref.read(trustedListenersRepoProvider).save(updated);
@@ -776,13 +903,13 @@ class TrustedListenersController extends AsyncNotifier<List<TrustedPeer>> {
     final current = await _ensureValue();
     TrustedPeer? removed;
     for (final listener in current) {
-      if (listener.deviceId == deviceId) {
+      if (listener.remoteDeviceId == deviceId) {
         removed = listener;
         break;
       }
     }
     final updated = current
-        .where((listener) => listener.deviceId != deviceId)
+        .where((listener) => listener.remoteDeviceId != deviceId)
         .toList();
     state = AsyncData(updated);
     await ref.read(trustedListenersRepoProvider).save(updated);
@@ -796,7 +923,7 @@ class TrustedListenersController extends AsyncNotifier<List<TrustedPeer>> {
   /// Update FCM token for a listener (called when listener sends FCM_TOKEN_UPDATE).
   Future<void> updateFcmToken(String deviceId, String fcmToken) async {
     final current = await _ensureValue();
-    final index = current.indexWhere((p) => p.deviceId == deviceId);
+    final index = current.indexWhere((p) => p.remoteDeviceId == deviceId);
     if (index == -1) {
       developer.log(
         'Cannot update FCM token: listener $deviceId not found',
@@ -823,7 +950,7 @@ class TrustedListenersController extends AsyncNotifier<List<TrustedPeer>> {
     state = AsyncData(updated);
     await ref.read(trustedListenersRepoProvider).save(updated);
     developer.log(
-      'Cleared invalid FCM token for listener ${current[index].deviceId}',
+      'Cleared invalid FCM token for listener ${current[index].remoteDeviceId}',
       name: 'fcm',
     );
   }
@@ -851,15 +978,15 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
     List<int>? certificateDer,
   }) async {
     final current = await _ensureValue();
-    if (current.any((m) => m.monitorId == payload.monitorId)) return;
+    if (current.any((m) => m.remoteDeviceId == payload.remoteDeviceId)) return;
     // Use first IP from QR payload as lastKnownIp if not explicitly provided
     final effectiveLastKnownIp = lastKnownIp ?? payload.ips?.firstOrNull;
     final updated = [
       ...current,
       TrustedMonitor(
-        monitorId: payload.monitorId,
+        remoteDeviceId: payload.remoteDeviceId,
         monitorName: payload.monitorName,
-        certFingerprint: payload.monitorCertFingerprint,
+        certFingerprint: payload.certFingerprint,
         controlPort: payload.service.controlPort,
         pairingPort: payload.service.pairingPort,
         serviceVersion: payload.service.version,
@@ -874,10 +1001,10 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
     await ref.read(trustedMonitorsRepoProvider).save(updated);
   }
 
-  Future<void> removeMonitor(String monitorId) async {
+  Future<void> removeMonitor(String remoteDeviceId) async {
     final current = await _ensureValue();
     final updated = current
-        .where((monitor) => monitor.monitorId != monitorId)
+        .where((monitor) => monitor.remoteDeviceId != remoteDeviceId)
         .toList();
     state = AsyncData(updated);
     await ref.read(trustedMonitorsRepoProvider).save(updated);
@@ -887,7 +1014,7 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
     if (advertisement.ip == null) return;
     final current = await _ensureValue();
     final index = current.indexWhere(
-      (monitor) => monitor.monitorId == advertisement.monitorId,
+      (monitor) => monitor.remoteDeviceId == advertisement.remoteDeviceId,
     );
     if (index == -1) return;
     final existing = current[index];
@@ -895,7 +1022,7 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
     // Always update lastSeenEpochMs when we see the monitor via mDNS
     final updated = [...current];
     updated[index] = TrustedMonitor(
-      monitorId: existing.monitorId,
+      remoteDeviceId: existing.remoteDeviceId,
       monitorName: existing.monitorName,
       certFingerprint: existing.certFingerprint,
       lastKnownIp: advertisement.ip ?? existing.lastKnownIp,
@@ -912,18 +1039,18 @@ class TrustedMonitorsController extends AsyncNotifier<List<TrustedMonitor>> {
   }
 
   Future<void> recordNoiseEvent({
-    required String monitorId,
+    required String remoteDeviceId,
     required int timestampMs,
   }) async {
     final current = await _ensureValue();
     final index = current.indexWhere(
-      (monitor) => monitor.monitorId == monitorId,
+      (monitor) => monitor.remoteDeviceId == remoteDeviceId,
     );
     if (index == -1) return;
     final existing = current[index];
     final updated = [...current];
     updated[index] = TrustedMonitor(
-      monitorId: existing.monitorId,
+      remoteDeviceId: existing.remoteDeviceId,
       monitorName: existing.monitorName,
       certFingerprint: existing.certFingerprint,
       lastKnownIp: existing.lastKnownIp,
@@ -987,15 +1114,15 @@ final mdnsBrowseProvider = StreamProvider.autoDispose<List<MdnsAdvertisement>>((
   }
 
   void upsert(MdnsAdvertisement ad) {
-    seen[ad.monitorId] = _SeenAdvertisement(
+    seen[ad.remoteDeviceId] = _SeenAdvertisement(
       advertisement: ad,
       seenAt: DateTime.now(),
     );
     emit();
   }
 
-  void remove(String monitorId) {
-    if (seen.remove(monitorId) != null) {
+  void remove(String remoteDeviceId) {
+    if (seen.remove(remoteDeviceId) != null) {
       emit();
     }
   }
@@ -1006,7 +1133,7 @@ final mdnsBrowseProvider = StreamProvider.autoDispose<List<MdnsAdvertisement>>((
   final subscription = browseStream.listen((event) {
     debugPrint(
       '[mdns_provider] received: ${event.isOnline ? "ONLINE" : "OFFLINE"} '
-      'monitorId=${event.advertisement.monitorId} ip=${event.advertisement.ip} '
+      'remoteDeviceId=${event.advertisement.remoteDeviceId} ip=${event.advertisement.ip} '
       'seenCount=${seen.length}',
     );
     if (event.isOnline) {
@@ -1019,14 +1146,14 @@ final mdnsBrowseProvider = StreamProvider.autoDispose<List<MdnsAdvertisement>>((
       }
       upsert(event.advertisement);
       debugPrint(
-        '[mdns_provider] Upserted ${event.advertisement.monitorId}, seenCount=${seen.length}',
+        '[mdns_provider] Upserted ${event.advertisement.remoteDeviceId}, seenCount=${seen.length}',
       );
     } else {
       // Service went offline
-      final removed = seen.containsKey(event.advertisement.monitorId);
-      remove(event.advertisement.monitorId);
+      final removed = seen.containsKey(event.advertisement.remoteDeviceId);
+      remove(event.advertisement.remoteDeviceId);
       debugPrint(
-        '[mdns_provider] Removed ${event.advertisement.monitorId}, wasPresent=$removed, '
+        '[mdns_provider] Removed ${event.advertisement.remoteDeviceId}, wasPresent=$removed, '
         'seenCount=${seen.length}',
       );
     }
@@ -1168,13 +1295,13 @@ class NoiseEventDeduplicationController
   }
 
   /// Check if an event ID has been seen recently (for WebSocket events).
-  bool isEventSeen(String monitorId, int timestamp) {
-    return state.recentEventIds.contains('$monitorId-$timestamp');
+  bool isEventSeen(String remoteDeviceId, int timestamp) {
+    return state.recentEventIds.contains('$remoteDeviceId-$timestamp');
   }
 
   /// Mark an event as seen (for WebSocket events before FCM arrives).
-  void markEventSeen(String monitorId, int timestamp) {
-    final eventId = '$monitorId-$timestamp';
+  void markEventSeen(String remoteDeviceId, int timestamp) {
+    final eventId = '$remoteDeviceId-$timestamp';
     if (state.recentEventIds.contains(eventId)) return;
 
     var newIds = {...state.recentEventIds, eventId};

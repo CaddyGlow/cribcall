@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../domain/audio.dart';
 import '../../../theme.dart';
 
 /// Model for an audio input device.
@@ -31,20 +32,20 @@ class AudioInputDevice {
 /// Provider for listing available audio input devices.
 final audioInputDevicesProvider =
     FutureProvider.autoDispose<List<AudioInputDevice>>((ref) async {
-  if (Platform.isLinux) {
-    return _listLinuxAudioDevices();
-  } else if (Platform.isAndroid) {
-    // Android device enumeration would use platform channel
-    return [
-      const AudioInputDevice(
-        id: 'default',
-        name: 'Default microphone',
-        isDefault: true,
-      ),
-    ];
-  }
-  return [];
-});
+      if (Platform.isLinux) {
+        return _listLinuxAudioDevices();
+      } else if (Platform.isAndroid) {
+        // Android device enumeration would use platform channel
+        return [
+          const AudioInputDevice(
+            id: kDefaultAudioInputId,
+            name: 'Default microphone',
+            isDefault: true,
+          ),
+        ];
+      }
+      return [];
+    });
 
 /// List audio sources on Linux using pactl.
 Future<List<AudioInputDevice>> _listLinuxAudioDevices() async {
@@ -63,30 +64,32 @@ Future<List<AudioInputDevice>> _listLinuxAudioDevices() async {
           final id = parts[1]; // Source name
           final name = _formatDeviceName(id);
           final isDefault = id.contains('default') || parts[0] == '0';
-          devices.add(AudioInputDevice(
-            id: id,
-            name: name,
-            isDefault: isDefault,
-          ));
+          devices.add(
+            AudioInputDevice(id: id, name: name, isDefault: isDefault),
+          );
         }
       }
     }
   } catch (e) {
     // Fallback to default
-    devices.add(const AudioInputDevice(
-      id: '@DEFAULT_AUDIO_SOURCE@',
-      name: 'Default audio source',
-      isDefault: true,
-    ));
+    devices.add(
+      const AudioInputDevice(
+        id: kDefaultAudioInputId,
+        name: 'Default audio source',
+        isDefault: true,
+      ),
+    );
   }
 
   // If no devices found, add default
   if (devices.isEmpty) {
-    devices.add(const AudioInputDevice(
-      id: '@DEFAULT_AUDIO_SOURCE@',
-      name: 'Default audio source',
-      isDefault: true,
-    ));
+    devices.add(
+      const AudioInputDevice(
+        id: kDefaultAudioInputId,
+        name: 'Default audio source',
+        isDefault: true,
+      ),
+    );
   }
 
   return devices;
@@ -104,10 +107,13 @@ String _formatDeviceName(String id) {
       .replaceAll('-', ' ');
 
   // Capitalize first letter of each word
-  name = name.split(' ').map((word) {
-    if (word.isEmpty) return word;
-    return word[0].toUpperCase() + word.substring(1).toLowerCase();
-  }).join(' ');
+  name = name
+      .split(' ')
+      .map((word) {
+        if (word.isEmpty) return word;
+        return word[0].toUpperCase() + word.substring(1).toLowerCase();
+      })
+      .join(' ');
 
   return name;
 }
@@ -157,16 +163,16 @@ class DeviceInputSettingsSheet extends ConsumerWidget {
             children: [
               Text(
                 'Audio Input Device',
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w800,
-                ),
+                style: Theme.of(
+                  context,
+                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
               ),
               const SizedBox(height: 4),
               Text(
                 'Select the microphone to use for audio capture',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: AppColors.muted,
-                ),
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
               ),
               const SizedBox(height: 16),
               Expanded(
@@ -178,7 +184,8 @@ class DeviceInputSettingsSheet extends ConsumerWidget {
                           itemCount: devices.length,
                           itemBuilder: (context, index) {
                             final device = devices[index];
-                            final isSelected = currentDeviceId == device.id ||
+                            final isSelected =
+                                currentDeviceId == device.id ||
                                 (currentDeviceId == null && device.isDefault);
                             return _DeviceListTile(
                               device: device,
@@ -190,9 +197,8 @@ class DeviceInputSettingsSheet extends ConsumerWidget {
                             );
                           },
                         ),
-                  loading: () => const Center(
-                    child: CircularProgressIndicator(),
-                  ),
+                  loading: () =>
+                      const Center(child: CircularProgressIndicator()),
                   error: (error, _) => _buildErrorState(context, error),
                 ),
               ),
@@ -233,9 +239,9 @@ class DeviceInputSettingsSheet extends ConsumerWidget {
           const SizedBox(height: 4),
           Text(
             'Make sure a microphone is connected',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: AppColors.muted,
-            ),
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
           ),
         ],
       ),
@@ -247,11 +253,7 @@ class DeviceInputSettingsSheet extends ConsumerWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(
-            Icons.error_outline,
-            size: 48,
-            color: Colors.red,
-          ),
+          const Icon(Icons.error_outline, size: 48, color: Colors.red),
           const SizedBox(height: 12),
           Text(
             'Could not list devices',
@@ -263,9 +265,9 @@ class DeviceInputSettingsSheet extends ConsumerWidget {
           const SizedBox(height: 4),
           Text(
             '$error',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: AppColors.muted,
-            ),
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
             textAlign: TextAlign.center,
           ),
         ],
@@ -315,9 +317,9 @@ class _DeviceListTile extends StatelessWidget {
         subtitle: device.isDefault
             ? Text(
                 'System default',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: AppColors.muted,
-                ),
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
               )
             : null,
         trailing: isSelected

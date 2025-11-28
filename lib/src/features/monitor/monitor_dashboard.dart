@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:developer' as developer;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -11,6 +12,7 @@ import '../../domain/models.dart';
 import '../../identity/device_identity.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
+import '../../util/format_utils.dart';
 import '../../utils/network_utils.dart';
 import '../shared/widgets/widgets.dart';
 import 'widgets/widgets.dart';
@@ -35,6 +37,9 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
   Timer? _refreshDebounce;
   late final MdnsService _mdnsService;
 
+  bool get _isAndroid =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
   @override
   void initState() {
     super.initState();
@@ -49,15 +54,17 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
   }
 
   /// Schedule a debounced refresh to avoid multiple rapid calls.
-  void _scheduleRefresh() {
+  void _scheduleRefresh({Duration delay = const Duration(milliseconds: 100)}) {
     _refreshDebounce?.cancel();
-    _refreshDebounce = Timer(const Duration(milliseconds: 100), () {
+    _refreshDebounce = Timer(delay, () {
       _refreshAdvertisement();
     });
   }
 
   Future<void> _refreshAdvertisement() async {
-    _log('_refreshAdvertisement called, mounted=$mounted, inProgress=$_refreshInProgress');
+    _log(
+      '_refreshAdvertisement called, mounted=$mounted, inProgress=$_refreshInProgress',
+    );
     if (!mounted) return;
     if (_refreshInProgress) {
       _log('_refreshAdvertisement: already in progress, scheduling retry');
@@ -77,11 +84,29 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
     final identity = ref.read(identityProvider);
     final appSession = ref.read(appSessionProvider);
 
-    _log('_refreshAdvertisement: monitoring=$monitoringEnabled '
-        'identity.hasValue=${identity.hasValue} '
-        'appSession.hasValue=${appSession.hasValue}');
+    _log(
+      '_refreshAdvertisement: monitoring=$monitoringEnabled '
+      'identity.hasValue=${identity.hasValue} '
+      'appSession.hasValue=${appSession.hasValue}',
+    );
 
-    if (!monitoringEnabled || !identity.hasValue || !appSession.hasValue) {
+    if (!monitoringEnabled) {
+      _log('_refreshAdvertisement: monitoring disabled, stopping');
+      await _stopAdvertising();
+      return;
+    }
+
+    final readyValues = await _awaitIdentityAndSession(
+      identity: identity,
+      appSession: appSession,
+    );
+
+    if (readyValues == null) {
+      if (_isAndroid) {
+        _log('_refreshAdvertisement: waiting for identity/appSession, will retry');
+        _scheduleRefresh(delay: const Duration(seconds: 1));
+        return;
+      }
       _log('_refreshAdvertisement: conditions not met, stopping');
       await _stopAdvertising();
       return;
@@ -93,15 +118,17 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
     final controlPort = controlState.port ?? builder.defaultPort;
     final pairingPort = pairingState.port ?? builder.defaultPairingPort;
     final nextAd = builder.buildMdnsAdvertisement(
-      identity: identity.requireValue,
-      monitorName: appSession.requireValue.deviceName,
+      identity: readyValues.identity,
+      monitorName: readyValues.appSession.deviceName,
       controlPort: controlPort,
       pairingPort: pairingPort,
     );
 
-    _log('_refreshAdvertisement: nextAd monitorId=${nextAd.monitorId} '
-        'controlPort=$controlPort pairingPort=$pairingPort '
-        'already advertising=$_advertising');
+    _log(
+      '_refreshAdvertisement: nextAd remoteDeviceId=${nextAd.remoteDeviceId} '
+      'controlPort=$controlPort pairingPort=$pairingPort '
+      'already advertising=$_advertising',
+    );
 
     if (_advertising &&
         _currentAdvertisement != null &&
@@ -130,13 +157,51 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
   }
 
   bool _adsEqual(MdnsAdvertisement a, MdnsAdvertisement b) {
-    return a.monitorId == b.monitorId &&
+    return a.remoteDeviceId == b.remoteDeviceId &&
         a.monitorName == b.monitorName &&
-        a.monitorCertFingerprint == b.monitorCertFingerprint &&
+        a.certFingerprint == b.certFingerprint &&
         a.controlPort == b.controlPort &&
         a.pairingPort == b.pairingPort &&
         a.version == b.version &&
         a.transport == b.transport;
+  }
+
+  Future<({DeviceIdentity identity, AppSessionState appSession})?>
+      _awaitIdentityAndSession({
+        required AsyncValue<DeviceIdentity> identity,
+        required AsyncValue<AppSessionState> appSession,
+      }) async {
+    if (identity.hasValue && appSession.hasValue) {
+      return (
+        identity: identity.requireValue,
+        appSession: appSession.requireValue,
+      );
+    }
+
+    if (!_isAndroid) return null;
+
+    _log('_refreshAdvertisement: waiting for identity/appSession on Android');
+    try {
+      await Future.wait([
+        if (!identity.hasValue) ref.read(identityProvider.future),
+        if (!appSession.hasValue) ref.read(appSessionProvider.future),
+      ]).timeout(const Duration(seconds: 5));
+    } catch (err) {
+      _log('_refreshAdvertisement: identity/appSession wait timed out: $err');
+      return null;
+    }
+
+    final refreshedIdentity = ref.read(identityProvider);
+    final refreshedAppSession = ref.read(appSessionProvider);
+    if (refreshedIdentity.hasValue && refreshedAppSession.hasValue) {
+      return (
+        identity: refreshedIdentity.requireValue,
+        appSession: refreshedAppSession.requireValue,
+      );
+    }
+
+    _log('_refreshAdvertisement: identity/appSession still missing after wait');
+    return null;
   }
 
   @override
@@ -182,9 +247,9 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
       children: [
         Text(
           'Monitor controls',
-          style: Theme.of(context).textTheme.titleMedium?.copyWith(
-            fontWeight: FontWeight.w800,
-          ),
+          style: Theme.of(
+            context,
+          ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
         ),
         const SizedBox(height: 10),
 
@@ -232,9 +297,13 @@ class _MonitoringControlsCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final audioCaptureState = ref.watch(audioCaptureProvider);
-    final isDebugCapture = ref.watch(audioCaptureProvider.notifier).isDebugCapture;
+    final isDebugCapture = ref
+        .watch(audioCaptureProvider.notifier)
+        .isDebugCapture;
     final appSession = ref.watch(appSessionProvider);
-    final deviceDisplayName = appSession.asData?.value.displayName ?? 'Loading...';
+    final deviceDisplayName =
+        appSession.asData?.value.displayName ?? 'Loading...';
+    final audioDevices = ref.watch(audioInputDevicesProvider);
 
     return CcCard(
       title: monitoringEnabled ? 'Monitoring ON' : 'Monitoring OFF',
@@ -260,13 +329,37 @@ class _MonitoringControlsCard extends ConsumerWidget {
         const SizedBox(height: 12),
 
         // Current settings summary
+        CcMetricRow(label: 'Device name', value: deviceDisplayName),
         CcMetricRow(
-          label: 'Device name',
-          value: deviceDisplayName,
+          label: 'Input device',
+          valueWidget: audioDevices.when(
+            data: (devices) => _buildInputDeviceValue(
+              context,
+              ref,
+              devices,
+              settings.audioInputDeviceId,
+            ),
+            loading: () => const Text('Loading devices...'),
+            error: (error, _) => Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Devices unavailable',
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => ref.refresh(audioInputDevicesProvider),
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
         ),
         CcMetricRow(
           label: 'Noise threshold',
-          value: '${settings.noise.threshold}% (${_thresholdToDb(settings.noise.threshold)})',
+          value:
+              '${settings.noise.threshold}% (${_thresholdToDb(settings.noise.threshold)})',
         ),
         CcMetricRow(
           label: 'Auto-stream',
@@ -281,9 +374,9 @@ class _MonitoringControlsCard extends ConsumerWidget {
           children: [
             Text(
               'Audio monitor',
-              style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                fontWeight: FontWeight.w800,
-              ),
+              style: Theme.of(
+                context,
+              ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800),
             ),
             const SizedBox(width: 8),
             if (isDebugCapture)
@@ -332,10 +425,12 @@ class _TestButtons extends ConsumerWidget {
           onPressed: controlServer.status == ControlServerStatus.running
               ? () {
                   final timestampMs = DateTime.now().millisecondsSinceEpoch;
-                  ref.read(controlServerProvider.notifier).broadcastNoiseEvent(
-                    timestampMs: timestampMs,
-                    peakLevel: 75,
-                  );
+                  ref
+                      .read(controlServerProvider.notifier)
+                      .broadcastNoiseEvent(
+                        timestampMs: timestampMs,
+                        peakLevel: 75,
+                      );
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(
                       content: Text('Test noise event sent'),
@@ -368,6 +463,69 @@ class _TestButtons extends ConsumerWidget {
   }
 }
 
+Widget _buildInputDeviceValue(
+  BuildContext context,
+  WidgetRef ref,
+  List<AudioInputDevice> devices,
+  String? currentDeviceId,
+) {
+  if (devices.isEmpty) {
+    return Row(
+      children: [
+        const Expanded(child: Text('No devices found')),
+        TextButton(
+          onPressed: () => ref.refresh(audioInputDevicesProvider),
+          child: const Text('Refresh'),
+        ),
+      ],
+    );
+  }
+
+  final selected = _resolveSelectedDevice(devices, currentDeviceId);
+  final label = selected.name;
+  final displayLabel = selected.isDefault ? '$label (default)' : label;
+
+  return Row(
+    children: [
+      Expanded(
+        child: Text(
+          displayLabel,
+          style: Theme.of(
+            context,
+          ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+        ),
+      ),
+      TextButton(
+        onPressed: () => showDeviceInputSettingsModal(
+          context,
+          currentDeviceId: currentDeviceId,
+          onDeviceSelected: (deviceId) {
+            ref
+                .read(monitorSettingsProvider.notifier)
+                .setAudioInputDeviceId(deviceId);
+          },
+        ),
+        child: const Text('Change'),
+      ),
+    ],
+  );
+}
+
+AudioInputDevice _resolveSelectedDevice(
+  List<AudioInputDevice> devices,
+  String? currentDeviceId,
+) {
+  if (currentDeviceId == null) {
+    return devices.firstWhere((d) => d.isDefault, orElse: () => devices.first);
+  }
+
+  return devices.firstWhere(
+    (d) => d.id == currentDeviceId,
+    orElse: () =>
+        devices.firstWhere((d) => d.isDefault, orElse: () => devices.first),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Pairing & Identity Card
 // ---------------------------------------------------------------------------
@@ -392,16 +550,14 @@ class _PairingIdentityCard extends ConsumerWidget {
         identity.when(
           data: (id) => CcMetricRow(
             label: 'Device fingerprint',
-            value: id.certFingerprint.substring(0, 12),
+            value: shortFingerprint(id.certFingerprint),
           ),
           loading: () => const CcMetricRow(
             label: 'Device fingerprint',
             value: 'loading...',
           ),
-          error: (err, st) => const CcMetricRow(
-            label: 'Device fingerprint',
-            value: 'error',
-          ),
+          error: (err, st) =>
+              const CcMetricRow(label: 'Device fingerprint', value: 'error'),
         ),
         Row(
           children: [
@@ -415,7 +571,9 @@ class _PairingIdentityCard extends ConsumerWidget {
                     return;
                   }
                   // Generate one-time pairing token for QR code flow
-                  final pairingToken = ref.read(pairingServerProvider.notifier).generatePairingToken();
+                  final pairingToken = ref
+                      .read(pairingServerProvider.notifier)
+                      .generatePairingToken();
                   if (pairingToken == null) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(content: Text('Pairing server not ready')),
@@ -430,12 +588,14 @@ class _PairingIdentityCard extends ConsumerWidget {
                     ips: ips,
                     pairingToken: pairingToken,
                   );
-                  final payloadJson = serviceBuilder.buildQrPayload(
-                    identity: identity.requireValue,
-                    monitorName: deviceName,
-                    ips: ips,
-                    pairingToken: pairingToken,
-                  ).toJson();
+                  final payloadJson = serviceBuilder
+                      .buildQrPayload(
+                        identity: identity.requireValue,
+                        monitorName: deviceName,
+                        ips: ips,
+                        pairingToken: pairingToken,
+                      )
+                      .toJson();
                   if (!context.mounted) return;
                   showPairingQrSheet(
                     context,
@@ -454,20 +614,24 @@ class _PairingIdentityCard extends ConsumerWidget {
           PairingSessionBanner(
             session: pairingServer.activeSession!,
             onAccept: () {
-              ref.read(pairingServerProvider.notifier).confirmSession(
-                pairingServer.activeSession!.sessionId,
-              );
+              ref
+                  .read(pairingServerProvider.notifier)
+                  .confirmSession(pairingServer.activeSession!.sessionId);
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Pairing accepted - waiting for listener to confirm')),
+                const SnackBar(
+                  content: Text(
+                    'Pairing accepted - waiting for listener to confirm',
+                  ),
+                ),
               );
             },
             onReject: () {
-              ref.read(pairingServerProvider.notifier).rejectSession(
-                pairingServer.activeSession!.sessionId,
-              );
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Pairing rejected')),
-              );
+              ref
+                  .read(pairingServerProvider.notifier)
+                  .rejectSession(pairingServer.activeSession!.sessionId);
+              ScaffoldMessenger.of(
+                context,
+              ).showSnackBar(const SnackBar(content: Text('Pairing rejected')));
             },
           ),
         ],
@@ -513,9 +677,9 @@ class _TrustedListenersCard extends ConsumerWidget {
           ),
           error: (err, st) => Text(
             'Could not load trusted listeners',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: Colors.red,
-            ),
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: Colors.red),
           ),
         ),
       ],
@@ -527,7 +691,8 @@ class _TrustedListenersCard extends ConsumerWidget {
     WidgetRef ref,
     TrustedPeer peer,
   ) async {
-    final confirmed = await showDialog<bool>(
+    final confirmed =
+        await showDialog<bool>(
           context: context,
           builder: (context) => AlertDialog(
             title: const Text('Revoke listener?'),
@@ -548,7 +713,9 @@ class _TrustedListenersCard extends ConsumerWidget {
         ) ??
         false;
     if (confirmed) {
-      await ref.read(trustedListenersProvider.notifier).revoke(peer.deviceId);
+      await ref
+          .read(trustedListenersProvider.notifier)
+          .revoke(peer.remoteDeviceId);
     }
   }
 }
@@ -573,10 +740,7 @@ class _ControlStatusCard extends ConsumerWidget {
       badge: 'HTTP+WS',
       badgeColor: AppColors.primary,
       children: [
-        CcMetricRow(
-          label: 'Status',
-          value: _serverStatusLabel(controlServer),
-        ),
+        CcMetricRow(label: 'Status', value: _serverStatusLabel(controlServer)),
         CcMetricRow(
           label: 'Active connections',
           value: '${controlServer.activeConnectionsCount}',

@@ -30,8 +30,8 @@ class MainActivity : FlutterActivity() {
     private var discoveryListener: NsdManager.DiscoveryListener? = null
     // Note: mDNS advertising (registrationListener) moved to AudioCaptureService
     private val logTag = "cribcall_mdns"
-    // Cache serviceName -> monitorId mapping for offline events
-    private val serviceNameToMonitorId = mutableMapOf<String, String>()
+    // Cache serviceName -> remoteDeviceId mapping for offline events
+    private val serviceNameToRemoteDeviceId = mutableMapOf<String, String>()
     private val deviceInfoChannel = "cribcall/device_info"
 
     // Audio capture via foreground service
@@ -95,18 +95,20 @@ class MainActivity : FlutterActivity() {
         MethodChannel(messenger, mdnsChannel).setMethodCallHandler { call, result ->
             when (call.method) {
                 "startAdvertise" -> {
-                    // mDNS advertising is now handled by AudioCaptureService
-                    // Store params for when audio capture starts
+                    // mDNS advertising is handled by AudioCaptureService
+                    // Store params and start advertise-only foreground service
                     val args = call.arguments as? Map<*, *>
                     if (args != null) {
                         pendingMdnsParams = args
                         Log.i(logTag, "Stored mDNS params for AudioCaptureService")
+                        startAdvertiseService()
                     }
                     result.success(null)
                 }
                 "stop" -> {
                     stopMdns()
                     pendingMdnsParams = null
+                    stopAdvertiseService()
                     result.success(null)
                 }
                 else -> result.notImplemented()
@@ -151,7 +153,7 @@ class MainActivity : FlutterActivity() {
                     val args = call.arguments as? Map<*, *>
                     if (args != null && args.isNotEmpty()) {
                         pendingMdnsParams = args
-                        Log.i(audioLogTag, "Audio start with mDNS params: monitorId=${args["monitorId"]}")
+                        Log.i(audioLogTag, "Audio start with mDNS params: remoteDeviceId=${args["remoteDeviceId"]}")
                     }
                     try {
                         startAudioCaptureService()
@@ -255,6 +257,11 @@ class MainActivity : FlutterActivity() {
                         result.error("invalid_args", "Missing audio data", null)
                     }
                 }
+                "setVolume" -> {
+                    val volume = call.argument<Double>("volume") ?: 1.0
+                    audioPlaybackService?.setVolume(volume.toFloat())
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }
@@ -341,16 +348,16 @@ class MainActivity : FlutterActivity() {
                         val controlPort = txt["controlPort"]?.toIntOrNull() ?: resolved.port
                         val pairingPort = txt["pairingPort"]?.toIntOrNull() ?: 48081
                         val transport = txt["transport"] ?: "http-ws"
-                        val monitorId = txt["monitorId"] ?: resolved.serviceName
+                        val remoteDeviceId = txt["remoteDeviceId"] ?: resolved.serviceName
                         val monitorName = txt["monitorName"] ?: resolved.serviceName
 
-                        // Cache serviceName -> monitorId for offline events
-                        serviceNameToMonitorId[resolved.serviceName] = monitorId
+                        // Cache serviceName -> remoteDeviceId for offline events
+                        serviceNameToRemoteDeviceId[resolved.serviceName] = remoteDeviceId
 
                         val payload = mapOf(
-                            "monitorId" to monitorId,
+                            "remoteDeviceId" to remoteDeviceId,
                             "monitorName" to monitorName,
-                            "monitorCertFingerprint" to (txt["monitorCertFingerprint"] ?: ""),
+                            "certFingerprint" to (txt["monitorCertFingerprint"] ?: ""),
                             "controlPort" to controlPort,
                             "pairingPort" to pairingPort,
                             "version" to versionValue,
@@ -362,13 +369,13 @@ class MainActivity : FlutterActivity() {
                             val hasSink = mdnsEventSink != null
                             Log.i(
                                 logTag,
-                                "Emitting ONLINE event for $monitorId, hasSink=$hasSink",
+                                "Emitting ONLINE event for $remoteDeviceId, hasSink=$hasSink",
                             )
                             mdnsEventSink?.success(payload)
                         }
                         Log.i(
                             logTag,
-                            "Service resolved $monitorId ip=${payload["ip"]} " +
+                            "Service resolved $remoteDeviceId ip=${payload["ip"]} " +
                             "controlPort=$controlPort pairingPort=$pairingPort transport=$transport",
                         )
                     }
@@ -380,23 +387,23 @@ class MainActivity : FlutterActivity() {
                     Log.w(logTag, "onServiceLost called with null serviceInfo")
                     return
                 }
-                // Look up cached monitorId, fall back to serviceName
-                val monitorId = serviceNameToMonitorId[serviceInfo.serviceName] ?: serviceInfo.serviceName
-                val wasCached = serviceNameToMonitorId.containsKey(serviceInfo.serviceName)
+                // Look up cached remoteDeviceId, fall back to serviceName
+                val remoteDeviceId = serviceNameToRemoteDeviceId[serviceInfo.serviceName] ?: serviceInfo.serviceName
+                val wasCached = serviceNameToRemoteDeviceId.containsKey(serviceInfo.serviceName)
                 Log.i(
                     logTag,
                     "Service lost: serviceName=${serviceInfo.serviceName} " +
-                    "monitorId=$monitorId wasCached=$wasCached"
+                    "remoteDeviceId=$remoteDeviceId wasCached=$wasCached"
                 )
 
                 // Remove from cache
-                serviceNameToMonitorId.remove(serviceInfo.serviceName)
+                serviceNameToRemoteDeviceId.remove(serviceInfo.serviceName)
 
                 // Emit offline event
                 val payload = mapOf(
-                    "monitorId" to monitorId,
+                    "remoteDeviceId" to remoteDeviceId,
                     "monitorName" to serviceInfo.serviceName,
-                    "monitorCertFingerprint" to "",
+                    "certFingerprint" to "",
                     "controlPort" to 48080,
                     "pairingPort" to 48081,
                     "version" to 1,
@@ -408,7 +415,7 @@ class MainActivity : FlutterActivity() {
                     val hasSink = mdnsEventSink != null
                     Log.i(
                         logTag,
-                        "Emitting OFFLINE event for $monitorId, hasSink=$hasSink"
+                        "Emitting OFFLINE event for $remoteDeviceId, hasSink=$hasSink"
                     )
                     mdnsEventSink?.success(payload)
                 }
@@ -474,23 +481,38 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    // Foreground service methods
-    private fun startAudioCaptureService() {
-        Log.i(audioLogTag, "Starting audio capture foreground service")
-        val intent = Intent(this, AudioCaptureService::class.java).apply {
-            action = AudioCaptureService.ACTION_START
+    private fun buildMdnsIntent(action: String): Intent {
+        return Intent(this, AudioCaptureService::class.java).apply {
+            this.action = action
 
             // Pass mDNS params if available
             pendingMdnsParams?.let { params ->
-                putExtra(AudioCaptureService.EXTRA_MONITOR_ID, params["monitorId"]?.toString())
+                putExtra(AudioCaptureService.EXTRA_REMOTE_DEVICE_ID, params["remoteDeviceId"]?.toString())
                 putExtra(AudioCaptureService.EXTRA_MONITOR_NAME, params["monitorName"]?.toString() ?: "Monitor")
-                putExtra(AudioCaptureService.EXTRA_MONITOR_CERT_FINGERPRINT, params["monitorCertFingerprint"]?.toString() ?: "")
+                // Dart sends 'certFingerprint', map to internal EXTRA_MONITOR_CERT_FINGERPRINT
+                putExtra(AudioCaptureService.EXTRA_MONITOR_CERT_FINGERPRINT, params["certFingerprint"]?.toString() ?: "")
                 putExtra(AudioCaptureService.EXTRA_CONTROL_PORT, (params["controlPort"] as? Int) ?: 48080)
                 putExtra(AudioCaptureService.EXTRA_PAIRING_PORT, (params["pairingPort"] as? Int) ?: 48081)
                 putExtra(AudioCaptureService.EXTRA_VERSION, (params["version"] as? Int) ?: 1)
-                Log.i(audioLogTag, "Passing mDNS params to AudioCaptureService: monitorId=${params["monitorId"]}")
+                Log.i(audioLogTag, "Passing mDNS params to AudioCaptureService: remoteDeviceId=${params["remoteDeviceId"]} certFingerprint=${params["certFingerprint"]?.toString()?.take(16)}...")
             }
         }
+    }
+
+    // Foreground service methods
+    private fun startAudioCaptureService() {
+        Log.i(audioLogTag, "Starting audio capture foreground service")
+        val intent = buildMdnsIntent(AudioCaptureService.ACTION_START)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+    }
+
+    private fun startAdvertiseService() {
+        Log.i(audioLogTag, "Starting advertise-only foreground service")
+        val intent = buildMdnsIntent(AudioCaptureService.ACTION_ADVERTISE_ONLY)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
         } else {
@@ -500,6 +522,14 @@ class MainActivity : FlutterActivity() {
 
     private fun stopAudioCaptureService() {
         Log.i(audioLogTag, "Stopping audio capture foreground service")
+        val intent = Intent(this, AudioCaptureService::class.java).apply {
+            action = AudioCaptureService.ACTION_STOP
+        }
+        startService(intent)
+    }
+
+    private fun stopAdvertiseService() {
+        Log.i(audioLogTag, "Stopping advertise-only foreground service")
         val intent = Intent(this, AudioCaptureService::class.java).apply {
             action = AudioCaptureService.ACTION_STOP
         }

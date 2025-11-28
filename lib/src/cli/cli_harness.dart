@@ -22,6 +22,7 @@ class MonitorCliHarness {
     this.logger,
     this.onTrustedListener,
     this.onMessage,
+    this.autoConfirmSessions = false,
   }) : _trustedPeers = [...trustedPeers];
 
   final DeviceIdentity identity;
@@ -32,6 +33,8 @@ class MonitorCliHarness {
   final void Function(String message)? logger;
   final void Function(TrustedPeer peer)? onTrustedListener;
   final void Function(ControlMessage message)? onMessage;
+  /// If true, automatically confirms pairing sessions (useful for testing)
+  final bool autoConfirmSessions;
 
   PairingServer? _pairingServer;
   ControlServer? _controlServer;
@@ -49,6 +52,12 @@ class MonitorCliHarness {
     // Start pairing server (TLS only)
     _pairingServer = PairingServer(
       onPairingComplete: _handlePairingComplete,
+      onSessionCreated: autoConfirmSessions
+          ? (sessionId, deviceName, comparisonCode, expiresAt) {
+              _log('Auto-confirming session=$sessionId code=$comparisonCode');
+              _pairingServer?.confirmSession(sessionId);
+            }
+          : null,
     );
     await _pairingServer!.start(
       port: pairingPort,
@@ -109,7 +118,7 @@ class MonitorCliHarness {
 
   void _handlePairingComplete(TrustedPeer peer) {
     _log(
-      'Pairing complete: id=${peer.deviceId} '
+      'Pairing complete: id=${peer.remoteDeviceId} '
       'name=${peer.name} '
       'fingerprint=${_shortFp(peer.certFingerprint)}',
     );
@@ -135,7 +144,7 @@ class MonitorCliHarness {
         );
       } else if (message is NoiseEventMessage) {
         _log(
-          'NOISE_EVENT monitorId=${message.monitorId} '
+          'NOISE_EVENT remoteDeviceId=${message.deviceId} '
           'peak=${message.peakLevel} '
           'ts=${message.timestamp}',
         );
@@ -234,7 +243,7 @@ class ListenerCliHarness {
       );
 
       _log(
-        'Pairing successful: monitorId=${pairingResult.monitorId} '
+        'Pairing successful: remoteDeviceId=${pairingResult.remoteDeviceId} '
         'monitorName=${pairingResult.monitorName}',
       );
 
@@ -246,7 +255,7 @@ class ListenerCliHarness {
       _connection = await _client!.connect(
         host: monitorHost,
         port: monitorControlPort,
-        expectedFingerprint: pairingResult.monitorCertFingerprint,
+        expectedFingerprint: pairingResult.certFingerprint,
       );
 
       _log(
@@ -263,7 +272,7 @@ class ListenerCliHarness {
           await _connection?.send(PongMessage(timestamp: message.timestamp));
         } else if (message is NoiseEventMessage) {
           _log(
-            'NOISE_EVENT monitorId=${message.monitorId} '
+            'NOISE_EVENT remoteDeviceId=${message.deviceId} '
             'peak=${message.peakLevel} '
             'ts=${message.timestamp}',
           );
@@ -321,7 +330,7 @@ class ListenerCliHarness {
           await _connection?.send(PongMessage(timestamp: message.timestamp));
         } else if (message is NoiseEventMessage) {
           _log(
-            'NOISE_EVENT monitorId=${message.monitorId} '
+            'NOISE_EVENT remoteDeviceId=${message.deviceId} '
             'peak=${message.peakLevel} '
             'ts=${message.timestamp}',
           );
@@ -398,7 +407,5 @@ class ListenerRunResult {
 
 String _shortFp(String fingerprint) {
   if (fingerprint.length <= 12) return fingerprint;
-  final prefix = fingerprint.substring(0, 6);
-  final suffix = fingerprint.substring(fingerprint.length - 4);
-  return '$prefix...$suffix';
+  return fingerprint.substring(0, 12);
 }

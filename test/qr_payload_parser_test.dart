@@ -16,18 +16,18 @@ void main() {
 
   final payloadJson = jsonEncode({
     'type': MonitorQrPayload.payloadType,
-    'monitorId': 'M1-UUID',
+    'remoteDeviceId': 'M1-UUID',
     'monitorName': 'Nursery',
-    'monitorCertFingerprint': 'hex-sha256',
+    'certFingerprint': 'hex-sha256',
     'service': service.toJson(),
   });
 
   test('parses monitor QR payload from JSON string', () {
     final parsed = parseMonitorQrPayload(payloadJson);
 
-    expect(parsed.monitorId, equals('M1-UUID'));
+    expect(parsed.remoteDeviceId, equals('M1-UUID'));
     expect(parsed.monitorName, equals('Nursery'));
-    expect(parsed.monitorCertFingerprint, equals('hex-sha256'));
+    expect(parsed.certFingerprint, equals('hex-sha256'));
     expect(parsed.service.controlPort, equals(kControlDefaultPort));
     expect(parsed.service.pairingPort, equals(kPairingDefaultPort));
     expect(parsed.service.protocol, equals('baby-monitor'));
@@ -37,16 +37,16 @@ void main() {
   test('parses monitor QR payload with IPs', () {
     final payloadWithIps = jsonEncode({
       'type': MonitorQrPayload.payloadType,
-      'monitorId': 'M1-UUID',
+      'remoteDeviceId': 'M1-UUID',
       'monitorName': 'Nursery',
-      'monitorCertFingerprint': 'hex-sha256',
+      'certFingerprint': 'hex-sha256',
       'ips': ['192.168.1.100', '10.0.0.5'],
       'service': service.toJson(),
     });
 
     final parsed = parseMonitorQrPayload(payloadWithIps);
 
-    expect(parsed.monitorId, equals('M1-UUID'));
+    expect(parsed.remoteDeviceId, equals('M1-UUID'));
     expect(parsed.ips, equals(['192.168.1.100', '10.0.0.5']));
   });
 
@@ -57,9 +57,9 @@ void main() {
   test('enforces payload type when parsing string', () {
     final wrongTypePayload = jsonEncode({
       'type': 'wrong',
-      'monitorId': 'M1-UUID',
+      'remoteDeviceId': 'M1-UUID',
       'monitorName': 'Nursery',
-      'monitorCertFingerprint': 'hex-sha256',
+      'certFingerprint': 'hex-sha256',
       'service': service.toJson(),
     });
 

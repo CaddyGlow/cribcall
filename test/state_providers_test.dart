@@ -87,9 +87,9 @@ void main() {
 
     controller.add(
       const MdnsEvent.online(MdnsAdvertisement(
-        monitorId: 'm1',
+        remoteDeviceId: 'm1',
         monitorName: 'Nursery',
-        monitorCertFingerprint: 'fp1',
+        certFingerprint: 'fp1',
         controlPort: kControlDefaultPort,
         pairingPort: kPairingDefaultPort,
         version: 1,
@@ -97,9 +97,9 @@ void main() {
     );
     controller.add(
       const MdnsEvent.online(MdnsAdvertisement(
-        monitorId: 'm1',
+        remoteDeviceId: 'm1',
         monitorName: 'Nursery',
-        monitorCertFingerprint: 'fp1',
+        certFingerprint: 'fp1',
         controlPort: kControlDefaultPort,
         pairingPort: kPairingDefaultPort,
         version: 1,
@@ -129,9 +129,9 @@ void main() {
 
       await container.read(trustedMonitorsProvider.future);
       const payload = MonitorQrPayload(
-        monitorId: 'm1',
+        remoteDeviceId: 'm1',
         monitorName: 'Nursery',
-        monitorCertFingerprint: 'fp1',
+        certFingerprint: 'fp1',
         service: QrServiceInfo(
           protocol: 'baby-monitor',
           version: 1,
@@ -147,9 +147,9 @@ void main() {
           .read(trustedMonitorsProvider.notifier)
           .updateLastKnownIp(
             const MdnsAdvertisement(
-              monitorId: 'm1',
+              remoteDeviceId: 'm1',
               monitorName: 'Nursery',
-              monitorCertFingerprint: 'fp1',
+              certFingerprint: 'fp1',
               controlPort: kControlDefaultPort,
               pairingPort: kPairingDefaultPort,
               version: 1,

@@ -13,11 +13,12 @@ import '../domain/models.dart';
 import '../identity/device_identity.dart';
 import '../identity/pem.dart';
 import '../identity/pkcs8.dart';
+import '../util/format_utils.dart';
 import '../utils/canonical_json.dart';
 import 'control_connection.dart';
 
 typedef UnpairRequestHandler =
-    Future<bool> Function(String fingerprint, String? listenerId);
+    Future<bool> Function(String fingerprint, String? deviceId);
 typedef NoiseSubscribeResult = ({
   String deviceId,
   String subscriptionId,
@@ -37,6 +38,10 @@ typedef NoiseSubscribeHandler =
       required String platform,
       required int? leaseSeconds,
       required String remoteAddress,
+      int? threshold,
+      int? cooldownSeconds,
+      AutoStreamType? autoStreamType,
+      int? autoStreamDurationSec,
     });
 typedef NoiseUnsubscribeHandler =
     Future<NoiseUnsubscribeResult> Function({
@@ -139,7 +144,7 @@ class ControlServer {
       try {
         _log(
           'Binding control server on $address:$port '
-          'fingerprint=${_shortFingerprint(identity.certFingerprint)} '
+          'fingerprint=${shortFingerprint(identity.certFingerprint)} '
           'trustedPeers=${_trustedFingerprints.length}',
         );
 
@@ -194,7 +199,7 @@ class ControlServer {
   /// Triggers graceful server rebind to update TLS trust store.
   Future<void> addTrustedPeer(TrustedPeer peer) async {
     if (_trustedFingerprints.contains(peer.certFingerprint)) {
-      _log('Peer already trusted: ${_shortFingerprint(peer.certFingerprint)}');
+      _log('Peer already trusted: ${shortFingerprint(peer.certFingerprint)}');
       return;
     }
 
@@ -203,7 +208,7 @@ class ControlServer {
       _trustedCertificates.add(peer.certificateDer!);
     }
     _log(
-      'Added trusted peer ${_shortFingerprint(peer.certFingerprint)}, '
+      'Added trusted peer ${shortFingerprint(peer.certFingerprint)}, '
       'total=${_trustedFingerprints.length}',
     );
 
@@ -220,7 +225,7 @@ class ControlServer {
       (cert) => _fingerprintHex(cert) == fingerprint,
     );
     _log(
-      'Removed trusted peer ${_shortFingerprint(fingerprint)}, '
+      'Removed trusted peer ${shortFingerprint(fingerprint)}, '
       'total=${_trustedFingerprints.length}',
     );
 
@@ -228,7 +233,7 @@ class ControlServer {
     for (final conn in List.of(_connections)) {
       if (conn.peerFingerprint == fingerprint) {
         _log(
-          'Closing connection from removed peer ${_shortFingerprint(fingerprint)}',
+          'Closing connection from removed peer ${shortFingerprint(fingerprint)}',
         );
         await conn.close();
       }
@@ -346,7 +351,7 @@ class ControlServer {
       trusted = _trustedFingerprints.contains(clientFp);
       _log(
         'Health from ${request.connectionInfo?.remoteAddress.address} '
-        'clientFp=${_shortFingerprint(clientFp)} trusted=$trusted',
+        'clientFp=${shortFingerprint(clientFp)} trusted=$trusted',
       );
     } else {
       _log(
@@ -394,7 +399,7 @@ class ControlServer {
     final fp = _fingerprintHex(clientCert.der);
     final trusted = _trustedFingerprints.contains(fp);
     if (!trusted) {
-      _log('Test rejected: untrusted certificate ${_shortFingerprint(fp)}');
+      _log('Test rejected: untrusted certificate ${shortFingerprint(fp)}');
       request.response
         ..statusCode = HttpStatus.forbidden
         ..headers.contentType = ContentType.json
@@ -409,7 +414,7 @@ class ControlServer {
       return;
     }
 
-    _log('Test accepted: ${_shortFingerprint(fp)}');
+    _log('Test accepted: ${shortFingerprint(fp)}');
     request.response
       ..statusCode = HttpStatus.ok
       ..headers.contentType = ContentType.json
@@ -445,7 +450,7 @@ class ControlServer {
     final fp = _fingerprintHex(clientCert.der);
     final trusted = _trustedFingerprints.contains(fp);
     if (!trusted) {
-      _log('Unpair rejected: untrusted certificate ${_shortFingerprint(fp)}');
+      _log('Unpair rejected: untrusted certificate ${shortFingerprint(fp)}');
       request.response
         ..statusCode = HttpStatus.forbidden
         ..headers.contentType = ContentType.json
@@ -460,13 +465,13 @@ class ControlServer {
       return;
     }
 
-    String? listenerId;
+    String? deviceId;
     try {
       final bodyStr = await utf8.decodeStream(request);
       if (bodyStr.trim().isNotEmpty) {
         final payload = jsonDecode(bodyStr);
-        if (payload is Map && payload['listenerId'] is String) {
-          listenerId = payload['listenerId'] as String;
+        if (payload is Map && payload['deviceId'] is String) {
+          deviceId = payload['deviceId'] as String;
         }
       }
     } catch (e) {
@@ -477,7 +482,7 @@ class ControlServer {
         ..write(
           jsonEncode({
             'error': 'invalid_body',
-            'message': 'Body must be JSON with optional listenerId',
+            'message': 'Body must be JSON with optional deviceId',
           }),
         );
       await request.response.close();
@@ -500,10 +505,10 @@ class ControlServer {
       return;
     }
 
-    final unpaired = await handler(fp, listenerId);
+    final unpaired = await handler(fp, deviceId);
     _log(
       'Unpair request from ${request.connectionInfo?.remoteAddress.address} '
-      'clientFp=${_shortFingerprint(fp)} listenerId=$listenerId '
+      'clientFp=${shortFingerprint(fp)} deviceId=$deviceId '
       'unpaired=$unpaired',
     );
 
@@ -515,8 +520,8 @@ class ControlServer {
         jsonEncode({
           'status': 'ok',
           'unpaired': unpaired,
-          if (listenerId != null) 'listenerId': listenerId,
-          if (!unpaired) 'reason': 'listener_not_found',
+          if (deviceId != null) 'deviceId': deviceId,
+          if (!unpaired) 'reason': 'device_not_found',
         }),
       );
     await request.response.close();
@@ -546,7 +551,7 @@ class ControlServer {
     if (!_trustedFingerprints.contains(fp)) {
       _log(
         'Noise subscribe rejected: untrusted fingerprint '
-        'fp=${_shortFingerprint(fp)} remote=$remote',
+        'fp=${shortFingerprint(fp)} remote=$remote',
       );
       _writeCanonicalJson(request.response, HttpStatus.forbidden, {
         'error': 'untrusted',
@@ -573,6 +578,10 @@ class ControlServer {
       'deviceId',
       'pairingId',
       'subscriptionId',
+      'threshold',
+      'cooldownSeconds',
+      'autoStreamType',
+      'autoStreamDurationSec',
     };
     final unknown = body.keys.where((k) => !allowedKeys.contains(k)).toList();
     if (unknown.isNotEmpty) {
@@ -594,6 +603,10 @@ class ControlServer {
     final fcmToken = body['fcmToken'];
     final platform = body['platform'];
     final leaseSeconds = body['leaseSeconds'];
+    final threshold = body['threshold'];
+    final cooldownSeconds = body['cooldownSeconds'];
+    final autoStreamTypeName = body['autoStreamType'];
+    final autoStreamDurationSec = body['autoStreamDurationSec'];
 
     if (fcmToken is! String || fcmToken.isEmpty) {
       _writeCanonicalJson(request.response, HttpStatus.badRequest, {
@@ -619,6 +632,50 @@ class ControlServer {
       return;
     }
 
+    if (threshold != null && threshold is! int) {
+      _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+        'error': 'invalid_threshold',
+        'message': 'threshold must be an integer if provided',
+      });
+      return;
+    }
+
+    if (cooldownSeconds != null && cooldownSeconds is! int) {
+      _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+        'error': 'invalid_cooldown',
+        'message': 'cooldownSeconds must be an integer if provided',
+      });
+      return;
+    }
+
+    if (autoStreamDurationSec != null && autoStreamDurationSec is! int) {
+      _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+        'error': 'invalid_auto_stream_duration',
+        'message': 'autoStreamDurationSec must be an integer if provided',
+      });
+      return;
+    }
+
+    AutoStreamType? autoStreamType;
+    if (autoStreamTypeName != null) {
+      if (autoStreamTypeName is! String) {
+        _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+          'error': 'invalid_auto_stream_type',
+          'message': 'autoStreamType must be a string if provided',
+        });
+        return;
+      }
+      try {
+        autoStreamType = AutoStreamType.values.byName(autoStreamTypeName);
+      } catch (_) {
+        _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+          'error': 'invalid_auto_stream_type',
+          'message': 'autoStreamType must be one of: none, audio, audioVideo',
+        });
+        return;
+      }
+    }
+
     try {
       final result = await onNoiseSubscribe!(
         fingerprint: fp,
@@ -626,6 +683,10 @@ class ControlServer {
         platform: platform,
         leaseSeconds: leaseSeconds as int?,
         remoteAddress: remote,
+        threshold: threshold as int?,
+        cooldownSeconds: cooldownSeconds as int?,
+        autoStreamType: autoStreamType,
+        autoStreamDurationSec: autoStreamDurationSec as int?,
       );
 
       _writeCanonicalJson(request.response, HttpStatus.ok, {
@@ -667,7 +728,7 @@ class ControlServer {
     if (!_trustedFingerprints.contains(fp)) {
       _log(
         'Noise unsubscribe rejected: untrusted fingerprint '
-        'fp=${_shortFingerprint(fp)} remote=$remote',
+        'fp=${shortFingerprint(fp)} remote=$remote',
       );
       _writeCanonicalJson(request.response, HttpStatus.forbidden, {
         'error': 'untrusted',
@@ -770,7 +831,7 @@ class ControlServer {
     if (!trusted) {
       _log(
         'WebSocket rejected from $remoteIp:$remotePort: '
-        'untrusted certificate ${_shortFingerprint(fp)}',
+        'untrusted certificate ${shortFingerprint(fp)}',
       );
       request.response
         ..statusCode = HttpStatus.forbidden
@@ -781,7 +842,7 @@ class ControlServer {
 
     _log(
       'WebSocket accepted from $remoteIp:$remotePort '
-      'clientFp=${_shortFingerprint(fp)}',
+      'clientFp=${shortFingerprint(fp)}',
     );
 
     final socket = await WebSocketTransformer.upgrade(request);
@@ -843,9 +904,4 @@ void _writeCanonicalJson(
     ..headers.set('Cache-Control', 'no-store')
     ..write(canonicalizeJson(body))
     ..close();
-}
-
-String _shortFingerprint(String fingerprint) {
-  if (fingerprint.length <= 12) return fingerprint;
-  return '${fingerprint.substring(0, 6)}...${fingerprint.substring(fingerprint.length - 4)}';
 }

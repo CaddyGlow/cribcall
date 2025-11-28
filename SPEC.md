@@ -166,30 +166,30 @@ Implementation note: current milestone ships the control channel over HTTP+WebSo
 #### FR2 – QR Pairing
 
 - FR2.1: Monitor can display a QR code encoding:
-  - `monitorId`
+  - `deviceId`
   - `monitorName`
-  - `monitorCertFingerprint` (SHA-256 over self-signed cert DER)
+  - `certFingerprint` (SHA-256 over self-signed cert DER)
   - Optional: `monitorPublicKey` (base64 SPKI) for human inspection/debugging
   - Service info (`protocol`, `version`, `defaultPort`)
 
-- FR2.2: Listener scans QR → pins `monitorCertFingerprint` immediately (physical out-of-band).
-- FR2.3: Listener establishes QUIC connection, verifies the server cert fingerprint matches `monitorCertFingerprint`, then sends `PAIR_REQUEST`. Client cert is allowed to be “unknown” only for pairing flows.
+- FR2.2: Listener scans QR → pins `certFingerprint` immediately (physical out-of-band).
+- FR2.3: Listener establishes QUIC connection, verifies the server cert fingerprint matches `certFingerprint`, then sends `PAIR_REQUEST`. Client cert is allowed to be "unknown" only for pairing flows.
 - FR2.4: Monitor stores listener as trusted (including listener cert fingerprint) and returns `PAIR_ACCEPTED`. Future QUIC sessions from that listener must present the pinned cert fingerprint.
 
 #### FR3 – mDNS + PIN Pairing
 
 - FR3.1: Monitor advertises itself via mDNS/UPnP with:
-  - `monitorName`, `monitorId`, `monitorCertFingerprint`, `servicePort`, `version`.
+  - `monitorName`, `deviceId`, `certFingerprint`, `servicePort`, `version`.
 
-- FR3.2: Listener scans LAN, lists discovered monitors, and pins `monitorCertFingerprint` before opening QUIC.
+- FR3.2: Listener scans LAN, lists discovered monitors, and pins `certFingerprint` before opening QUIC.
 - FR3.3: When pairing via discovery:
-  - Listener initiates PIN pairing (`PIN_PAIRING_INIT` over QUIC). Server cert **must** match pinned `monitorCertFingerprint`; client cert may be unknown for this flow only.
+  - Listener initiates PIN pairing (`PIN_PAIRING_INIT` over QUIC). Server cert **must** match pinned `certFingerprint`; client cert may be unknown for this flow only.
   - Monitor generates random PIN, shows it on screen, and sends `PIN_REQUIRED` with `pairingSessionId` + PAKE `pakeMsgA` (and expiry/attempt limit).
   - User enters PIN on listener; listener runs the PAKE with `pakeMsgA`, derives `pairingKey`, and sends `PIN_SUBMIT` containing `pakeMsgB` plus an auth tag over the transcript.
   - The PAKE transcript **includes the server cert fingerprint** observed in this QUIC session to bind the PIN to the specific server identity.
   - Monitor completes the PAKE, verifies the auth tag, stores listener (including listener cert fingerprint), sends `PAIR_ACCEPTED`.
 
-- FR3.4: Pairing fails if PIN/auth fails, session expired, attempts exceeded, or server cert fingerprint in transcript does not equal the monitor’s own fingerprint.
+- FR3.4: Pairing fails if PIN/auth fails, session expired, attempts exceeded, or server cert fingerprint in transcript does not equal the monitor's own fingerprint.
 
 #### FR4 – Sound Detection
 
@@ -328,8 +328,7 @@ On first run:
    - iOS: Keychain.
    - Linux: local encrypted file if possible.
 
-Monitor has `monitorId` = `deviceId`.
-Listener has `listenerId` = `deviceId`.
+All devices use `deviceId` as their unique identifier.
 
 ---
 
@@ -342,9 +341,9 @@ Listener has `listenerId` = `deviceId`.
 ```json
 {
   "type": "monitor_pair_v1",
-  "monitorId": "M1-UUID",
+  "deviceId": "M1-UUID",
   "monitorName": "Nursery",
-  "monitorCertFingerprint": "hex-sha256",
+  "certFingerprint": "hex-sha256",
   "monitorPublicKey": "<base64>", // optional, informational
   "service": {
     "protocol": "baby-monitor",
@@ -356,18 +355,18 @@ Listener has `listenerId` = `deviceId`.
 
 2. Listener scans QR → obtains monitor cert fingerprint & service info.
 3. Listener discovers monitor IP via mDNS/UPnP or local ARP.
-4. Listener establishes QUIC connection to monitor’s IP:port with **server pinning**:
-   - Server cert fingerprint **must** match `monitorCertFingerprint` from QR.
-   - Client presents its device cert. For pairing messages, monitor accepts unknown client certs but restricts them to pairing-only message types. Post-pairing the monitor pins the listener’s cert fingerprint and requires it for all future sessions.
+4. Listener establishes QUIC connection to monitor's IP:port with **server pinning**:
+   - Server cert fingerprint **must** match `certFingerprint` from QR.
+   - Client presents its device cert. For pairing messages, monitor accepts unknown client certs but restricts them to pairing-only message types. Post-pairing the monitor pins the listener's cert fingerprint and requires it for all future sessions.
 5. Listener performs `PAIR_REQUEST` over QUIC control stream:
 
 ```json
 {
   "type": "PAIR_REQUEST",
-  "listenerId": "L1-UUID",
-  "listenerName": "Dad’s Phone",
+  "deviceId": "L1-UUID",
+  "listenerName": "Dad's Phone",
   "listenerPublicKey": "<base64>",
-  "listenerCertFingerprint": "hex-sha256"
+  "certFingerprint": "hex-sha256"
 }
 ```
 
@@ -376,11 +375,11 @@ Listener has `listenerId` = `deviceId`.
 ```json
 {
   "type": "PAIR_ACCEPTED",
-  "monitorId": "M1-UUID"
+  "remoteDeviceId": "M1-UUID"
 }
 ```
 
-7. Listener saves monitor as trusted (`monitorId`, `monitorCertFingerprint`, name, IP). Monitor saves listener cert fingerprint so future QUIC sessions require that identity.
+7. Listener saves monitor as trusted (`remoteDeviceId`, `certFingerprint`, name, IP). Monitor saves listener cert fingerprint so future QUIC sessions require that identity.
 
 Since QR gives the public key out-of-band, no PIN needed.
 
@@ -390,20 +389,20 @@ Since QR gives the public key out-of-band, no PIN needed.
 
 1. **Discovery:**
    - Monitor advertises `_baby-monitor._tcp.local` with:
-     - `monitorId`, `monitorName`, `monitorCertFingerprint`, `servicePort`, `version`.
+     - `deviceId`, `monitorName`, `certFingerprint`, `servicePort`, `version`.
 
    - Listener browses mDNS and lists available monitors.
-   - Listener must pin `monitorCertFingerprint` from the advertisement before opening QUIC.
+   - Listener must pin `certFingerprint` from the advertisement before opening QUIC.
 
 2. **Start pairing: Listener → Monitor**
 
 ```json
 {
   "type": "PIN_PAIRING_INIT",
-  "listenerId": "L1-UUID",
-  "listenerName": "Dad’s Phone",
+  "deviceId": "L1-UUID",
+  "listenerName": "Dad's Phone",
   "protocolVersion": 1,
-  "listenerCertFingerprint": "hex-sha256"
+  "certFingerprint": "hex-sha256"
 }
 ```
 
@@ -439,11 +438,11 @@ And **displays PIN** on monitor UI.
 
 ```json
 {
-  "monitorId": "M1-UUID",
-  "listenerId": "L1-UUID",
+  "remoteDeviceId": "M1-UUID",
+  "deviceId": "L1-UUID",
   "listenerPublicKey": "<base64>",
-  "listenerCertFingerprint": "hex-sha256",
-  "monitorCertFingerprint": "hex-sha256",
+  "certFingerprint": "hex-sha256",
+  "remoteCertFingerprint": "hex-sha256",
   "pairingSessionId": "PS1-UUID"
 }
 ```
@@ -470,7 +469,7 @@ authTag = HMAC( pairingKey, serialize(transcript) )
 
 - Runs the PAKE step with stored PIN and `pakeMsgB` to derive `pairingKey`.
 - Verifies `authTag` over transcript.
-- Verifies the `monitorCertFingerprint` in the transcript equals its own certificate fingerprint (binding the PAKE to the QUIC server identity).
+- Verifies the `remoteCertFingerprint` in the transcript equals its own certificate fingerprint (binding the PAKE to the QUIC server identity).
 - Decrements `attemptsRemaining`; rejects and expires after `maxAttempts` or timeout.
 
 If OK:
@@ -481,7 +480,7 @@ If OK:
 ```json
 {
   "type": "PAIR_ACCEPTED",
-  "monitorId": "M1-UUID"
+  "remoteDeviceId": "M1-UUID"
 }
 ```
 
@@ -494,7 +493,7 @@ Else:
 }
 ```
 
-10. Listener saves monitor as trusted (monitorId, monitorCertFingerprint, name, lastKnownIp).
+10. Listener saves monitor as trusted (remoteDeviceId, certFingerprint, name, lastKnownIp).
 
 Now the monitor’s cert fingerprint is bound to this PIN-verified transcript, preventing MITM on same LAN.
 PAKE prevents offline brute-forcing of the PIN; sessions expire after `expiresInSec` and are locked after `maxAttempts`.
@@ -515,14 +514,14 @@ PAKE prevents offline brute-forcing of the PIN; sessions expire after `expiresIn
 
 - Advertise service `_baby-monitor._tcp.local`.
 - TXT records / metadata:
-  - `monitorId`, `monitorName`, `monitorCertFingerprint`, `version`.
+  - `deviceId`, `monitorName`, `certFingerprint`, `version`.
 
 **Listener side:**
 
 - Browse `_baby-monitor._tcp.local`.
 - Map services to monitors and show them as:
-  - “Paired” (known `monitorId`).
-  - “Unpaired” (unknown `monitorId`).
+  - "Paired" (known `remoteDeviceId`).
+  - "Unpaired" (unknown `remoteDeviceId`).
 
 mDNS advertisement is for discovery only; trust is granted via QR or PIN pairing.
 
@@ -554,7 +553,7 @@ Example message:
 ```json
 {
   "type": "NOISE_EVENT",
-  "monitorId": "M1-UUID",
+  "remoteDeviceId": "M1-UUID",
   "timestamp": 1234567890,
   "peakLevel": 85
 }
@@ -753,7 +752,7 @@ Media flows over UDP (DTLS-SRTP), fully separate from QUIC’s UDP usage.
 
 - `deviceId`, keypair.
 - `deviceCert`, `certFingerprint`.
-- Trusted monitors (monitorId, name, cert fingerprint, lastKnownIp).
+- Trusted monitors (remoteDeviceId, name, cert fingerprint, lastKnownIp).
 - Listener preferences.
 
 Deleting a device key (monitor or listener) clears its trust anchors; the device must be re-paired to resume use.

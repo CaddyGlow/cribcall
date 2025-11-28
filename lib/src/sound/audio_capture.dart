@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 
+import '../domain/audio.dart';
 import '../domain/models.dart';
 import 'sound_detector.dart';
 
@@ -18,6 +19,7 @@ abstract class AudioCaptureService {
     required NoiseSettings settings,
     required NoiseEventSink onNoise,
     LevelSink? onLevel,
+    double inputGain = 1.0,
     this.sampleRate = 16000,
     this.frameSize = 320,
   }) : detector = SoundDetector(
@@ -26,11 +28,13 @@ abstract class AudioCaptureService {
          onLevel: onLevel,
          sampleRate: sampleRate,
          frameSize: frameSize,
-       );
+       ),
+       _inputGain = inputGain.clamp(0.0, 2.0);
 
   final int sampleRate;
   final int frameSize;
   final SoundDetector detector;
+  double _inputGain;
 
   /// Stream controller for raw PCM audio data (for WebRTC streaming).
   final _rawDataController = StreamController<Uint8List>.broadcast();
@@ -69,6 +73,28 @@ abstract class AudioCaptureService {
     return peak;
   }
 
+  /// Apply input gain (0.0-2.0) to PCM bytes, clamping to 16-bit range.
+  /// Returns the original buffer when gain is 1.0 to avoid extra copies.
+  Uint8List applyInputGain(Uint8List data) {
+    if (_inputGain == 1.0 || data.isEmpty) return data;
+
+    final out = Uint8List(data.length);
+    final input = ByteData.sublistView(data);
+    final output = ByteData.sublistView(out);
+
+    for (var i = 0; i < data.length - 1; i += 2) {
+      final sample = input.getInt16(i, Endian.little);
+      final scaled = (sample * _inputGain).round().clamp(-32768, 32767);
+      output.setInt16(i, scaled, Endian.little);
+    }
+
+    return out;
+  }
+
+  void setInputGain(double gain) {
+    _inputGain = gain.clamp(0.0, 2.0);
+  }
+
   Future<void> start();
 
   Future<void> stop() async {
@@ -103,6 +129,7 @@ class DebugAudioCaptureService extends AudioCaptureService {
     super.onLevel,
     super.sampleRate,
     super.frameSize,
+    super.inputGain,
   });
 
   Process? _recordProcess;
@@ -155,10 +182,7 @@ class DebugAudioCaptureService extends AudioCaptureService {
         );
         break;
       } catch (e) {
-        developer.log(
-          '${cmd.first} not available: $e',
-          name: 'audio_capture',
-        );
+        developer.log('${cmd.first} not available: $e', name: 'audio_capture');
       }
     }
 
@@ -181,7 +205,9 @@ class DebugAudioCaptureService extends AudioCaptureService {
     );
 
     // Log stderr for debugging
-    _recordProcess!.stderr.transform(const SystemEncoding().decoder).listen((line) {
+    _recordProcess!.stderr.transform(const SystemEncoding().decoder).listen((
+      line,
+    ) {
       developer.log('Debug capture stderr: $line', name: 'audio_capture');
     });
 
@@ -194,10 +220,15 @@ class DebugAudioCaptureService extends AudioCaptureService {
     var offset = 0;
 
     while (offset + _bytesPerFrame <= bytes.length) {
-      final frameBytes = Uint8List.sublistView(bytes, offset, offset + _bytesPerFrame);
+      final frameBytes = Uint8List.sublistView(
+        bytes,
+        offset,
+        offset + _bytesPerFrame,
+      );
+      final gained = applyInputGain(frameBytes);
       // Emit raw data for WebRTC streaming
-      emitRawData(frameBytes);
-      final samples = _pcmBytesToSamples(frameBytes);
+      emitRawData(gained);
+      final samples = _pcmBytesToSamples(gained);
       final timestampMs = DateTime.now().millisecondsSinceEpoch;
       detector.addFrame(samples, timestampMs: timestampMs);
       offset += _bytesPerFrame;
@@ -257,10 +288,7 @@ class DebugAudioCaptureService extends AudioCaptureService {
         _toneProcess = null;
       });
     } catch (e) {
-      developer.log(
-        'Could not play test tone: $e',
-        name: 'audio_capture',
-      );
+      developer.log('Could not play test tone: $e', name: 'audio_capture');
     }
   }
 
@@ -287,8 +315,11 @@ class LinuxSubprocessAudioCaptureService extends AudioCaptureService {
     super.onLevel,
     super.sampleRate,
     super.frameSize,
+    super.inputGain,
+    this.deviceId,
   });
 
+  final String? deviceId;
   Process? _process;
   StreamSubscription<List<int>>? _stdoutSub;
   final _buffer = BytesBuilder(copy: false);
@@ -299,6 +330,13 @@ class LinuxSubprocessAudioCaptureService extends AudioCaptureService {
     if (_process != null) return;
 
     _bytesPerFrame = frameSize * 2; // 16-bit = 2 bytes per sample
+    final pipewireTarget = _pipewireTarget();
+    final parecDevice = _parecDeviceArg();
+
+    developer.log(
+      'Starting audio capture on device=${pipewireTarget == kDefaultAudioInputId ? "default" : pipewireTarget}',
+      name: 'audio_capture',
+    );
 
     // Try pw-record first (PipeWire native), fall back to parec (PulseAudio)
     final commands = [
@@ -307,7 +345,7 @@ class LinuxSubprocessAudioCaptureService extends AudioCaptureService {
         '--rate=$sampleRate',
         '--channels=1',
         '--format=s16',
-        '--target=@DEFAULT_AUDIO_SOURCE@',
+        '--target=$pipewireTarget',
         '-',
       ],
       [
@@ -316,6 +354,7 @@ class LinuxSubprocessAudioCaptureService extends AudioCaptureService {
         '--channels=1',
         '--format=s16le',
         '--raw',
+        ...parecDevice,
       ],
     ];
 
@@ -332,10 +371,7 @@ class LinuxSubprocessAudioCaptureService extends AudioCaptureService {
         );
         break;
       } catch (e) {
-        developer.log(
-          '${cmd.first} not available: $e',
-          name: 'audio_capture',
-        );
+        developer.log('${cmd.first} not available: $e', name: 'audio_capture');
       }
     }
 
@@ -363,16 +399,35 @@ class LinuxSubprocessAudioCaptureService extends AudioCaptureService {
     });
   }
 
+  String _pipewireTarget() {
+    final id = deviceId?.trim();
+    if (id == null || id.isEmpty) return kDefaultAudioInputId;
+    return id;
+  }
+
+  List<String> _parecDeviceArg() {
+    final id = deviceId?.trim();
+    if (id == null || id.isEmpty || id == kDefaultAudioInputId) {
+      return const [];
+    }
+    return ['--device=$id'];
+  }
+
   void _onData(List<int> chunk) {
     _buffer.add(chunk);
     final bytes = Uint8List.fromList(_buffer.takeBytes());
     var offset = 0;
 
     while (offset + _bytesPerFrame <= bytes.length) {
-      final frameBytes = Uint8List.sublistView(bytes, offset, offset + _bytesPerFrame);
+      final frameBytes = Uint8List.sublistView(
+        bytes,
+        offset,
+        offset + _bytesPerFrame,
+      );
+      final gained = applyInputGain(frameBytes);
       // Emit raw data for WebRTC streaming
-      emitRawData(frameBytes);
-      final samples = _pcmBytesToSamples(frameBytes);
+      emitRawData(gained);
+      final samples = _pcmBytesToSamples(gained);
       final timestampMs = DateTime.now().millisecondsSinceEpoch;
       detector.addFrame(samples, timestampMs: timestampMs);
       offset += _bytesPerFrame;
@@ -418,6 +473,7 @@ class AndroidAudioCaptureService extends AudioCaptureService {
     super.onLevel,
     super.sampleRate,
     super.frameSize,
+    super.inputGain,
     MethodChannel? methodChannel,
     EventChannel? eventChannel,
     this.mdnsAdvertisement,
@@ -465,14 +521,18 @@ class AndroidAudioCaptureService extends AudioCaptureService {
       // Pass mDNS params if available (for foreground service advertising)
       final params = <String, dynamic>{};
       if (mdnsAdvertisement != null) {
-        params['monitorId'] = mdnsAdvertisement!.monitorId;
+        params['remoteDeviceId'] = mdnsAdvertisement!.remoteDeviceId;
         params['monitorName'] = mdnsAdvertisement!.monitorName;
-        params['monitorCertFingerprint'] = mdnsAdvertisement!.monitorCertFingerprint;
+        params['monitorCertFingerprint'] =
+            mdnsAdvertisement!.certFingerprint;
         params['controlPort'] = mdnsAdvertisement!.controlPort;
         params['pairingPort'] = mdnsAdvertisement!.pairingPort;
         params['version'] = mdnsAdvertisement!.version;
       }
-      await _method.invokeMethod<void>('start', params.isNotEmpty ? params : null);
+      await _method.invokeMethod<void>(
+        'start',
+        params.isNotEmpty ? params : null,
+      );
       developer.log(
         'Started Android audio capture${mdnsAdvertisement != null ? " with mDNS" : ""}',
         name: 'audio_capture',
@@ -494,16 +554,19 @@ class AndroidAudioCaptureService extends AudioCaptureService {
     }
     if (data is! Uint8List) return;
 
-    // Emit raw data for WebRTC streaming
-    emitRawData(data);
-
     _buffer.add(data);
     final bytes = Uint8List.fromList(_buffer.takeBytes());
     var offset = 0;
 
     while (offset + _bytesPerFrame <= bytes.length) {
-      final frameBytes = Uint8List.sublistView(bytes, offset, offset + _bytesPerFrame);
-      final samples = _pcmBytesToSamples(frameBytes);
+      final frameBytes = Uint8List.sublistView(
+        bytes,
+        offset,
+        offset + _bytesPerFrame,
+      );
+      final gained = applyInputGain(frameBytes);
+      final samples = _pcmBytesToSamples(gained);
+      emitRawData(gained);
       final timestampMs = DateTime.now().millisecondsSinceEpoch;
       detector.addFrame(samples, timestampMs: timestampMs);
       offset += _bytesPerFrame;

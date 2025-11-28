@@ -6,6 +6,7 @@ import '../control/pairing_client.dart';
 import '../domain/models.dart';
 import '../identity/device_identity.dart';
 import '../state/app_state.dart';
+import '../util/format_utils.dart';
 
 /// State for a numeric comparison pairing session.
 ///
@@ -63,21 +64,21 @@ class PairingController extends Notifier<PairingSessionState?> {
 
     _logPairing(
       'Initiating numeric comparison pairing (HTTP RPC):\n'
-      '  monitor=${advertisement.monitorId}\n'
+      '  remoteDeviceId=${advertisement.remoteDeviceId}\n'
       '  name=${advertisement.monitorName}\n'
       '  ip=$ip:${advertisement.pairingPort}\n'
-      '  fingerprint=${_shortFingerprint(advertisement.monitorCertFingerprint)}',
+      '  fingerprint=${shortFingerprint(advertisement.certFingerprint)}',
     );
 
     try {
-      final needsUnpinned = advertisement.monitorCertFingerprint.isEmpty;
+      final needsUnpinned = advertisement.certFingerprint.isEmpty;
       _logPairing('Calling POST /pair/init... (allowUnpinned=$needsUnpinned)');
 
       _pairingClient = PairingClient();
       final result = await _pairingClient!.initPairing(
         host: ip,
         port: advertisement.pairingPort,
-        expectedFingerprint: advertisement.monitorCertFingerprint,
+        expectedFingerprint: advertisement.certFingerprint,
         listenerIdentity: listenerIdentity,
         listenerName: listenerName,
         allowUnpinned: needsUnpinned,
@@ -141,11 +142,11 @@ class PairingController extends Notifier<PairingSessionState?> {
       final response = await client.confirmPairingWithPolling(
         host: ip,
         port: current.advertisement.pairingPort,
-        expectedFingerprint: current.advertisement.monitorCertFingerprint,
+        expectedFingerprint: current.advertisement.certFingerprint,
         listenerIdentity: listenerIdentity,
         sessionId: current.sessionId,
         pairingKey: current.pairingKey,
-        allowUnpinned: current.advertisement.monitorCertFingerprint.isEmpty,
+        allowUnpinned: current.advertisement.certFingerprint.isEmpty,
       );
 
       if (!response.accepted) {
@@ -157,17 +158,17 @@ class PairingController extends Notifier<PairingSessionState?> {
       // Pairing accepted - persist trusted monitor
       _logPairing(
         'Pairing accepted:\n'
-        '  monitorId=${response.monitorId}\n'
+        '  remoteDeviceId=${response.remoteDeviceId}\n'
         '  monitorName=${response.monitorName}\n'
-        '  fingerprint=${_shortFingerprint(response.monitorCertFingerprint ?? '')}',
+        '  fingerprint=${shortFingerprint(response.certFingerprint ?? '')}',
       );
 
       await ref.read(trustedMonitorsProvider.notifier).addMonitor(
         MonitorQrPayload(
-          monitorId: response.monitorId ?? current.advertisement.monitorId,
+          remoteDeviceId: response.remoteDeviceId ?? current.advertisement.remoteDeviceId,
           monitorName: response.monitorName ?? current.advertisement.monitorName,
-          monitorCertFingerprint: response.monitorCertFingerprint ??
-              current.advertisement.monitorCertFingerprint,
+          certFingerprint: response.certFingerprint ??
+              current.advertisement.certFingerprint,
           service: QrServiceInfo(
             protocol: 'baby-monitor',
             version: current.advertisement.version,
@@ -177,6 +178,7 @@ class PairingController extends Notifier<PairingSessionState?> {
           ),
         ),
         lastKnownIp: ip,
+        certificateDer: response.certificateDer,
       );
 
       state = null;
@@ -213,10 +215,10 @@ class PairingController extends Notifier<PairingSessionState?> {
 
     _logPairing(
       'Token pairing to:\n'
-      '  monitor=${payload.monitorId}\n'
+      '  remoteDeviceId=${payload.remoteDeviceId}\n'
       '  name=${payload.monitorName}\n'
       '  ip=$ip:${payload.service.pairingPort}\n'
-      '  fingerprint=${_shortFingerprint(payload.monitorCertFingerprint)}',
+      '  fingerprint=${shortFingerprint(payload.certFingerprint)}',
     );
 
     try {
@@ -224,7 +226,7 @@ class PairingController extends Notifier<PairingSessionState?> {
       final response = await _pairingClient!.pairWithToken(
         host: ip,
         port: payload.service.pairingPort,
-        expectedFingerprint: payload.monitorCertFingerprint,
+        expectedFingerprint: payload.certFingerprint,
         pairingToken: token,
         listenerIdentity: listenerIdentity,
         listenerName: listenerName,
@@ -238,22 +240,22 @@ class PairingController extends Notifier<PairingSessionState?> {
       // Pairing accepted - persist trusted monitor
       _logPairing(
         'Token pairing accepted:\n'
-        '  monitorId=${response.monitorId}\n'
+        '  remoteDeviceId=${response.remoteDeviceId}\n'
         '  monitorName=${response.monitorName}\n'
-        '  fingerprint=${_shortFingerprint(response.monitorCertFingerprint ?? '')}',
+        '  fingerprint=${shortFingerprint(response.certFingerprint ?? '')}',
       );
 
       await ref.read(trustedMonitorsProvider.notifier).addMonitor(
         MonitorQrPayload(
-          monitorId: response.monitorId ?? payload.monitorId,
+          remoteDeviceId: response.remoteDeviceId ?? payload.remoteDeviceId,
           monitorName: response.monitorName ?? payload.monitorName,
-          monitorCertFingerprint:
-              response.monitorCertFingerprint ?? payload.monitorCertFingerprint,
+          certFingerprint:
+              response.certFingerprint ?? payload.certFingerprint,
           service: payload.service,
           ips: payload.ips,
         ),
         lastKnownIp: ip,
-        certificateDer: response.monitorCertificateDer,
+        certificateDer: response.certificateDer,
       );
 
       _logPairing('Token pairing completed successfully');
@@ -296,11 +298,4 @@ class PairingResult {
 
 void _logPairing(String message) {
   developer.log(message, name: 'pairing');
-}
-
-String _shortFingerprint(String fingerprint) {
-  if (fingerprint.length <= 12) return fingerprint;
-  final prefix = fingerprint.substring(0, 6);
-  final suffix = fingerprint.substring(fingerprint.length - 4);
-  return '$prefix...$suffix';
 }

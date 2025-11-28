@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:cribcall/src/domain/audio.dart';
 import 'package:cribcall/src/domain/models.dart';
 import 'package:cribcall/src/storage/settings_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -12,11 +13,13 @@ void main() {
 
     final defaults = await repo.load();
     expect(defaults.noise.threshold, MonitorSettings.defaults.noise.threshold);
+    expect(defaults.audioInputDeviceId, kDefaultAudioInputId);
 
     final updated = defaults.copyWith(
       noise: defaults.noise.copyWith(threshold: 72),
       autoStreamType: AutoStreamType.audioVideo,
       autoStreamDurationSec: 30,
+      audioInputDeviceId: 'alsa_input.pci-test',
     );
     await repo.save(updated);
 
@@ -24,6 +27,7 @@ void main() {
     expect(roundTrip.noise.threshold, 72);
     expect(roundTrip.autoStreamType, AutoStreamType.audioVideo);
     expect(roundTrip.autoStreamDurationSec, 30);
+    expect(roundTrip.audioInputDeviceId, 'alsa_input.pci-test');
   });
 
   test('listener settings repository persists updates', () async {

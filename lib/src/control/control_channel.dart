@@ -342,10 +342,6 @@ void _log(String message) {
 }
 
 String _shortFingerprint(String fingerprint) {
-  if (fingerprint.length <= 12) {
-    return fingerprint;
-  }
-  final prefix = fingerprint.substring(0, 6);
-  final suffix = fingerprint.substring(fingerprint.length - 4);
-  return '$prefix...$suffix';
+  if (fingerprint.length <= 12) return fingerprint;
+  return fingerprint.substring(0, 12);
 }

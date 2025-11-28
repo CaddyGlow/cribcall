@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+ - Task: android-mdns-wait-identity — Wait for Android identity/session to load before stopping mDNS advertise attempts, retrying after a short delay and starting an advertise-only foreground service on Android so ads publish even when audio capture demand is zero.
+ - Task: plan-sound-levels — Added monitor mic input gain (0–200%) applied to detection and streamed PCM, listener playback volume control (0–200%) with platform hooks (Android AudioTrack channel + Linux software gain), and UI sliders tied to persisted settings.
+ - Task: monitor-input-device — Restored the recording device picker on the monitor dashboard, persisted the selected input, and passed the chosen Linux source into audio capture so microphone selection works again.
  - Task: plan-noise-subscriptions — Implemented pinned-fingerprint noise subscribe/unsubscribe HTTP endpoints with canonical JSON, per-device leased subscription storage (single active token per device), FCM fallback gated to offline listeners, cleanup of superseded/invalid tokens, and listener-side HTTP subscription/renewal with lease timers.
 - Task: plan-noise-subscriptions — Bound monitor-side FCM token updates to the authenticated fingerprint (rejecting mismatched listenerId claims) so noise fallback tokens cannot be hijacked by spoofed device IDs.
 - Task: plan-noise-subscriptions — Documented noise subscription/unsubscribe plan with leased FCM fallback when WebSocket is down, client mute switch, and pairing-bound token handling.

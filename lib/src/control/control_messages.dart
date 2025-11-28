@@ -40,12 +40,12 @@ abstract class ControlMessage {
 
 class NoiseEventMessage extends ControlMessage {
   NoiseEventMessage({
-    required this.monitorId,
+    required this.deviceId,
     required this.timestamp,
     required this.peakLevel,
   });
 
-  final String monitorId;
+  final String deviceId;
   final int timestamp;
   final int peakLevel;
 
@@ -54,7 +54,7 @@ class NoiseEventMessage extends ControlMessage {
 
   factory NoiseEventMessage.fromJson(Map<String, dynamic> json) {
     return NoiseEventMessage(
-      monitorId: json['monitorId'] as String,
+      deviceId: json['deviceId'] as String,
       timestamp: json['timestamp'] as int,
       peakLevel: json['peakLevel'] as int,
     );
@@ -62,7 +62,7 @@ class NoiseEventMessage extends ControlMessage {
 
   @override
   Map<String, dynamic> toJson() => {
-        'monitorId': monitorId,
+        'deviceId': deviceId,
         'timestamp': timestamp,
         'peakLevel': peakLevel,
       };
@@ -253,11 +253,11 @@ class PongMessage extends ControlMessage {
 class FcmTokenUpdateMessage extends ControlMessage {
   FcmTokenUpdateMessage({
     required this.fcmToken,
-    required this.listenerId,
+    required this.deviceId,
   });
 
   final String fcmToken;
-  final String listenerId;
+  final String deviceId;
 
   @override
   ControlMessageType get type => ControlMessageType.fcmTokenUpdate;
@@ -265,14 +265,14 @@ class FcmTokenUpdateMessage extends ControlMessage {
   factory FcmTokenUpdateMessage.fromJson(Map<String, dynamic> json) {
     return FcmTokenUpdateMessage(
       fcmToken: json['fcmToken'] as String,
-      listenerId: json['listenerId'] as String,
+      deviceId: json['deviceId'] as String,
     );
   }
 
   @override
   Map<String, dynamic> toJson() => {
         'fcmToken': fcmToken,
-        'listenerId': listenerId,
+        'deviceId': deviceId,
       };
 }
 

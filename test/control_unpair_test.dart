@@ -9,7 +9,7 @@ void main() {
     final monitorIdentity = await DeviceIdentity.generate();
     final listenerIdentity = await DeviceIdentity.generate();
     final trustedPeer = TrustedPeer(
-      deviceId: listenerIdentity.deviceId,
+      remoteDeviceId: listenerIdentity.deviceId,
       name: 'Listener',
       certFingerprint: listenerIdentity.certFingerprint,
       addedAtEpochSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
@@ -17,13 +17,13 @@ void main() {
     );
 
     String? handledFingerprint;
-    String? handledListenerId;
+    String? handledDeviceId;
 
     final srv = server.ControlServer(
       bindAddress: '127.0.0.1',
-      onUnpairRequest: (fingerprint, listenerId) async {
+      onUnpairRequest: (fingerprint, deviceId) async {
         handledFingerprint = fingerprint;
-        handledListenerId = listenerId;
+        handledDeviceId = deviceId;
         return true;
       },
     );
@@ -42,12 +42,12 @@ void main() {
         host: '127.0.0.1',
         port: port!,
         expectedFingerprint: monitorIdentity.certFingerprint,
-        listenerId: listenerIdentity.deviceId,
+        deviceId: listenerIdentity.deviceId,
       );
 
       expect(result, isTrue);
       expect(handledFingerprint, listenerIdentity.certFingerprint);
-      expect(handledListenerId, listenerIdentity.deviceId);
+      expect(handledDeviceId, listenerIdentity.deviceId);
     } finally {
       await srv.stop();
     }
@@ -57,7 +57,7 @@ void main() {
     final monitorIdentity = await DeviceIdentity.generate();
     final listenerIdentity = await DeviceIdentity.generate();
     final trustedPeer = TrustedPeer(
-      deviceId: listenerIdentity.deviceId,
+      remoteDeviceId: listenerIdentity.deviceId,
       name: 'Listener',
       certFingerprint: listenerIdentity.certFingerprint,
       addedAtEpochSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
@@ -88,7 +88,7 @@ void main() {
         host: '127.0.0.1',
         port: port!,
         expectedFingerprint: monitorIdentity.certFingerprint,
-        listenerId: listenerIdentity.deviceId,
+        deviceId: listenerIdentity.deviceId,
       );
 
       expect(handled, isTrue);

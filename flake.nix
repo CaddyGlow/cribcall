@@ -116,6 +116,7 @@
             pkgs.pulseaudio
             pkgs.rustup
             pkgs.sysprof
+            pkgs.lua54Packages.lua
           ];
 
           RUSTC_VERSION = rustcChannel;

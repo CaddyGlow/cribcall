@@ -47,7 +47,7 @@ class FcmSender {
   /// Returns a result indicating success/failure counts and any invalid tokens.
   /// Throws on network or server errors.
   Future<FcmSendResult> sendNoiseEvent({
-    required String monitorId,
+    required String remoteDeviceId,
     required String monitorName,
     required int timestamp,
     required int peakLevel,
@@ -79,7 +79,7 @@ class FcmSender {
       request.headers.contentType = ContentType.json;
 
       final payload = jsonEncode({
-        'monitorId': monitorId,
+        'remoteDeviceId': remoteDeviceId,
         'monitorName': monitorName,
         'timestamp': timestamp,
         'peakLevel': peakLevel,

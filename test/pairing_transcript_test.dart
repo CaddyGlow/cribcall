@@ -4,18 +4,18 @@ import 'package:cribcall/src/pairing/pairing_transcript.dart';
 
 void main() {
   const transcript = PairingTranscript(
-    monitorId: 'M1-UUID',
-    listenerId: 'L1-UUID',
-    listenerPublicKey: 'base64-key',
-    listenerCertFingerprint: 'abc123',
-    monitorCertFingerprint: 'def456',
+    remoteDeviceId: 'M1-UUID',
+    deviceId: 'L1-UUID',
+    publicKey: 'base64-key',
+    certFingerprint: 'abc123',
+    remoteCertFingerprint: 'def456',
     pairingSessionId: 'PS1-UUID',
   );
 
   test('canonical form follows RFC 8785 ordering', () {
     expect(
       transcript.canonicalForm(),
-      '{"listenerCertFingerprint":"abc123","listenerId":"L1-UUID","listenerPublicKey":"base64-key","monitorCertFingerprint":"def456","monitorId":"M1-UUID","pairingSessionId":"PS1-UUID"}',
+      '{"certFingerprint":"abc123","deviceId":"L1-UUID","pairingSessionId":"PS1-UUID","publicKey":"base64-key","remoteCertFingerprint":"def456","remoteDeviceId":"M1-UUID"}',
     );
   });
 
@@ -23,7 +23,7 @@ void main() {
     final pairingKey = List<int>.filled(32, 1);
     expect(
       transcript.authTagBase64(pairingKey),
-      'e+XpGu9GiQ9K9XhHhITFzpgDxLcsD1THNNjzlKg7KM0=',
+      '8UQxw0IqqZhHUUxynjSp+E11VMWD9yqpRjefXdtRy1M=',
     );
   });
 }

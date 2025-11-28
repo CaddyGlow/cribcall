@@ -113,5 +113,5 @@ void _log(String message) {
 
 String _shortFp(String fp) {
   if (fp.length <= 12) return fp;
-  return '${fp.substring(0, 6)}...${fp.substring(fp.length - 4)}';
+  return fp.substring(0, 12);
 }

@@ -4,7 +4,7 @@ import * as admin from "firebase-admin";
 admin.initializeApp();
 
 interface NoiseEventPayload {
-  monitorId: string;
+  remoteDeviceId: string;
   monitorName: string;
   timestamp: number;
   peakLevel: number;
@@ -44,8 +44,8 @@ export const sendNoiseEvent = onRequest(
       return;
     }
 
-    if (!payload.monitorId || !payload.monitorName) {
-      res.status(400).send({error: "Missing monitorId or monitorName"});
+    if (!payload.remoteDeviceId || !payload.monitorName) {
+      res.status(400).send({error: "Missing remoteDeviceId or monitorName"});
       return;
     }
 
@@ -61,7 +61,7 @@ export const sendNoiseEvent = onRequest(
       tokens: payload.fcmTokens,
       data: {
         type: "NOISE_EVENT",
-        monitorId: payload.monitorId,
+        remoteDeviceId: payload.remoteDeviceId,
         monitorName: payload.monitorName,
         timestamp: payload.timestamp.toString(),
         peakLevel: payload.peakLevel.toString(),

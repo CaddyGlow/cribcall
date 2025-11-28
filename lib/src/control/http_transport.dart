@@ -13,6 +13,7 @@ import '../config/build_flags.dart';
 import '../identity/device_identity.dart';
 import '../identity/pem.dart';
 import '../identity/pkcs8.dart';
+import '../util/format_utils.dart';
 import 'control_frame_codec.dart';
 import 'control_message.dart';
 import 'control_transport.dart';
@@ -83,7 +84,7 @@ class HttpControlServer implements ControlServer {
           context.setTrustedCertificatesBytes(utf8.encode(pem));
           context.setClientAuthoritiesBytes(utf8.encode(pem));
           _logHttp(
-            'Added trusted client cert: ${_shortFingerprint(_fingerprintHex(certDer))}',
+            'Added trusted client cert: ${shortFingerprint(_fingerprintHex(certDer))}',
           );
         } catch (e) {
           _logHttp('Failed to add trusted client certificate: $e');
@@ -91,7 +92,7 @@ class HttpControlServer implements ControlServer {
       }
       _logHttp(
         'Binding HTTPS control server on $bindAddress:$port '
-        'fingerprint=${_shortFingerprint(_fingerprint ?? '')} '
+        'fingerprint=${shortFingerprint(_fingerprint ?? '')} '
         'trusted=${_trustedFingerprints.length}',
       );
       server = await HttpServer.bindSecure(
@@ -121,7 +122,7 @@ class HttpControlServer implements ControlServer {
     );
     _logHttp(
       'HTTP control server running on $bindAddress:${_server?.port ?? port} '
-      'fingerprint=${_shortFingerprint(_fingerprint ?? '')} '
+      'fingerprint=${shortFingerprint(_fingerprint ?? '')} '
       'trusted=${_trustedFingerprints.length} '
       'tls=${useTls ? 'enabled' : 'disabled'}',
     );
@@ -147,7 +148,7 @@ class HttpControlServer implements ControlServer {
     if (_trustedFingerprints.contains(fingerprint)) return;
     _trustedFingerprints = [..._trustedFingerprints, fingerprint];
     _logHttp(
-      'Trusted fingerprint added ${_shortFingerprint(fingerprint)} '
+      'Trusted fingerprint added ${shortFingerprint(fingerprint)} '
       'total=${_trustedFingerprints.length}',
     );
   }
@@ -201,7 +202,7 @@ class HttpControlServer implements ControlServer {
         _logHttp(
           'Health probe from $remoteIp:$remotePort '
           'clientCert=${clientCert.subject} '
-          'fingerprint=${_shortFingerprint(fp)} '
+          'fingerprint=${shortFingerprint(fp)} '
           'trusted=$trusted',
         );
       } else {
@@ -256,7 +257,7 @@ class HttpControlServer implements ControlServer {
     if (!trusted) {
       _logHttp(
         'Test endpoint rejected $remoteIp:$remotePort - '
-        'untrusted cert fingerprint=${_shortFingerprint(fp)}',
+        'untrusted cert fingerprint=${shortFingerprint(fp)}',
       );
       request.response
         ..statusCode = HttpStatus.forbidden
@@ -273,7 +274,7 @@ class HttpControlServer implements ControlServer {
     _logHttp(
       'Test endpoint accepted $remoteIp:$remotePort '
       'clientCert=${clientCert.subject} '
-      'fingerprint=${_shortFingerprint(fp)}',
+      'fingerprint=${shortFingerprint(fp)}',
     );
     request.response
       ..statusCode = HttpStatus.ok
@@ -308,13 +309,13 @@ class HttpControlServer implements ControlServer {
     final trusted = _trustedFingerprints.contains(computedFingerprint);
     _logHttp(
       'Accepted WS control handshake from $remoteIp:$remotePort '
-      'fingerprint=${_shortFingerprint(computedFingerprint)} '
+      'fingerprint=${shortFingerprint(computedFingerprint)} '
       'trusted=$trusted pairingOnly=${!trusted}',
     );
     if (clientCert != null) {
       _logHttp(
         'Client certificate subject=${clientCert.subject} '
-        'sha256=${_shortFingerprint(computedFingerprint)} '
+        'sha256=${shortFingerprint(computedFingerprint)} '
         'issuer=${clientCert.issuer} '
         'validFrom=${clientCert.startValidity} '
         'validTo=${clientCert.endValidity}',
@@ -346,7 +347,7 @@ class HttpControlServer implements ControlServer {
             : (event as ControlConnectionError).message;
         _logHttp(
           'Control connection $connectionId closed '
-          'peerFp=${_shortFingerprint(computedFingerprint)} '
+          'peerFp=${shortFingerprint(computedFingerprint)} '
           'reason=$reason trusted=$trusted pairingOnly=${!trusted}',
         );
       }
@@ -418,7 +419,7 @@ class HttpControlClient implements ControlClient {
     _logHttp(
       'Connecting to control ${endpoint.host}:${endpoint.port} '
       'tls=${useTls ? 'on' : 'off'} '
-      'expectedFp=${_shortFingerprint(endpoint.expectedServerFingerprint)} '
+      'expectedFp=${shortFingerprint(endpoint.expectedServerFingerprint)} '
       'allowUnpinned=$allowUnpinned',
     );
     final client = await _httpClient(
@@ -432,7 +433,7 @@ class HttpControlClient implements ControlClient {
       _logHttp(
         'Health TLS handshake failed: $e '
         'peer=${endpoint.host}:${endpoint.port} '
-        'expectedFp=${_shortFingerprint(endpoint.expectedServerFingerprint)}',
+        'expectedFp=${shortFingerprint(endpoint.expectedServerFingerprint)}',
       );
       rethrow;
     }
@@ -463,7 +464,7 @@ class HttpControlClient implements ControlClient {
       _logHttp(
         'WebSocket handshake failed: $e '
         'endpoint=${endpoint.host}:${endpoint.port} '
-        'expectedFp=${_shortFingerprint(endpoint.expectedServerFingerprint)}',
+        'expectedFp=${shortFingerprint(endpoint.expectedServerFingerprint)}',
       );
       rethrow;
     } catch (e) {
@@ -511,14 +512,14 @@ class HttpControlClient implements ControlClient {
       if (fp != endpoint.expectedServerFingerprint) {
         _logHttp(
           'Health fingerprint mismatch '
-          'expected=${_shortFingerprint(endpoint.expectedServerFingerprint)} '
-          'got=${_shortFingerprint(fp)}',
+          'expected=${shortFingerprint(endpoint.expectedServerFingerprint)} '
+          'got=${shortFingerprint(fp)}',
         );
         throw HttpException('Health fingerprint mismatch', uri: uri);
       }
       _logHttp(
         'Health TLS peer cert subject=${cert.subject} '
-        'fp=${_shortFingerprint(fp)}',
+        'fp=${shortFingerprint(fp)}',
       );
     }
     final body = await utf8.decodeStream(response);
@@ -555,14 +556,14 @@ class HttpControlClient implements ControlClient {
         if (allowUnpinned) {
           _logHttp(
             'TLS accepting unpinned cert for $host:$port '
-            'gotFp=${_shortFingerprint(fp)} (pairing mode)',
+            'gotFp=${shortFingerprint(fp)} (pairing mode)',
           );
           _lastSeenFingerprint = fp;
           return true;
         } else {
           _logHttp(
             'TLS rejecting cert for $host:$port - no expected fingerprint '
-            'gotFp=${_shortFingerprint(fp)} (set allowUnpinned=true for pairing)',
+            'gotFp=${shortFingerprint(fp)} (set allowUnpinned=true for pairing)',
           );
           return false;
         }
@@ -571,8 +572,8 @@ class HttpControlClient implements ControlClient {
       if (!ok) {
         _logHttp(
           'TLS fingerprint mismatch for $host:$port '
-          'expected=${_shortFingerprint(expectedFingerprint)} '
-          'got=${_shortFingerprint(fp)}',
+          'expected=${shortFingerprint(expectedFingerprint)} '
+          'got=${shortFingerprint(fp)}',
         );
       } else {
         _lastSeenFingerprint = fp;
@@ -602,7 +603,7 @@ class HttpControlConnection extends ControlConnection {
     _logHttp(
       'HTTP control connection established '
       'connId=$connectionId '
-      'peerFp=${_shortFingerprint(peerFingerprint)} '
+      'peerFp=${shortFingerprint(peerFingerprint)} '
       'hasCertDer=${peerCertificateDer != null} '
       'restrictToPairing=$restrictToPairing '
       'remote=${remoteDescription.host}:${remoteDescription.port}',
@@ -702,9 +703,9 @@ class HttpControlConnection extends ControlConnection {
       final initMsg = message as PinPairingInitMessage;
       _logHttp(
         'Received PIN_PAIRING_INIT on connId=$connectionId:\n'
-        '  listenerId=${initMsg.listenerId}\n'
-        '  listenerName=${initMsg.listenerName}\n'
-        '  listenerCertFingerprint=${_shortFingerprint(initMsg.listenerCertFingerprint)}\n'
+        '  deviceId=${initMsg.deviceId}\n'
+        '  deviceName=${initMsg.deviceName}\n'
+        '  certFingerprint=${shortFingerprint(initMsg.certFingerprint)}\n'
         '  NOTE: Monitor should respond with PIN_REQUIRED containing session details',
       );
     } else if (type == ControlMessageType.pinSubmit) {
@@ -794,13 +795,4 @@ void _logHttp(String message) {
 String _fingerprintHex(List<int> bytes) {
   final digest = sha256.convert(bytes);
   return digest.bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-}
-
-String _shortFingerprint(String fingerprint) {
-  if (fingerprint.length <= 12) {
-    return fingerprint;
-  }
-  final prefix = fingerprint.substring(0, 6);
-  final suffix = fingerprint.substring(fingerprint.length - 4);
-  return '$prefix...$suffix';
 }

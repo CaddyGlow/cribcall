@@ -10,9 +10,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../config/build_flags.dart';
 import '../domain/models.dart';
+import '../domain/noise_subscription.dart';
 import '../identity/device_identity.dart';
 import '../notifications/notification_service.dart';
 import '../state/app_state.dart';
+import '../state/per_monitor_settings.dart';
+import '../util/format_utils.dart';
 import 'control_connection.dart';
 import 'control_messages.dart';
 import 'control_server.dart' as server;
@@ -130,11 +133,22 @@ class PairingServerController extends Notifier<PairingServerState> {
     required String monitorName,
   }) async {
     if (_starting) return;
+
+    final current = state;
+    if (current.status == PairingServerStatus.running &&
+        current.port == port &&
+        current.fingerprint == identity.certFingerprint) {
+      _logPairing(
+        'Pairing server already running with same config, skipping restart',
+      );
+      return;
+    }
+
     _starting = true;
 
     _logPairing(
       'Starting pairing server port=$port '
-      'fingerprint=${_shortFingerprint(identity.certFingerprint)}',
+      'fingerprint=${shortFingerprint(identity.certFingerprint)}',
     );
 
     state = PairingServerState.starting(
@@ -143,7 +157,8 @@ class PairingServerController extends Notifier<PairingServerState> {
     );
 
     try {
-      _server ??= PairingServer(
+      await _shutdown();
+      _server = PairingServer(
         onPairingComplete: _onPairingComplete,
         onSessionCreated: _onSessionCreated,
         onSessionRejected: _onSessionRejected,
@@ -159,7 +174,7 @@ class PairingServerController extends Notifier<PairingServerState> {
       final actualPort = _server!.boundPort ?? port;
       _logPairing(
         'Pairing server running on port $actualPort '
-        'fingerprint=${_shortFingerprint(identity.certFingerprint)}',
+        'fingerprint=${shortFingerprint(identity.certFingerprint)}',
       );
 
       state = PairingServerState.running(
@@ -222,9 +237,9 @@ class PairingServerController extends Notifier<PairingServerState> {
 
   void _onPairingComplete(TrustedPeer peer) {
     _logPairing(
-      'Pairing complete: deviceId=${peer.deviceId} '
+      'Pairing complete: deviceId=${peer.remoteDeviceId} '
       'name=${peer.name} '
-      'fingerprint=${_shortFingerprint(peer.certFingerprint)}',
+      'fingerprint=${shortFingerprint(peer.certFingerprint)}',
     );
     // Cancel notification and clear active session, persist trusted listener
     NotificationService.instance.cancelPairingRequest();
@@ -403,6 +418,9 @@ class ControlServerController extends Notifier<ControlServerState> {
   StreamSubscription<server.ControlServerEvent>? _eventSub;
   FcmSender? _fcmSender;
 
+  /// Track last noise broadcast timestamp per subscription (for per-listener cooldown).
+  final Map<String, int> _lastBroadcastPerSubscription = {};
+
   @override
   ControlServerState build() {
     ref.onDispose(_shutdown);
@@ -439,7 +457,7 @@ class ControlServerController extends Notifier<ControlServerState> {
     _logControl(
       'Starting control server port=$port '
       'trusted=${trustedFingerprints.length} '
-      'fingerprint=${_shortFingerprint(identity.certFingerprint)}',
+      'fingerprint=${shortFingerprint(identity.certFingerprint)}',
     );
 
     state = ControlServerState.starting(
@@ -475,7 +493,7 @@ class ControlServerController extends Notifier<ControlServerState> {
       _logControl(
         'Control server running on port $actualPort '
         'trusted=${trustedFingerprints.length} '
-        'fingerprint=${_shortFingerprint(identity.certFingerprint)}',
+        'fingerprint=${shortFingerprint(identity.certFingerprint)}',
       );
 
       state = ControlServerState.running(
@@ -503,7 +521,7 @@ class ControlServerController extends Notifier<ControlServerState> {
       case server.ClientConnected(:final connection):
         _logControl(
           'Client connected: ${connection.connectionId} '
-          'peer=${_shortFingerprint(connection.peerFingerprint)}',
+          'peer=${shortFingerprint(connection.peerFingerprint)}',
         );
         _connections[connection.connectionId] = connection;
         _listenToConnection(connection);
@@ -550,11 +568,11 @@ class ControlServerController extends Notifier<ControlServerState> {
     );
     // Handle control messages
     switch (message) {
-      case FcmTokenUpdateMessage(:final fcmToken, :final listenerId):
+      case FcmTokenUpdateMessage(:final fcmToken, :final deviceId):
         unawaited(
           _handleFcmTokenUpdate(
             connection: connection,
-            claimedListenerId: listenerId,
+            claimedDeviceId: deviceId,
             fcmToken: fcmToken,
           ),
         );
@@ -616,7 +634,7 @@ class ControlServerController extends Notifier<ControlServerState> {
   Future<void> _handleFcmTokenUpdate({
     required ControlConnection connection,
     required String fcmToken,
-    String? claimedListenerId,
+    String? claimedDeviceId,
   }) async {
     final listeners = await ref.read(trustedListenersProvider.future);
     final peer = listeners.firstWhereOrNull(
@@ -625,29 +643,29 @@ class ControlServerController extends Notifier<ControlServerState> {
     if (peer == null) {
       _logControl(
         'FCM token update rejected: fingerprint not trusted '
-        'fp=${_shortFingerprint(connection.peerFingerprint)} '
+        'fp=${shortFingerprint(connection.peerFingerprint)} '
         'remote=${connection.remoteAddress}',
       );
       return;
     }
 
-    if (claimedListenerId != null && claimedListenerId != peer.deviceId) {
+    if (claimedDeviceId != null && claimedDeviceId != peer.remoteDeviceId) {
       _logControl(
         'FCM token update rejected: device mismatch '
-        'claimed=$claimedListenerId derived=${peer.deviceId} '
-        'fp=${_shortFingerprint(peer.certFingerprint)} '
+        'claimed=$claimedDeviceId derived=${peer.remoteDeviceId} '
+        'fp=${shortFingerprint(peer.certFingerprint)} '
         'remote=${connection.remoteAddress}',
       );
       return;
     }
 
     _logControl(
-      'FCM token update from listener=${peer.deviceId} '
-      'fp=${_shortFingerprint(peer.certFingerprint)}',
+      'FCM token update from listener=${peer.remoteDeviceId} '
+      'fp=${shortFingerprint(peer.certFingerprint)}',
     );
     await ref
         .read(trustedListenersProvider.notifier)
-        .updateFcmToken(peer.deviceId, fcmToken);
+        .updateFcmToken(peer.remoteDeviceId, fcmToken);
     await ref
         .read(noiseSubscriptionsProvider.notifier)
         .upsert(
@@ -661,7 +679,7 @@ class ControlServerController extends Notifier<ControlServerState> {
   /// Handle an authenticated unpair request initiated by a listener.
   Future<bool> _handleUnpairRequest(
     String fingerprint,
-    String? listenerId,
+    String? deviceId,
   ) async {
     final listeners = await ref.read(trustedListenersProvider.future);
     final peer = listeners.firstWhereOrNull(
@@ -670,16 +688,16 @@ class ControlServerController extends Notifier<ControlServerState> {
     if (peer == null) {
       _logControl(
         'Unpair request ignored: listener fingerprint not found '
-        'fingerprint=${_shortFingerprint(fingerprint)} listenerId=$listenerId',
+        'fingerprint=${shortFingerprint(fingerprint)} deviceId=$deviceId',
       );
       return false;
     }
 
     _logControl(
-      'Unpairing listener ${peer.deviceId} via fingerprint '
-      '${_shortFingerprint(peer.certFingerprint)} (listenerId=$listenerId ignored)',
+      'Unpairing listener ${peer.remoteDeviceId} via fingerprint '
+      '${shortFingerprint(peer.certFingerprint)} (deviceId=$deviceId ignored)',
     );
-    await ref.read(trustedListenersProvider.notifier).revoke(peer.deviceId);
+    await ref.read(trustedListenersProvider.notifier).revoke(peer.remoteDeviceId);
     await ref
         .read(noiseSubscriptionsProvider.notifier)
         .clearForFingerprint(peer.certFingerprint);
@@ -693,6 +711,10 @@ class ControlServerController extends Notifier<ControlServerState> {
     required String platform,
     required int? leaseSeconds,
     required String remoteAddress,
+    int? threshold,
+    int? cooldownSeconds,
+    AutoStreamType? autoStreamType,
+    int? autoStreamDurationSec,
   }) async {
     final listeners = await ref.read(trustedListenersProvider.future);
     final peer = listeners.firstWhereOrNull(
@@ -709,15 +731,19 @@ class ControlServerController extends Notifier<ControlServerState> {
           fcmToken: fcmToken,
           platform: platform,
           leaseSeconds: leaseSeconds,
+          threshold: threshold,
+          cooldownSeconds: cooldownSeconds,
+          autoStreamType: autoStreamType,
+          autoStreamDurationSec: autoStreamDurationSec,
         );
 
     _logControl(
-      'Noise subscribe: device=${peer.deviceId} remote=$remoteAddress '
+      'Noise subscribe: device=${peer.remoteDeviceId} remote=$remoteAddress '
       'expiresAt=${DateTime.fromMillisecondsSinceEpoch(result.subscription.expiresAtEpochSec * 1000, isUtc: true)}',
     );
 
     return (
-      deviceId: peer.deviceId,
+      deviceId: peer.remoteDeviceId,
       subscriptionId: result.subscription.subscriptionId,
       expiresAt: DateTime.fromMillisecondsSinceEpoch(
         result.subscription.expiresAtEpochSec * 1000,
@@ -749,12 +775,12 @@ class ControlServerController extends Notifier<ControlServerState> {
           subscriptionId: subscriptionId,
         );
     _logControl(
-      'Noise unsubscribe: device=${peer.deviceId} '
+      'Noise unsubscribe: device=${peer.remoteDeviceId} '
       'remote=$remoteAddress removed=${removed != null}',
     );
 
     return (
-      deviceId: peer.deviceId,
+      deviceId: peer.remoteDeviceId,
       subscriptionId: subscriptionId ?? removed?.subscriptionId,
       expiresAt: removed == null
           ? null
@@ -773,8 +799,8 @@ class ControlServerController extends Notifier<ControlServerState> {
     if (srv == null) return;
 
     _logControl(
-      'Adding trusted peer: ${peer.deviceId} '
-      'fingerprint=${_shortFingerprint(peer.certFingerprint)}',
+      'Adding trusted peer: ${peer.remoteDeviceId} '
+      'fingerprint=${shortFingerprint(peer.certFingerprint)}',
     );
     await srv.addTrustedPeer(peer);
 
@@ -797,7 +823,7 @@ class ControlServerController extends Notifier<ControlServerState> {
     if (srv == null) return;
 
     _logControl(
-      'Removing trusted peer: fingerprint=${_shortFingerprint(fingerprint)}',
+      'Removing trusted peer: fingerprint=${shortFingerprint(fingerprint)}',
     );
     await srv.removeTrustedPeer(fingerprint);
     await ref
@@ -840,48 +866,97 @@ class ControlServerController extends Notifier<ControlServerState> {
     await conn.send(message);
   }
 
-  /// Broadcast a noise event to all connected listeners via WebSocket AND FCM.
+  /// Broadcast a noise event to eligible listeners via WebSocket AND FCM.
+  /// Filters per subscription based on threshold and cooldown preferences.
   Future<void> broadcastNoiseEvent({
     required int timestampMs,
     required int peakLevel,
   }) async {
-    final monitorId = state.deviceId ?? '';
+    final deviceId = state.deviceId ?? '';
     final message = NoiseEventMessage(
-      monitorId: monitorId,
+      deviceId: deviceId,
       timestamp: timestampMs,
       peakLevel: peakLevel,
     );
 
-    // Path 1: WebSocket broadcast to connected clients
-    await broadcast(message);
-
-    // Path 2: FCM push to all trusted listeners (even if not currently connected)
-    await _sendNoiseEventViaFcm(
-      monitorId: monitorId,
-      timestamp: timestampMs,
-      peakLevel: peakLevel,
-    );
-  }
-
-  /// Send noise event via FCM Cloud Function.
-  Future<void> _sendNoiseEventViaFcm({
-    required String monitorId,
-    required int timestamp,
-    required int peakLevel,
-  }) async {
+    // Get active subscriptions with their preferences
     final subsController = ref.read(noiseSubscriptionsProvider.notifier);
     await subsController.removeExpired();
     final activeSubs = subsController.active();
 
-    // Prefer live WebSocket; only send FCM when no active connections.
-    if (_connections.isNotEmpty) {
-      _logControl(
-        'Skipping FCM noise send: ${_connections.length} active connections',
-      );
+    // Filter subscriptions based on per-listener threshold and cooldown
+    final eligibleSubs = <NoiseSubscription>[];
+    for (final sub in activeSubs) {
+      // Check threshold
+      if (peakLevel < sub.effectiveThreshold) {
+        continue;
+      }
+
+      // Check cooldown
+      final lastBroadcast = _lastBroadcastPerSubscription[sub.subscriptionId] ?? 0;
+      final cooldownMs = sub.effectiveCooldownSeconds * 1000;
+      if (timestampMs - lastBroadcast < cooldownMs) {
+        continue;
+      }
+
+      // Subscription is eligible
+      eligibleSubs.add(sub);
+      _lastBroadcastPerSubscription[sub.subscriptionId] = timestampMs;
+    }
+
+    if (eligibleSubs.isEmpty) {
+      _logControl('No eligible subscriptions for noise event (level=$peakLevel)');
       return;
     }
 
-    final fcmTokens = activeSubs.map((s) => s.fcmToken).toSet().toList();
+    _logControl(
+      'Broadcasting noise to ${eligibleSubs.length}/${activeSubs.length} '
+      'eligible subscriptions (level=$peakLevel)',
+    );
+
+    // Path 1: WebSocket broadcast to connected clients
+    // (only to those whose subscription is eligible)
+    final eligibleFingerprints = eligibleSubs.map((s) => s.certFingerprint).toSet();
+    for (final conn in _connections.values) {
+      if (eligibleFingerprints.contains(conn.peerFingerprint)) {
+        try {
+          await conn.send(message);
+        } catch (e) {
+          _logControl('Failed to send to ${conn.connectionId}: $e');
+        }
+      }
+    }
+
+    // Path 2: FCM push to eligible listeners (only if no WebSocket connection)
+    await _sendNoiseEventViaFcmFiltered(
+      deviceId: deviceId,
+      timestamp: timestampMs,
+      peakLevel: peakLevel,
+      eligibleSubs: eligibleSubs,
+    );
+  }
+
+  /// Send noise event via FCM to pre-filtered eligible subscriptions.
+  /// Only sends to subscriptions that don't have an active WebSocket connection.
+  Future<void> _sendNoiseEventViaFcmFiltered({
+    required String deviceId,
+    required int timestamp,
+    required int peakLevel,
+    required List<NoiseSubscription> eligibleSubs,
+  }) async {
+    // Filter out subscriptions that have active WebSocket connections
+    final connectedFingerprints =
+        _connections.values.map((c) => c.peerFingerprint).toSet();
+    final subsNeedingFcm = eligibleSubs
+        .where((s) => !connectedFingerprints.contains(s.certFingerprint))
+        .toList();
+
+    if (subsNeedingFcm.isEmpty) {
+      _logControl('All eligible subs have WebSocket, skipping FCM');
+      return;
+    }
+
+    final fcmTokens = subsNeedingFcm.map((s) => s.fcmToken).toSet().toList();
 
     if (fcmTokens.isEmpty) {
       _logControl('No FCM tokens available, skipping push');
@@ -901,7 +976,7 @@ class ControlServerController extends Notifier<ControlServerState> {
       }
 
       final result = await _fcmSender!.sendNoiseEvent(
-        monitorId: monitorId,
+        remoteDeviceId: deviceId,
         monitorName: monitorName,
         timestamp: timestamp,
         peakLevel: peakLevel,
@@ -914,6 +989,7 @@ class ControlServerController extends Notifier<ControlServerState> {
 
       // Clean up invalid tokens
       if (result.invalidTokens.isNotEmpty) {
+        final subsController = ref.read(noiseSubscriptionsProvider.notifier);
         await subsController.clearByTokens(result.invalidTokens);
         for (final token in result.invalidTokens) {
           await ref
@@ -955,7 +1031,7 @@ enum ControlClientStatus { idle, connecting, connected, error }
 class ControlClientState {
   const ControlClientState._({
     required this.status,
-    this.monitorId,
+    this.remoteDeviceId,
     this.monitorName,
     this.connectionId,
     this.peerFingerprint,
@@ -965,42 +1041,42 @@ class ControlClientState {
   const ControlClientState.idle() : this._(status: ControlClientStatus.idle);
 
   const ControlClientState.connecting({
-    required String monitorId,
+    required String remoteDeviceId,
     required String monitorName,
     required String peerFingerprint,
   }) : this._(
          status: ControlClientStatus.connecting,
-         monitorId: monitorId,
+         remoteDeviceId: remoteDeviceId,
          monitorName: monitorName,
          peerFingerprint: peerFingerprint,
        );
 
   const ControlClientState.connected({
-    required String monitorId,
+    required String remoteDeviceId,
     required String monitorName,
     required String connectionId,
     required String peerFingerprint,
   }) : this._(
          status: ControlClientStatus.connected,
-         monitorId: monitorId,
+         remoteDeviceId: remoteDeviceId,
          monitorName: monitorName,
          connectionId: connectionId,
          peerFingerprint: peerFingerprint,
        );
 
   const ControlClientState.error({
-    required String monitorId,
+    required String remoteDeviceId,
     required String monitorName,
     required String error,
   }) : this._(
          status: ControlClientStatus.error,
-         monitorId: monitorId,
+         remoteDeviceId: remoteDeviceId,
          monitorName: monitorName,
          error: error,
        );
 
   final ControlClientStatus status;
-  final String? monitorId;
+  final String? remoteDeviceId;
   final String? monitorName;
   final String? connectionId;
   final String? peerFingerprint;
@@ -1062,7 +1138,7 @@ class ControlClientController extends Notifier<ControlClientState> {
     if (ip == null) {
       const error = 'Monitor is offline or missing IP address';
       state = ControlClientState.error(
-        monitorId: monitor.monitorId,
+        remoteDeviceId: monitor.remoteDeviceId,
         monitorName: monitor.monitorName,
         error: error,
       );
@@ -1074,16 +1150,16 @@ class ControlClientController extends Notifier<ControlClientState> {
     _expectedFingerprint = monitor.certFingerprint;
 
     state = ControlClientState.connecting(
-      monitorId: monitor.monitorId,
+      remoteDeviceId: monitor.remoteDeviceId,
       monitorName: monitor.monitorName,
       peerFingerprint: monitor.certFingerprint,
     );
 
     _logClient(
-      'Connecting to monitor=${monitor.monitorId} '
+      'Connecting to monitor=${monitor.remoteDeviceId} '
       'name=${monitor.monitorName} '
       'ip=$ip port=${advertisement.controlPort} '
-      'expectedFp=${_shortFingerprint(monitor.certFingerprint)}',
+      'expectedFp=${shortFingerprint(monitor.certFingerprint)}',
     );
 
     try {
@@ -1097,7 +1173,7 @@ class ControlClientController extends Notifier<ControlClientState> {
 
       _logClient(
         'Connected to monitor: connectionId=${_connection!.connectionId} '
-        'peer=${_shortFingerprint(_connection!.peerFingerprint)}',
+        'peer=${shortFingerprint(_connection!.peerFingerprint)}',
       );
 
       // Listen for messages
@@ -1106,7 +1182,7 @@ class ControlClientController extends Notifier<ControlClientState> {
         onError: (e) {
           _logClient('Connection error: $e');
           state = ControlClientState.error(
-            monitorId: monitor.monitorId,
+            remoteDeviceId: monitor.remoteDeviceId,
             monitorName: monitor.monitorName,
             error: '$e',
           );
@@ -1118,7 +1194,7 @@ class ControlClientController extends Notifier<ControlClientState> {
       );
 
       state = ControlClientState.connected(
-        monitorId: monitor.monitorId,
+        remoteDeviceId: monitor.remoteDeviceId,
         monitorName: monitor.monitorName,
         connectionId: _connection!.connectionId,
         peerFingerprint: _connection!.peerFingerprint,
@@ -1127,7 +1203,7 @@ class ControlClientController extends Notifier<ControlClientState> {
       // Persist connection for session restore
       ref
           .read(appSessionProvider.notifier)
-          .setLastConnectedMonitorId(monitor.monitorId);
+          .setLastConnectedRemoteDeviceId(monitor.remoteDeviceId);
 
       // Start foreground service to keep connection alive
       _listenerService ??= createListenerServiceManager();
@@ -1142,7 +1218,7 @@ class ControlClientController extends Notifier<ControlClientState> {
       _logClient('Connection failed: $e');
       final error = '$e';
       state = ControlClientState.error(
-        monitorId: monitor.monitorId,
+        remoteDeviceId: monitor.remoteDeviceId,
         monitorName: monitor.monitorName,
         error: error,
       );
@@ -1155,11 +1231,11 @@ class ControlClientController extends Notifier<ControlClientState> {
 
     switch (message) {
       case NoiseEventMessage(
-        :final monitorId,
+        :final deviceId,
         :final timestamp,
         :final peakLevel,
       ):
-        _handleNoiseEvent(monitorId, timestamp, peakLevel);
+        _handleNoiseEvent(deviceId, timestamp, peakLevel);
 
       // WebRTC signaling messages - forward to UI/WebRTC layer
       case StartStreamResponseMessage():
@@ -1180,14 +1256,14 @@ class ControlClientController extends Notifier<ControlClientState> {
   }
 
   /// Handle incoming noise event with deduplication.
-  void _handleNoiseEvent(String monitorId, int timestamp, int peakLevel) {
+  void _handleNoiseEvent(String remoteDeviceId, int timestamp, int peakLevel) {
     _logClient(
-      'Noise event: monitorId=$monitorId peakLevel=$peakLevel timestamp=$timestamp',
+      'Noise event: remoteDeviceId=$remoteDeviceId peakLevel=$peakLevel timestamp=$timestamp',
     );
 
     // Create event data for deduplication
     final event = NoiseEventData(
-      monitorId: monitorId,
+      remoteDeviceId: remoteDeviceId,
       monitorName: state.monitorName ?? 'Monitor',
       timestamp: timestamp,
       peakLevel: peakLevel,
@@ -1209,7 +1285,7 @@ class ControlClientController extends Notifier<ControlClientState> {
   /// Handle noise event received via FCM (background/foreground).
   void _handleFcmNoiseEvent(NoiseEventData event) {
     _logClient(
-      'FCM noise event: monitorId=${event.monitorId} peakLevel=${event.peakLevel}',
+      'FCM noise event: remoteDeviceId=${event.remoteDeviceId} peakLevel=${event.peakLevel}',
     );
 
     // Check if already received via WebSocket
@@ -1237,7 +1313,7 @@ class ControlClientController extends Notifier<ControlClientState> {
     ref
         .read(trustedMonitorsProvider.notifier)
         .recordNoiseEvent(
-          monitorId: event.monitorId,
+          remoteDeviceId: event.remoteDeviceId,
           timestampMs: event.timestamp,
         );
 
@@ -1254,7 +1330,7 @@ class ControlClientController extends Notifier<ControlClientState> {
 
     if (defaultAction == ListenerDefaultAction.autoOpenStream) {
       // Auto-request WebRTC stream from monitor
-      _autoRequestStream(event.monitorId);
+      _autoRequestStream(event.remoteDeviceId);
     }
   }
 
@@ -1293,6 +1369,31 @@ class ControlClientController extends Notifier<ControlClientState> {
 
     try {
       final platform = _platformLabel();
+
+      // Get listener's noise preferences
+      final listenerSettings =
+          await ref.read(listenerSettingsProvider.future);
+      final globalPrefs = listenerSettings.noisePreferences;
+
+      // Get per-monitor overrides if connected
+      final connectedDeviceId = state.remoteDeviceId;
+      int effectiveThreshold = globalPrefs.threshold;
+      int effectiveCooldown = globalPrefs.cooldownSeconds;
+      AutoStreamType effectiveAutoStreamType = globalPrefs.autoStreamType;
+      int effectiveAutoStreamDuration = globalPrefs.autoStreamDurationSec;
+
+      if (connectedDeviceId != null) {
+        final perMonitorData = await ref.read(perMonitorSettingsProvider.future);
+        final perMonitor = perMonitorData.getOrDefault(connectedDeviceId);
+        effectiveThreshold = perMonitor.thresholdOverride ?? effectiveThreshold;
+        effectiveCooldown =
+            perMonitor.cooldownSecondsOverride ?? effectiveCooldown;
+        effectiveAutoStreamType =
+            perMonitor.autoStreamTypeOverride ?? effectiveAutoStreamType;
+        effectiveAutoStreamDuration =
+            perMonitor.autoStreamDurationSecOverride ?? effectiveAutoStreamDuration;
+      }
+
       final response = await _client!.subscribeNoise(
         host: _currentHost!,
         port: _currentPort!,
@@ -1300,6 +1401,10 @@ class ControlClientController extends Notifier<ControlClientState> {
         fcmToken: token,
         platform: platform,
         leaseSeconds: null,
+        threshold: effectiveThreshold,
+        cooldownSeconds: effectiveCooldown,
+        autoStreamType: effectiveAutoStreamType.name,
+        autoStreamDurationSec: effectiveAutoStreamDuration,
       );
       _activeSubscriptionId = response.subscriptionId;
       _activeSubscriptionExpiry = response.expiresAt;
@@ -1308,7 +1413,9 @@ class ControlClientController extends Notifier<ControlClientState> {
       _logClient(
         'Noise subscription updated: subId=${response.subscriptionId} '
         'expiresAt=${response.expiresAt.toIso8601String()} '
-        'lease=${response.acceptedLeaseSeconds}s',
+        'lease=${response.acceptedLeaseSeconds}s '
+        'threshold=$effectiveThreshold cooldown=$effectiveCooldown '
+        'autoStream=${effectiveAutoStreamType.name}',
       );
     } catch (e) {
       _logClient('Noise subscribe failed: $e');
@@ -1371,7 +1478,7 @@ class ControlClientController extends Notifier<ControlClientState> {
   }
 
   /// Automatically request WebRTC stream when noise event received.
-  Future<void> _autoRequestStream(String monitorId) async {
+  Future<void> _autoRequestStream(String remoteDeviceId) async {
     if (state.status != ControlClientStatus.connected) {
       _logClient('Cannot auto-request stream: not connected');
       return;
@@ -1464,7 +1571,7 @@ class ControlClientController extends Notifier<ControlClientState> {
   }
 
   /// Send FCM token to the connected monitor.
-  Future<void> _sendFcmTokenToMonitor(String listenerId) async {
+  Future<void> _sendFcmTokenToMonitor(String deviceId) async {
     final fcmService = FcmService.instance;
     final fcmToken = fcmService.currentToken;
 
@@ -1476,7 +1583,7 @@ class ControlClientController extends Notifier<ControlClientState> {
     try {
       final message = FcmTokenUpdateMessage(
         fcmToken: fcmToken,
-        listenerId: listenerId,
+        deviceId: deviceId,
       );
       await send(message);
       _logClient('Sent FCM token to monitor');
@@ -1486,7 +1593,7 @@ class ControlClientController extends Notifier<ControlClientState> {
   }
 
   /// Update FCM token with the connected monitor (call when token refreshes).
-  Future<void> updateFcmToken(String listenerId, String newToken) async {
+  Future<void> updateFcmToken(String deviceId, String newToken) async {
     if (state.status != ControlClientStatus.connected) {
       _logClient('Not connected, cannot update FCM token');
       return;
@@ -1495,7 +1602,7 @@ class ControlClientController extends Notifier<ControlClientState> {
     try {
       final message = FcmTokenUpdateMessage(
         fcmToken: newToken,
-        listenerId: listenerId,
+        deviceId: deviceId,
       );
       await send(message);
       _logClient('Sent updated FCM token to monitor');
@@ -1515,11 +1622,21 @@ class ControlClientController extends Notifier<ControlClientState> {
 
   Future<void> disconnect() => _shutdown();
 
+  /// Refresh the noise subscription with current preferences.
+  /// Call this when listener or per-monitor settings change.
+  Future<void> refreshNoiseSubscription() async {
+    if (state.status != ControlClientStatus.connected) {
+      _logClient('refreshNoiseSubscription skipped: not connected');
+      return;
+    }
+    await _subscribeNoiseLease(force: true);
+  }
+
   /// Disconnect and clear persisted session (explicit user disconnect).
   Future<void> disconnectAndClearSession() async {
     await _shutdown();
     // Clear persisted connection so we don't auto-reconnect on next launch
-    ref.read(appSessionProvider.notifier).setLastConnectedMonitorId(null);
+    ref.read(appSessionProvider.notifier).setLastConnectedRemoteDeviceId(null);
   }
 
   Future<void> _shutdown() async {
@@ -1572,9 +1689,4 @@ void _logControl(String message) {
 void _logClient(String message) {
   developer.log(message, name: 'client_ctrl');
   debugPrint('[client_ctrl] $message');
-}
-
-String _shortFingerprint(String fingerprint) {
-  if (fingerprint.length <= 12) return fingerprint;
-  return '${fingerprint.substring(0, 6)}...${fingerprint.substring(fingerprint.length - 4)}';
 }

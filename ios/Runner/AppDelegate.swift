@@ -43,20 +43,20 @@ import os.log
   private func startAdvertise(args: [String: Any]) {
     stopMdns()
     let port = args["servicePort"] as? Int ?? 48080
-    let name = "\(args["monitorName"] as? String ?? "monitor")-\(args["monitorId"] as? String ?? "id")"
+    let name = "\(args["monitorName"] as? String ?? "monitor")-\(args["deviceId"] as? String ?? "id")"
     os_log(
-      "Starting mDNS advertise name=%{public}@ port=%{public}d monitorId=%{public}@",
+      "Starting mDNS advertise name=%{public}@ port=%{public}d deviceId=%{public}@",
       log: log,
       type: .info,
       name,
       port,
-      args["monitorId"] as? String ?? ""
+      args["deviceId"] as? String ?? ""
     )
     advertiser = NetService(domain: "local.", type: serviceType, name: name, port: Int32(port))
     let txt: [String: Data] = [
-      "monitorId": (args["monitorId"] as? String ?? "").data(using: .utf8) ?? Data(),
+      "deviceId": (args["deviceId"] as? String ?? "").data(using: .utf8) ?? Data(),
       "monitorName": (args["monitorName"] as? String ?? "").data(using: .utf8) ?? Data(),
-      "monitorCertFingerprint": (args["monitorCertFingerprint"] as? String ?? "").data(using: .utf8) ?? Data(),
+      "certFingerprint": (args["certFingerprint"] as? String ?? "").data(using: .utf8) ?? Data(),
       "version": "\(args["version"] ?? "1")".data(using: .utf8) ?? Data(),
     ]
     advertiser?.setTXTRecord(NetService.data(fromTXTRecord: txt))
@@ -140,19 +140,19 @@ extension AppDelegate: NetServiceBrowserDelegate, NetServiceDelegate {
       if ipString != nil { break }
     }
     let payload: [String: Any?] = [
-      "monitorId": decode("monitorId"),
+      "remoteDeviceId": decode("deviceId"),
       "monitorName": decode("monitorName").isEmpty ? sender.name : decode("monitorName"),
-      "monitorCertFingerprint": decode("monitorCertFingerprint"),
+      "certFingerprint": decode("certFingerprint"),
       "servicePort": sender.port,
       "version": Int(decode("version")) ?? 1,
       "ip": ipString,
     ]
     mdnsEventSink?(payload)
     os_log(
-      "Resolved service monitorId=%{public}@ ip=%{public}@ port=%{public}d",
+      "Resolved service remoteDeviceId=%{public}@ ip=%{public}@ port=%{public}d",
       log: log,
       type: .info,
-      decode("monitorId"),
+      decode("deviceId"),
       ipString ?? "unknown",
       sender.port
     )

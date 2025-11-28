@@ -10,39 +10,39 @@ import 'dart:convert';
 /// comparison code from ECDH shared secret using their identity keys.
 class PairInitRequest {
   const PairInitRequest({
-    required this.listenerId,
-    required this.listenerName,
-    required this.listenerCertFingerprint,
-    required this.listenerCertificateDer,
-    required this.listenerPublicKey,
+    required this.deviceId,
+    required this.deviceName,
+    required this.certFingerprint,
+    required this.certificateDer,
+    required this.publicKey,
     this.protocolVersion = 2,
   });
 
-  final String listenerId;
-  final String listenerName;
-  final String listenerCertFingerprint;
-  final List<int> listenerCertificateDer;
+  final String deviceId;
+  final String deviceName;
+  final String certFingerprint;
+  final List<int> certificateDer;
   /// Base64-encoded P-256 identity public key (uncompressed, 65 bytes with 0x04 prefix)
-  final String listenerPublicKey;
+  final String publicKey;
   final int protocolVersion;
 
   Map<String, dynamic> toJson() => {
-        'listenerId': listenerId,
-        'listenerName': listenerName,
-        'listenerCertFingerprint': listenerCertFingerprint,
-        'listenerCertificateDer': base64Encode(listenerCertificateDer),
-        'listenerPublicKey': listenerPublicKey,
+        'deviceId': deviceId,
+        'deviceName': deviceName,
+        'certFingerprint': certFingerprint,
+        'certificateDer': base64Encode(certificateDer),
+        'publicKey': publicKey,
         'protocolVersion': protocolVersion,
       };
 
   factory PairInitRequest.fromJson(Map<String, dynamic> json) {
     return PairInitRequest(
-      listenerId: json['listenerId'] as String,
-      listenerName: json['listenerName'] as String,
-      listenerCertFingerprint: json['listenerCertFingerprint'] as String,
-      listenerCertificateDer:
-          base64Decode(json['listenerCertificateDer'] as String),
-      listenerPublicKey: json['listenerPublicKey'] as String,
+      deviceId: json['deviceId'] as String,
+      deviceName: json['deviceName'] as String,
+      certFingerprint: json['certFingerprint'] as String,
+      certificateDer:
+          base64Decode(json['certificateDer'] as String),
+      publicKey: json['publicKey'] as String,
       protocolVersion: json['protocolVersion'] as int? ?? 2,
     );
   }
@@ -132,18 +132,18 @@ enum PairConfirmStatus {
 class PairConfirmResponse {
   const PairConfirmResponse({
     required this.status,
-    this.monitorId,
+    this.remoteDeviceId,
     this.monitorName,
-    this.monitorCertFingerprint,
-    this.monitorCertificateDer,
+    this.certFingerprint,
+    this.certificateDer,
     this.reason,
   });
 
   final PairConfirmStatus status;
-  final String? monitorId;
+  final String? remoteDeviceId;
   final String? monitorName;
-  final String? monitorCertFingerprint;
-  final List<int>? monitorCertificateDer;
+  final String? certFingerprint;
+  final List<int>? certificateDer;
   final String? reason;
 
   /// Legacy compatibility: returns true only if status is accepted
@@ -156,17 +156,17 @@ class PairConfirmResponse {
         'status': status.name,
         // Legacy field for backward compatibility
         'accepted': status == PairConfirmStatus.accepted,
-        if (monitorId != null) 'monitorId': monitorId,
+        if (remoteDeviceId != null) 'remoteDeviceId': remoteDeviceId,
         if (monitorName != null) 'monitorName': monitorName,
-        if (monitorCertFingerprint != null)
-          'monitorCertFingerprint': monitorCertFingerprint,
-        if (monitorCertificateDer != null)
-          'monitorCertificateDer': base64Encode(monitorCertificateDer!),
+        if (certFingerprint != null)
+          'certFingerprint': certFingerprint,
+        if (certificateDer != null)
+          'certificateDer': base64Encode(certificateDer!),
         if (reason != null) 'reason': reason,
       };
 
   factory PairConfirmResponse.fromJson(Map<String, dynamic> json) {
-    final certDerB64 = json['monitorCertificateDer'] as String?;
+    final certDerB64 = json['certificateDer'] as String?;
     // Support both new 'status' field and legacy 'accepted' field
     PairConfirmStatus status;
     if (json.containsKey('status')) {
@@ -179,10 +179,10 @@ class PairConfirmResponse {
     }
     return PairConfirmResponse(
       status: status,
-      monitorId: json['monitorId'] as String?,
+      remoteDeviceId: json['remoteDeviceId'] as String?,
       monitorName: json['monitorName'] as String?,
-      monitorCertFingerprint: json['monitorCertFingerprint'] as String?,
-      monitorCertificateDer:
+      certFingerprint: json['certFingerprint'] as String?,
+      certificateDer:
           certDerB64 != null ? base64Decode(certDerB64) : null,
       reason: json['reason'] as String?,
     );
@@ -192,17 +192,17 @@ class PairConfirmResponse {
 
   /// Create a successful pairing response
   factory PairConfirmResponse.accepted({
-    required String monitorId,
+    required String remoteDeviceId,
     required String monitorName,
-    required String monitorCertFingerprint,
-    required List<int> monitorCertificateDer,
+    required String certFingerprint,
+    required List<int> certificateDer,
   }) {
     return PairConfirmResponse(
       status: PairConfirmStatus.accepted,
-      monitorId: monitorId,
+      remoteDeviceId: remoteDeviceId,
       monitorName: monitorName,
-      monitorCertFingerprint: monitorCertFingerprint,
-      monitorCertificateDer: monitorCertificateDer,
+      certFingerprint: certFingerprint,
+      certificateDer: certificateDer,
     );
   }
 
@@ -250,35 +250,35 @@ class PairErrorResponse {
 class PairTokenRequest {
   const PairTokenRequest({
     required this.pairingToken,
-    required this.listenerId,
-    required this.listenerName,
-    required this.listenerCertFingerprint,
-    required this.listenerCertificateDer,
+    required this.deviceId,
+    required this.deviceName,
+    required this.certFingerprint,
+    required this.certificateDer,
   });
 
   /// One-time pairing token from QR code (base64url encoded 32 bytes)
   final String pairingToken;
-  final String listenerId;
-  final String listenerName;
-  final String listenerCertFingerprint;
-  final List<int> listenerCertificateDer;
+  final String deviceId;
+  final String deviceName;
+  final String certFingerprint;
+  final List<int> certificateDer;
 
   Map<String, dynamic> toJson() => {
         'pairingToken': pairingToken,
-        'listenerId': listenerId,
-        'listenerName': listenerName,
-        'listenerCertFingerprint': listenerCertFingerprint,
-        'listenerCertificateDer': base64Encode(listenerCertificateDer),
+        'deviceId': deviceId,
+        'deviceName': deviceName,
+        'certFingerprint': certFingerprint,
+        'certificateDer': base64Encode(certificateDer),
       };
 
   factory PairTokenRequest.fromJson(Map<String, dynamic> json) {
     return PairTokenRequest(
       pairingToken: json['pairingToken'] as String,
-      listenerId: json['listenerId'] as String,
-      listenerName: json['listenerName'] as String,
-      listenerCertFingerprint: json['listenerCertFingerprint'] as String,
-      listenerCertificateDer:
-          base64Decode(json['listenerCertificateDer'] as String),
+      deviceId: json['deviceId'] as String,
+      deviceName: json['deviceName'] as String,
+      certFingerprint: json['certFingerprint'] as String,
+      certificateDer:
+          base64Decode(json['certificateDer'] as String),
     );
   }
 
@@ -291,39 +291,39 @@ class PairTokenRequest {
 class PairTokenResponse {
   const PairTokenResponse({
     required this.accepted,
-    this.monitorId,
+    this.remoteDeviceId,
     this.monitorName,
-    this.monitorCertFingerprint,
-    this.monitorCertificateDer,
+    this.certFingerprint,
+    this.certificateDer,
     this.reason,
   });
 
   final bool accepted;
-  final String? monitorId;
+  final String? remoteDeviceId;
   final String? monitorName;
-  final String? monitorCertFingerprint;
-  final List<int>? monitorCertificateDer;
+  final String? certFingerprint;
+  final List<int>? certificateDer;
   final String? reason;
 
   Map<String, dynamic> toJson() => {
         'accepted': accepted,
-        if (monitorId != null) 'monitorId': monitorId,
+        if (remoteDeviceId != null) 'remoteDeviceId': remoteDeviceId,
         if (monitorName != null) 'monitorName': monitorName,
-        if (monitorCertFingerprint != null)
-          'monitorCertFingerprint': monitorCertFingerprint,
-        if (monitorCertificateDer != null)
-          'monitorCertificateDer': base64Encode(monitorCertificateDer!),
+        if (certFingerprint != null)
+          'certFingerprint': certFingerprint,
+        if (certificateDer != null)
+          'certificateDer': base64Encode(certificateDer!),
         if (reason != null) 'reason': reason,
       };
 
   factory PairTokenResponse.fromJson(Map<String, dynamic> json) {
-    final certDerB64 = json['monitorCertificateDer'] as String?;
+    final certDerB64 = json['certificateDer'] as String?;
     return PairTokenResponse(
       accepted: json['accepted'] as bool,
-      monitorId: json['monitorId'] as String?,
+      remoteDeviceId: json['remoteDeviceId'] as String?,
       monitorName: json['monitorName'] as String?,
-      monitorCertFingerprint: json['monitorCertFingerprint'] as String?,
-      monitorCertificateDer:
+      certFingerprint: json['certFingerprint'] as String?,
+      certificateDer:
           certDerB64 != null ? base64Decode(certDerB64) : null,
       reason: json['reason'] as String?,
     );
@@ -333,17 +333,17 @@ class PairTokenResponse {
 
   /// Create a successful token pairing response
   factory PairTokenResponse.accepted({
-    required String monitorId,
+    required String remoteDeviceId,
     required String monitorName,
-    required String monitorCertFingerprint,
-    required List<int> monitorCertificateDer,
+    required String certFingerprint,
+    required List<int> certificateDer,
   }) {
     return PairTokenResponse(
       accepted: true,
-      monitorId: monitorId,
+      remoteDeviceId: remoteDeviceId,
       monitorName: monitorName,
-      monitorCertFingerprint: monitorCertFingerprint,
-      monitorCertificateDer: monitorCertificateDer,
+      certFingerprint: certFingerprint,
+      certificateDer: certificateDer,
     );
   }
 

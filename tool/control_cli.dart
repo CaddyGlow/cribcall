@@ -6,6 +6,7 @@ import 'package:cribcall/src/config/build_flags.dart';
 import 'package:cribcall/src/identity/identity_repository.dart';
 import 'package:cribcall/src/identity/service_identity.dart';
 import 'package:cribcall/src/storage/trusted_listeners_repository.dart';
+import 'package:cribcall/src/util/format_utils.dart';
 
 void main(List<String> args) async {
   if (args.isEmpty || args.contains('--help') || args.contains('-h')) {
@@ -57,12 +58,12 @@ Future<void> _runMonitor(List<String> args) async {
     trustedPeers: trustedPeers,
     logger: logger,
     onTrustedListener: (peer) async {
-      if (trustedPeers.any((p) => p.deviceId == peer.deviceId)) return;
+      if (trustedPeers.any((p) => p.remoteDeviceId == peer.remoteDeviceId)) return;
       trustedPeers.add(peer);
       await trustedRepo.save(List.of(trustedPeers));
       logger(
-        'Trusted listener persisted id=${peer.deviceId} '
-        'fingerprint=${_shortFp(peer.certFingerprint)} '
+        'Trusted listener persisted id=${peer.remoteDeviceId} '
+        'fingerprint=${shortFingerprint(peer.certFingerprint)} '
         'total=${trustedPeers.length}',
       );
     },
@@ -248,13 +249,6 @@ Future<void> _waitForSignal() async {
   await completer.future;
   await subSigint.cancel();
   await subSigterm.cancel();
-}
-
-String _shortFp(String fingerprint) {
-  if (fingerprint.length <= 12) return fingerprint;
-  final prefix = fingerprint.substring(0, 6);
-  final suffix = fingerprint.substring(fingerprint.length - 4);
-  return '$prefix...$suffix';
 }
 
 void _printUsage() {

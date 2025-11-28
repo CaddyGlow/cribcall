@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../config/build_flags.dart';
+import 'audio.dart';
 
 enum DeviceRole { monitor, listener }
 
@@ -59,28 +60,39 @@ class MonitorSettings {
     noise: NoiseSettings.defaults,
     autoStreamType: AutoStreamType.audio,
     autoStreamDurationSec: 15,
+    audioInputGain: 100,
+    audioInputDeviceId: kDefaultAudioInputId,
   );
 
   const MonitorSettings({
     required this.noise,
     required this.autoStreamType,
     required this.autoStreamDurationSec,
+    required this.audioInputGain,
+    this.audioInputDeviceId,
   });
 
   final NoiseSettings noise;
   final AutoStreamType autoStreamType;
   final int autoStreamDurationSec;
+  /// Software input gain for captured audio (percent, 0-200).
+  final int audioInputGain;
+  final String? audioInputDeviceId;
 
   MonitorSettings copyWith({
     NoiseSettings? noise,
     AutoStreamType? autoStreamType,
     int? autoStreamDurationSec,
+    int? audioInputGain,
+    String? audioInputDeviceId,
   }) {
     return MonitorSettings(
       noise: noise ?? this.noise,
       autoStreamType: autoStreamType ?? this.autoStreamType,
       autoStreamDurationSec:
           autoStreamDurationSec ?? this.autoStreamDurationSec,
+      audioInputGain: audioInputGain ?? this.audioInputGain,
+      audioInputDeviceId: audioInputDeviceId ?? this.audioInputDeviceId,
     );
   }
 
@@ -88,9 +100,12 @@ class MonitorSettings {
     'noise': noise.toJson(),
     'autoStreamType': autoStreamType.name,
     'autoStreamDurationSec': autoStreamDurationSec,
+    'audioInputGain': audioInputGain,
+    'audioInputDeviceId': audioInputDeviceId,
   };
 
   factory MonitorSettings.fromJson(Map<String, dynamic> json) {
+    final inputGain = (json['audioInputGain'] as int?) ?? 100;
     return MonitorSettings(
       noise: NoiseSettings.fromJson(
         (json['noise'] as Map).cast<String, dynamic>(),
@@ -99,6 +114,72 @@ class MonitorSettings {
         json['autoStreamType'] as String,
       ),
       autoStreamDurationSec: json['autoStreamDurationSec'] as int,
+      audioInputGain: inputGain.clamp(0, 200).toInt(),
+      audioInputDeviceId:
+          (json['audioInputDeviceId'] as String?) ?? kDefaultAudioInputId,
+    );
+  }
+}
+
+/// Noise detection preferences that listeners send to monitors.
+/// These control when and how the monitor notifies this listener.
+class NoisePreferences {
+  static const defaults = NoisePreferences(
+    threshold: 50,
+    cooldownSeconds: 8,
+    autoStreamType: AutoStreamType.audio,
+    autoStreamDurationSec: 15,
+  );
+
+  const NoisePreferences({
+    required this.threshold,
+    required this.cooldownSeconds,
+    required this.autoStreamType,
+    required this.autoStreamDurationSec,
+  });
+
+  /// Noise threshold (0-100 scale). Monitor sends noise event when level exceeds this.
+  final int threshold;
+
+  /// Minimum seconds between noise events from the same monitor.
+  final int cooldownSeconds;
+
+  /// What the monitor should auto-stream when noise is detected.
+  final AutoStreamType autoStreamType;
+
+  /// Duration in seconds for auto-stream.
+  final int autoStreamDurationSec;
+
+  NoisePreferences copyWith({
+    int? threshold,
+    int? cooldownSeconds,
+    AutoStreamType? autoStreamType,
+    int? autoStreamDurationSec,
+  }) {
+    return NoisePreferences(
+      threshold: threshold ?? this.threshold,
+      cooldownSeconds: cooldownSeconds ?? this.cooldownSeconds,
+      autoStreamType: autoStreamType ?? this.autoStreamType,
+      autoStreamDurationSec: autoStreamDurationSec ?? this.autoStreamDurationSec,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'threshold': threshold,
+    'cooldownSeconds': cooldownSeconds,
+    'autoStreamType': autoStreamType.name,
+    'autoStreamDurationSec': autoStreamDurationSec,
+  };
+
+  factory NoisePreferences.fromJson(Map<String, dynamic> json) {
+    final rawThreshold = (json['threshold'] as int?) ?? 50;
+    return NoisePreferences(
+      threshold: rawThreshold.clamp(10, 100),
+      cooldownSeconds: (json['cooldownSeconds'] as int?) ?? 8,
+      autoStreamType: AutoStreamType.values.byName(
+        (json['autoStreamType'] as String?) ?? 'audio',
+      ),
+      autoStreamDurationSec: (json['autoStreamDurationSec'] as int?) ?? 15,
     );
   }
 }
@@ -107,44 +188,64 @@ class ListenerSettings {
   static const defaults = ListenerSettings(
     notificationsEnabled: true,
     defaultAction: ListenerDefaultAction.notify,
+    playbackVolume: 100,
+    noisePreferences: NoisePreferences.defaults,
   );
 
   const ListenerSettings({
     required this.notificationsEnabled,
     required this.defaultAction,
+    required this.playbackVolume,
+    required this.noisePreferences,
   });
 
   final bool notificationsEnabled;
   final ListenerDefaultAction defaultAction;
+  /// Playback volume for listener audio (percent, 0-200).
+  final int playbackVolume;
+  /// Global noise detection preferences sent to monitors.
+  final NoisePreferences noisePreferences;
 
   ListenerSettings copyWith({
     bool? notificationsEnabled,
     ListenerDefaultAction? defaultAction,
+    int? playbackVolume,
+    NoisePreferences? noisePreferences,
   }) {
     return ListenerSettings(
       notificationsEnabled: notificationsEnabled ?? this.notificationsEnabled,
       defaultAction: defaultAction ?? this.defaultAction,
+      playbackVolume: playbackVolume ?? this.playbackVolume,
+      noisePreferences: noisePreferences ?? this.noisePreferences,
     );
   }
 
   Map<String, dynamic> toJson() => {
     'notificationsEnabled': notificationsEnabled,
     'defaultAction': defaultAction.name,
+    'playbackVolume': playbackVolume,
+    'noisePreferences': noisePreferences.toJson(),
   };
 
   factory ListenerSettings.fromJson(Map<String, dynamic> json) {
+    final volume = (json['playbackVolume'] as int?) ?? 100;
+    final prefsJson = json['noisePreferences'] as Map<String, dynamic>?;
     return ListenerSettings(
       notificationsEnabled: json['notificationsEnabled'] as bool,
       defaultAction: ListenerDefaultAction.values.byName(
         json['defaultAction'] as String,
       ),
+      playbackVolume: volume.clamp(0, 200).toInt(),
+      noisePreferences: prefsJson != null
+          ? NoisePreferences.fromJson(prefsJson)
+          : NoisePreferences.defaults,
     );
   }
 }
 
 class TrustedPeer {
   const TrustedPeer({
-    required this.deviceId,
+    required this.remoteDeviceId,
     required this.name,
     required this.certFingerprint,
     required this.addedAtEpochSec,
@@ -152,19 +253,21 @@ class TrustedPeer {
     this.fcmToken,
   });
 
-  final String deviceId;
+  final String remoteDeviceId;
   final String name;
   final String certFingerprint;
   final int addedAtEpochSec;
+
   /// Full certificate DER bytes for TLS-level mTLS validation.
   /// Optional for backward compatibility with existing stored peers.
   final List<int>? certificateDer;
+
   /// FCM token for push notifications.
   /// Listener sends this after connecting so Monitor can send noise events via FCM.
   final String? fcmToken;
 
   TrustedPeer copyWith({
-    String? deviceId,
+    String? remoteDeviceId,
     String? name,
     String? certFingerprint,
     int? addedAtEpochSec,
@@ -172,7 +275,7 @@ class TrustedPeer {
     String? fcmToken,
   }) {
     return TrustedPeer(
-      deviceId: deviceId ?? this.deviceId,
+      remoteDeviceId: remoteDeviceId ?? this.remoteDeviceId,
       name: name ?? this.name,
       certFingerprint: certFingerprint ?? this.certFingerprint,
       addedAtEpochSec: addedAtEpochSec ?? this.addedAtEpochSec,
@@ -184,7 +287,7 @@ class TrustedPeer {
   /// Returns a copy with fcmToken explicitly cleared (set to null).
   TrustedPeer clearFcmToken() {
     return TrustedPeer(
-      deviceId: deviceId,
+      remoteDeviceId: remoteDeviceId,
       name: name,
       certFingerprint: certFingerprint,
       addedAtEpochSec: addedAtEpochSec,
@@ -194,7 +297,7 @@ class TrustedPeer {
   }
 
   Map<String, dynamic> toJson() => {
-    'deviceId': deviceId,
+    'remoteDeviceId': remoteDeviceId,
     'name': name,
     'certFingerprint': certFingerprint,
     'addedAtEpochSec': addedAtEpochSec,
@@ -205,7 +308,7 @@ class TrustedPeer {
   factory TrustedPeer.fromJson(Map<String, dynamic> json) {
     final certDerB64 = json['certificateDer'] as String?;
     return TrustedPeer(
-      deviceId: json['deviceId'] as String,
+      remoteDeviceId: json['remoteDeviceId'] as String,
       name: json['name'] as String,
       certFingerprint: json['certFingerprint'] as String,
       addedAtEpochSec: json['addedAtEpochSec'] as int,
@@ -217,7 +320,7 @@ class TrustedPeer {
 
 class TrustedMonitor {
   const TrustedMonitor({
-    required this.monitorId,
+    required this.remoteDeviceId,
     required this.monitorName,
     required this.certFingerprint,
     this.controlPort = kControlDefaultPort,
@@ -232,29 +335,35 @@ class TrustedMonitor {
     this.certificateDer,
   });
 
-  final String monitorId;
+  final String remoteDeviceId;
   final String monitorName;
   final String certFingerprint;
+
   /// Port for mTLS WebSocket control connections.
   final int controlPort;
+
   /// Port for TLS HTTP pairing server.
   final int pairingPort;
   final int serviceVersion;
   final String transport;
+
   /// The last IP address where we successfully connected to this monitor.
   final String? lastKnownIp;
+
   /// List of IP addresses from the QR code pairing payload.
   final List<String>? knownIps;
   final int? lastNoiseEpochMs;
+
   /// Timestamp (ms since epoch) when the monitor was last seen online via mDNS.
   final int? lastSeenEpochMs;
   final int addedAtEpochSec;
+
   /// Full certificate DER bytes for TLS-level mTLS validation.
   /// Optional for backward compatibility with existing stored monitors.
   final List<int>? certificateDer;
 
   TrustedMonitor copyWith({
-    String? monitorId,
+    String? remoteDeviceId,
     String? monitorName,
     String? certFingerprint,
     int? controlPort,
@@ -269,7 +378,7 @@ class TrustedMonitor {
     List<int>? certificateDer,
   }) {
     return TrustedMonitor(
-      monitorId: monitorId ?? this.monitorId,
+      remoteDeviceId: remoteDeviceId ?? this.remoteDeviceId,
       monitorName: monitorName ?? this.monitorName,
       certFingerprint: certFingerprint ?? this.certFingerprint,
       controlPort: controlPort ?? this.controlPort,
@@ -286,7 +395,7 @@ class TrustedMonitor {
   }
 
   Map<String, dynamic> toJson() => {
-    'monitorId': monitorId,
+    'remoteDeviceId': remoteDeviceId,
     'monitorName': monitorName,
     'certFingerprint': certFingerprint,
     'controlPort': controlPort,
@@ -303,12 +412,16 @@ class TrustedMonitor {
 
   factory TrustedMonitor.fromJson(Map<String, dynamic> json) {
     final certDerB64 = json['certificateDer'] as String?;
+    final remoteId = json['remoteDeviceId'] as String? ?? '';
     return TrustedMonitor(
-      monitorId: json['monitorId'] as String,
-      monitorName: json['monitorName'] as String,
-      certFingerprint: json['certFingerprint'] as String,
+      remoteDeviceId: remoteId,
+      monitorName: json['monitorName'] as String? ?? remoteId,
+      certFingerprint: json['certFingerprint'] as String? ?? '',
       // Support old 'servicePort' field for backward compatibility
-      controlPort: json['controlPort'] as int? ?? json['servicePort'] as int? ?? kControlDefaultPort,
+      controlPort:
+          json['controlPort'] as int? ??
+          json['servicePort'] as int? ??
+          kControlDefaultPort,
       pairingPort: json['pairingPort'] as int? ?? kPairingDefaultPort,
       serviceVersion: json['serviceVersion'] as int? ?? 1,
       transport: json['transport'] as String? ?? kTransportHttpWs,
@@ -333,8 +446,10 @@ class QrServiceInfo {
 
   final String protocol;
   final int version;
+
   /// Port for mTLS WebSocket control connections.
   final int controlPort;
+
   /// Port for TLS HTTP pairing server.
   final int pairingPort;
   final String transport;
@@ -352,7 +467,10 @@ class QrServiceInfo {
       protocol: json['protocol'] as String,
       version: json['version'] as int,
       // Support old 'defaultPort' field for backward compatibility
-      controlPort: json['controlPort'] as int? ?? json['defaultPort'] as int? ?? kControlDefaultPort,
+      controlPort:
+          json['controlPort'] as int? ??
+          json['defaultPort'] as int? ??
+          kControlDefaultPort,
       pairingPort: json['pairingPort'] as int? ?? kPairingDefaultPort,
       transport: json['transport'] as String? ?? kTransportHttpWs,
     );
@@ -361,22 +479,24 @@ class QrServiceInfo {
 
 class MonitorQrPayload {
   const MonitorQrPayload({
-    required this.monitorId,
+    required this.remoteDeviceId,
     required this.monitorName,
-    required this.monitorCertFingerprint,
+    required this.certFingerprint,
     required this.service,
     this.monitorPublicKey,
     this.ips,
     this.pairingToken,
   });
 
-  final String monitorId;
+  final String remoteDeviceId;
   final String monitorName;
-  final String monitorCertFingerprint;
+  final String certFingerprint;
   final String? monitorPublicKey;
   final QrServiceInfo service;
+
   /// List of IP addresses where the monitor can be reached.
   final List<String>? ips;
+
   /// One-time pairing token for QR code pairing (bypasses PIN verification).
   /// Base64url encoded 32-byte random token.
   final String? pairingToken;
@@ -388,9 +508,9 @@ class MonitorQrPayload {
 
   Map<String, dynamic> toJson() => {
     'type': payloadType,
-    'monitorId': monitorId,
+    'remoteDeviceId': remoteDeviceId,
     'monitorName': monitorName,
-    'monitorCertFingerprint': monitorCertFingerprint,
+    'certFingerprint': certFingerprint,
     if (monitorPublicKey != null) 'monitorPublicKey': monitorPublicKey,
     if (ips != null && ips!.isNotEmpty) 'ips': ips,
     if (pairingToken != null) 'pairingToken': pairingToken,
@@ -402,9 +522,9 @@ class MonitorQrPayload {
       throw ArgumentError('Unexpected QR payload type: ${json['type']}');
     }
     return MonitorQrPayload(
-      monitorId: json['monitorId'] as String,
+      remoteDeviceId: json['remoteDeviceId'] as String,
       monitorName: json['monitorName'] as String,
-      monitorCertFingerprint: json['monitorCertFingerprint'] as String,
+      certFingerprint: json['certFingerprint'] as String,
       monitorPublicKey: json['monitorPublicKey'] as String?,
       ips: (json['ips'] as List<dynamic>?)?.cast<String>(),
       pairingToken: json['pairingToken'] as String?,
@@ -417,9 +537,9 @@ class MonitorQrPayload {
 
 class MdnsAdvertisement {
   const MdnsAdvertisement({
-    required this.monitorId,
+    required this.remoteDeviceId,
     required this.monitorName,
-    required this.monitorCertFingerprint,
+    required this.certFingerprint,
     required this.controlPort,
     required this.pairingPort,
     required this.version,
@@ -427,11 +547,13 @@ class MdnsAdvertisement {
     this.ip,
   });
 
-  final String monitorId;
+  final String remoteDeviceId;
   final String monitorName;
-  final String monitorCertFingerprint;
+  final String certFingerprint;
+
   /// Port for mTLS WebSocket control connections.
   final int controlPort;
+
   /// Port for TLS HTTP pairing server.
   final int pairingPort;
   final int version;
@@ -439,9 +561,9 @@ class MdnsAdvertisement {
   final String? ip;
 
   Map<String, dynamic> toJson() => {
-    'monitorId': monitorId,
+    'remoteDeviceId': remoteDeviceId,
     'monitorName': monitorName,
-    'monitorCertFingerprint': monitorCertFingerprint,
+    'certFingerprint': certFingerprint,
     'controlPort': controlPort,
     'pairingPort': pairingPort,
     'version': version,
@@ -451,11 +573,14 @@ class MdnsAdvertisement {
 
   factory MdnsAdvertisement.fromJson(Map<String, dynamic> json) {
     return MdnsAdvertisement(
-      monitorId: json['monitorId'] as String,
+      remoteDeviceId: json['remoteDeviceId'] as String,
       monitorName: json['monitorName'] as String,
-      monitorCertFingerprint: json['monitorCertFingerprint'] as String,
+      certFingerprint: json['certFingerprint'] as String? ?? '',
       // Support old 'servicePort' field for backward compatibility
-      controlPort: json['controlPort'] as int? ?? json['servicePort'] as int? ?? kControlDefaultPort,
+      controlPort:
+          json['controlPort'] as int? ??
+          json['servicePort'] as int? ??
+          kControlDefaultPort,
       pairingPort: json['pairingPort'] as int? ?? kPairingDefaultPort,
       version: json['version'] as int,
       transport: json['transport'] as String? ?? kTransportHttpWs,
@@ -466,12 +591,10 @@ class MdnsAdvertisement {
 
 /// Event emitted by mDNS browse stream indicating service online/offline status.
 class MdnsEvent {
-  const MdnsEvent({
-    required this.advertisement,
-    required this.isOnline,
-  });
+  const MdnsEvent({required this.advertisement, required this.isOnline});
 
   final MdnsAdvertisement advertisement;
+
   /// True when service is discovered/announced, false when service goes offline
   /// (goodbye packet with TTL=0 or platform service lost callback).
   final bool isOnline;

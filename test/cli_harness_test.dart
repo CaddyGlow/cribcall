@@ -23,6 +23,7 @@ void main() {
       onTrustedListener: (peer) {
         trustedListener = peer;
       },
+      autoConfirmSessions: true,
     );
 
     await monitor.start();
@@ -85,7 +86,7 @@ void main() {
 
     // Pre-trust the listener
     final trustedPeer = TrustedPeer(
-      deviceId: listenerIdentity.deviceId,
+      remoteDeviceId: listenerIdentity.deviceId,
       name: 'Test Listener',
       certFingerprint: listenerIdentity.certFingerprint,
       addedAtEpochSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,

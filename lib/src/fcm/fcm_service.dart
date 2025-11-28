@@ -9,19 +9,19 @@ import '../notifications/notification_service.dart';
 /// Data extracted from an FCM noise event message.
 class NoiseEventData {
   const NoiseEventData({
-    required this.monitorId,
+    required this.remoteDeviceId,
     required this.monitorName,
     required this.timestamp,
     required this.peakLevel,
   });
 
-  final String monitorId;
+  final String remoteDeviceId;
   final String monitorName;
   final int timestamp;
   final int peakLevel;
 
-  /// Unique ID for deduplication: "{monitorId}-{timestamp}"
-  String get eventId => '$monitorId-$timestamp';
+  /// Unique ID for deduplication: "{remoteDeviceId}-{timestamp}"
+  String get eventId => '$remoteDeviceId-$timestamp';
 }
 
 /// Background message handler - must be top-level function.
@@ -150,7 +150,7 @@ class FcmService {
     final type = data['type'] as String?;
     if (type == 'NOISE_EVENT') {
       final event = NoiseEventData(
-        monitorId: data['monitorId'] as String? ?? '',
+        remoteDeviceId: data['remoteDeviceId'] as String? ?? '',
         monitorName: data['monitorName'] as String? ?? 'Monitor',
         timestamp: int.tryParse(data['timestamp']?.toString() ?? '') ?? 0,
         peakLevel: int.tryParse(data['peakLevel']?.toString() ?? '') ?? 0,

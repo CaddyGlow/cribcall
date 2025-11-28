@@ -12,6 +12,7 @@ import '../../sound/audio_playback.dart';
 import '../../state/app_state.dart';
 import '../../state/per_monitor_settings.dart';
 import '../../theme.dart';
+import '../../util/format_utils.dart';
 import '../../webrtc/webrtc_controller.dart';
 import '../shared/widgets/widgets.dart';
 import 'listener_pin_page.dart';
@@ -31,6 +32,7 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
   String? _activeMonitorId;
   StreamSubscription<Uint8List>? _audioDataSubscription;
   AudioPlaybackService? _audioPlayback;
+  ProviderSubscription<AsyncValue<ListenerSettings>>? _listenerSettingsSub;
   Timer? _pinTimer;
   bool _startingPlayback = false;
   bool _sessionRestoreAttempted = false;
@@ -39,6 +41,16 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
   void initState() {
     super.initState();
     _initAudioPlayback();
+    _listenerSettingsSub = ref.listenManual<AsyncValue<ListenerSettings>>(
+      listenerSettingsProvider,
+      (previous, next) {
+        final settings = next.asData?.value;
+        if (settings != null) {
+          _applyPlaybackVolume(settings.playbackVolume);
+        }
+      },
+    );
+    _applyCurrentPlaybackVolume();
     _attemptSessionRestore();
   }
 
@@ -56,14 +68,14 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
     final identity = await ref.read(identityProvider.future);
 
     final monitor = monitors
-        .where((m) => m.monitorId == lastMonitorId)
+        .where((m) => m.remoteDeviceId == lastMonitorId)
         .firstOrNull;
     if (monitor == null) return;
 
     // Check if we can find the monitor via mDNS
     final advertisements = ref.read(discoveredMonitorsProvider);
     final ad = advertisements
-        .where((a) => a.monitorId == lastMonitorId)
+        .where((a) => a.remoteDeviceId == lastMonitorId)
         .firstOrNull;
     if (ad == null) return;
 
@@ -92,8 +104,10 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
       _startingPlayback = true;
       _audioPlayback!.start().then((_) {
         _startingPlayback = false;
+        _applyCurrentPlaybackVolume();
       });
     }
+    _applyCurrentPlaybackVolume();
     _audioPlayback?.write(data);
   }
 
@@ -109,11 +123,24 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
     _pinTimer = null;
   }
 
+  void _applyCurrentPlaybackVolume() {
+    final settings = ref.read(listenerSettingsProvider).asData?.value;
+    if (settings != null) {
+      _applyPlaybackVolume(settings.playbackVolume);
+    }
+  }
+
+  void _applyPlaybackVolume(int volumePercent) {
+    final factor = (volumePercent.clamp(0, 200)) / 100.0;
+    _audioPlayback?.setVolume(factor);
+  }
+
   @override
   void dispose() {
     _stopPinTimer();
     _audioDataSubscription?.cancel();
     _audioPlayback?.stop();
+    _listenerSettingsSub?.close();
     super.dispose();
   }
 
@@ -129,7 +156,7 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
 
     // Get control client state for connection status
     final controlClientState = ref.watch(controlClientProvider);
-    final connectedMonitorId = controlClientState.monitorId;
+    final connectedMonitorId = controlClientState.remoteDeviceId;
     final isControlConnected =
         controlClientState.status == ControlClientStatus.connected;
     final isControlConnecting =
@@ -160,12 +187,25 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Header
-        Text(
-          'Listener controls',
-          style: Theme.of(
-            context,
-          ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+        // Header with settings button
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              'Listener controls',
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+            ),
+            IconButton(
+              onPressed: () => _showNoiseSettingsDrawer(context),
+              icon: const Icon(Icons.tune, size: 22),
+              tooltip: 'Noise detection settings',
+              style: IconButton.styleFrom(
+                backgroundColor: AppColors.primary.withValues(alpha: 0.1),
+              ),
+            ),
+          ],
         ),
         const SizedBox(height: 10),
 
@@ -191,22 +231,22 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
     // Process discovered advertisements
     for (final ad in advertisements) {
       final pinnedMonitor = pinned.cast<TrustedMonitor?>().firstWhere(
-        (p) => p?.monitorId == ad.monitorId,
+        (p) => p?.remoteDeviceId == ad.remoteDeviceId,
         orElse: () => null,
       );
       final isTrusted = pinnedMonitor != null;
       final isThisConnected =
-          isControlConnected && connectedMonitorId == ad.monitorId;
+          isControlConnected && connectedMonitorId == ad.remoteDeviceId;
       final isThisConnecting =
-          isControlConnecting && connectedMonitorId == ad.monitorId;
+          isControlConnecting && connectedMonitorId == ad.remoteDeviceId;
 
       final data = MonitorItemData(
-        monitorId: ad.monitorId,
+        remoteDeviceId: ad.remoteDeviceId,
         name: ad.monitorName,
         status: 'Online',
         lastNoiseEpochMs: pinnedMonitor?.lastNoiseEpochMs,
         lastSeenEpochMs: pinnedMonitor?.lastSeenEpochMs,
-        fingerprint: ad.monitorCertFingerprint,
+        fingerprint: ad.certFingerprint,
         trusted: isTrusted,
         trustedMonitor: pinnedMonitor,
         lastKnownIp: ad.ip ?? pinnedMonitor?.lastKnownIp,
@@ -215,7 +255,7 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
         isConnected: isThisConnected,
         isConnecting: isThisConnecting,
         onConnect: isTrusted
-            ? () => _handleConnect(ad.monitorId, ad, pinnedMonitor, ad)
+            ? () => _handleConnect(ad.remoteDeviceId, ad, pinnedMonitor, ad)
             : null,
         onDisconnect: isThisConnected ? _handleDisconnect : null,
         onListen: isThisConnected
@@ -223,13 +263,13 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
             : null,
         onStop: _handleStop,
         onForget: isTrusted
-            ? () => _forgetMonitor(pinnedMonitor!, advertisement: ad)
+            ? () => _forgetMonitor(pinnedMonitor, advertisement: ad)
             : null,
         onPair: () => _showPairSheet(ad),
         onSettings: isTrusted
             ? () => showMonitorSettingsSheet(
                 context,
-                monitorId: ad.monitorId,
+                remoteDeviceId: ad.remoteDeviceId,
                 monitorName: ad.monitorName,
               )
             : null,
@@ -244,18 +284,18 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
 
     // Add offline pinned monitors
     for (final monitor in pinned) {
-      if (advertisements.any((ad) => ad.monitorId == monitor.monitorId)) {
+      if (advertisements.any((ad) => ad.remoteDeviceId == monitor.remoteDeviceId)) {
         continue;
       }
       final fallback = _fallbackAdvertisement(monitor);
       final isThisConnected =
-          isControlConnected && connectedMonitorId == monitor.monitorId;
+          isControlConnected && connectedMonitorId == monitor.remoteDeviceId;
       final isThisConnecting =
-          isControlConnecting && connectedMonitorId == monitor.monitorId;
+          isControlConnecting && connectedMonitorId == monitor.remoteDeviceId;
 
       trustedData.add(
         MonitorItemData(
-          monitorId: monitor.monitorId,
+          remoteDeviceId: monitor.remoteDeviceId,
           name: monitor.monitorName,
           status: 'Offline',
           lastNoiseEpochMs: monitor.lastNoiseEpochMs,
@@ -269,7 +309,7 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
           isConnected: isThisConnected,
           isConnecting: isThisConnecting,
           onConnect: fallback != null
-              ? () => _handleConnect(monitor.monitorId, null, monitor, fallback)
+              ? () => _handleConnect(monitor.remoteDeviceId, null, monitor, fallback)
               : null,
           onDisconnect: isThisConnected ? _handleDisconnect : null,
           onListen: isThisConnected
@@ -279,7 +319,7 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
           onForget: () => _forgetMonitor(monitor, advertisement: fallback),
           onSettings: () => showMonitorSettingsSheet(
             context,
-            monitorId: monitor.monitorId,
+            remoteDeviceId: monitor.remoteDeviceId,
             monitorName: monitor.monitorName,
           ),
         ),
@@ -292,9 +332,9 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
     final ip = monitor.lastKnownIp ?? monitor.knownIps?.firstOrNull;
     if (ip == null) return null;
     return MdnsAdvertisement(
-      monitorId: monitor.monitorId,
+      remoteDeviceId: monitor.remoteDeviceId,
       monitorName: monitor.monitorName,
-      monitorCertFingerprint: monitor.certFingerprint,
+      certFingerprint: monitor.certFingerprint,
       controlPort: monitor.controlPort,
       pairingPort: monitor.pairingPort,
       version: monitor.serviceVersion,
@@ -340,16 +380,16 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
         host: target!.ip!,
         port: target.controlPort,
         expectedFingerprint: monitor.certFingerprint,
-        listenerId: identity.deviceId,
+        deviceId: identity.deviceId,
       );
     }
 
     await ref
         .read(trustedMonitorsProvider.notifier)
-        .removeMonitor(monitor.monitorId);
+        .removeMonitor(monitor.remoteDeviceId);
     await ref
         .read(perMonitorSettingsProvider.notifier)
-        .removeSettings(monitor.monitorId);
+        .removeSettings(monitor.remoteDeviceId);
 
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -365,7 +405,7 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
 
   /// Connect to a monitor's control server (for receiving notifications).
   Future<void> _handleConnect(
-    String monitorId,
+    String remoteDeviceId,
     MdnsAdvertisement? advertisement,
     TrustedMonitor trustedMonitor,
     MdnsAdvertisement connectTarget,
@@ -382,7 +422,7 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
     }
 
     // Set active monitor
-    setState(() => _activeMonitorId = monitorId);
+    setState(() => _activeMonitorId = remoteDeviceId);
 
     final failure = await ref
         .read(controlClientProvider.notifier)
@@ -429,6 +469,16 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
       context: context,
       showDragHandle: true,
       builder: (context) => ListenerPinPage(advertisement: advertisement),
+    );
+  }
+
+  /// Show the global noise detection settings drawer.
+  void _showNoiseSettingsDrawer(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) => const _NoiseSettingsDrawer(),
     );
   }
 
@@ -479,7 +529,7 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
               ...monitors.map(
                 (m) => TrustedMonitorItem(
                   data: m,
-                  isActive: _activeMonitorId == m.monitorId,
+                  isActive: _activeMonitorId == m.remoteDeviceId,
                 ),
               ),
 
@@ -645,7 +695,7 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
                         scaffoldMessenger.showSnackBar(
                           SnackBar(
                             content: Text(
-                              'Pinned ${result.monitorName} (${result.monitorCertFingerprint.substring(0, 12)})',
+                              'Pinned ${result.monitorName} (${shortFingerprint(result.certFingerprint)})',
                             ),
                           ),
                         );
@@ -690,6 +740,285 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
               ],
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A row widget for noise detection settings.
+class _NoiseSettingRow extends StatelessWidget {
+  const _NoiseSettingRow({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    this.trailing,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final Widget? trailing;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 20, color: AppColors.primary),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                Text(
+                  subtitle,
+                  style: Theme.of(context)
+                      .textTheme
+                      .bodySmall
+                      ?.copyWith(color: AppColors.muted),
+                ),
+              ],
+            ),
+          ),
+          if (trailing != null) trailing!,
+        ],
+      ),
+    );
+  }
+}
+
+/// Drawer for global noise detection settings.
+class _NoiseSettingsDrawer extends ConsumerWidget {
+  const _NoiseSettingsDrawer();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final listenerSettings = ref.watch(listenerSettingsProvider);
+
+    return DraggableScrollableSheet(
+      initialChildSize: 0.5,
+      minChildSize: 0.3,
+      maxChildSize: 0.7,
+      expand: false,
+      builder: (context, scrollController) => SingleChildScrollView(
+        controller: scrollController,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: listenerSettings.when(
+          data: (settings) {
+            final prefs = settings.noisePreferences;
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Header
+                Row(
+                  children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: AppColors.primary.withValues(alpha: 0.1),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.tune,
+                        color: AppColors.primary,
+                        size: 20,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Noise detection settings',
+                            style:
+                                Theme.of(context).textTheme.titleMedium?.copyWith(
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            'Global defaults for all monitors',
+                            style:
+                                Theme.of(context).textTheme.bodySmall?.copyWith(
+                                      color: AppColors.muted,
+                                    ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+
+                // Threshold
+                _NoiseSettingRow(
+                  icon: Icons.volume_up,
+                  title: 'Sensitivity',
+                  subtitle: '${prefs.threshold}% threshold',
+                  trailing: DropdownButton<int>(
+                    value: prefs.threshold,
+                    underline: const SizedBox.shrink(),
+                    onChanged: (value) {
+                      if (value != null) {
+                        ref
+                            .read(listenerSettingsProvider.notifier)
+                            .setNoiseThreshold(value);
+                        ref
+                            .read(controlClientProvider.notifier)
+                            .refreshNoiseSubscription();
+                      }
+                    },
+                    items: [20, 30, 40, 50, 60, 70, 80, 90]
+                        .map((v) => DropdownMenuItem(
+                              value: v,
+                              child: Text('$v%'),
+                            ))
+                        .toList(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+
+                // Cooldown
+                _NoiseSettingRow(
+                  icon: Icons.hourglass_empty,
+                  title: 'Cooldown',
+                  subtitle: '${prefs.cooldownSeconds}s between alerts',
+                  trailing: DropdownButton<int>(
+                    value: prefs.cooldownSeconds,
+                    underline: const SizedBox.shrink(),
+                    onChanged: (value) {
+                      if (value != null) {
+                        ref
+                            .read(listenerSettingsProvider.notifier)
+                            .setCooldownSeconds(value);
+                        ref
+                            .read(controlClientProvider.notifier)
+                            .refreshNoiseSubscription();
+                      }
+                    },
+                    items: [3, 5, 8, 10, 15, 30]
+                        .map((v) => DropdownMenuItem(
+                              value: v,
+                              child: Text('${v}s'),
+                            ))
+                        .toList(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+
+                // Auto-stream type
+                _NoiseSettingRow(
+                  icon: Icons.stream,
+                  title: 'Auto-stream on noise',
+                  subtitle: prefs.autoStreamType == AutoStreamType.none
+                      ? 'Disabled'
+                      : prefs.autoStreamType == AutoStreamType.audio
+                          ? 'Audio only'
+                          : 'Audio + Video',
+                  trailing: DropdownButton<AutoStreamType>(
+                    value: prefs.autoStreamType,
+                    underline: const SizedBox.shrink(),
+                    onChanged: (value) {
+                      if (value != null) {
+                        ref
+                            .read(listenerSettingsProvider.notifier)
+                            .setAutoStreamType(value);
+                        ref
+                            .read(controlClientProvider.notifier)
+                            .refreshNoiseSubscription();
+                      }
+                    },
+                    items: const [
+                      DropdownMenuItem(
+                        value: AutoStreamType.none,
+                        child: Text('Off'),
+                      ),
+                      DropdownMenuItem(
+                        value: AutoStreamType.audio,
+                        child: Text('Audio'),
+                      ),
+                      DropdownMenuItem(
+                        value: AutoStreamType.audioVideo,
+                        child: Text('A+V'),
+                      ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(height: 20),
+
+                // Info text
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: AppColors.primary.withValues(alpha: 0.05),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: AppColors.primary.withValues(alpha: 0.1),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.info_outline,
+                        size: 18,
+                        color: AppColors.primary.withValues(alpha: 0.7),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'These settings are sent to monitors when you connect. '
+                          'Per-monitor overrides can be set in each monitor\'s settings.',
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                color: AppColors.muted,
+                              ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(height: 16),
+
+                // Done button
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('Done'),
+                  ),
+                ),
+
+                const SizedBox(height: 16),
+              ],
+            );
+          },
+          loading: () => const Center(
+            child: Padding(
+              padding: EdgeInsets.all(32),
+              child: CircularProgressIndicator(),
+            ),
+          ),
+          error: (e, _) => Center(
+            child: Padding(
+              padding: const EdgeInsets.all(32),
+              child: Text('Error loading settings: $e'),
+            ),
+          ),
         ),
       ),
     );

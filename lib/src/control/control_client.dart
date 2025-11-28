@@ -2,9 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' show sha256;
 import 'package:cryptography/cryptography.dart';
+import 'package:pointycastle/export.dart' as pc;
 import '../foundation/foundation_stub.dart'
     if (dart.library.ui) 'package:flutter/foundation.dart';
 
@@ -37,16 +39,16 @@ class PairInitResult {
 /// Result of a successful pairing.
 class PairingResult {
   const PairingResult({
-    required this.monitorId,
+    required this.remoteDeviceId,
     required this.monitorName,
-    required this.monitorCertFingerprint,
-    required this.monitorCertificateDer,
+    required this.certFingerprint,
+    required this.certificateDer,
   });
 
-  final String monitorId;
+  final String remoteDeviceId;
   final String monitorName;
-  final String monitorCertFingerprint;
-  final List<int> monitorCertificateDer;
+  final String certFingerprint;
+  final List<int> certificateDer;
 }
 
 typedef NoiseSubscribeResponse = ({
@@ -163,11 +165,11 @@ class ControlClient {
 
     // Step 1: POST /pair/init with our P-256 identity public key
     final initRequest = PairInitRequest(
-      listenerId: identity.deviceId,
-      listenerName: listenerName,
-      listenerCertFingerprint: identity.certFingerprint,
-      listenerCertificateDer: identity.certificateDer,
-      listenerPublicKey: base64Encode(identity.publicKeyUncompressed),
+      deviceId: identity.deviceId,
+      deviceName: listenerName,
+      certFingerprint: identity.certFingerprint,
+      certificateDer: identity.certificateDer,
+      publicKey: base64Encode(identity.publicKeyUncompressed),
     );
 
     final initUri = Uri.https('${_formatHost(host)}:$pairingPort', '/pair/init');
@@ -236,8 +238,8 @@ class ControlClient {
     // Build transcript
     final transcript = <String, dynamic>{
       'pairingSessionId': sessionId,
-      'listenerId': identity.deviceId,
-      'listenerCertFingerprint': identity.certFingerprint,
+      'deviceId': identity.deviceId,
+      'certFingerprint': identity.certFingerprint,
       'monitorCertFingerprint': expectedFingerprint.isNotEmpty
           ? expectedFingerprint
           : (_lastSeenFingerprint ?? ''),
@@ -284,15 +286,15 @@ class ControlClient {
     }
 
     _log(
-      'Pairing successful: monitorId=${confirmData.monitorId} '
+      'Pairing successful: remoteDeviceId=${confirmData.remoteDeviceId} '
       'name=${confirmData.monitorName}',
     );
 
     return PairingResult(
-      monitorId: confirmData.monitorId!,
+      remoteDeviceId: confirmData.remoteDeviceId!,
       monitorName: confirmData.monitorName!,
-      monitorCertFingerprint: confirmData.monitorCertFingerprint!,
-      monitorCertificateDer: confirmData.monitorCertificateDer!,
+      certFingerprint: confirmData.certFingerprint!,
+      certificateDer: confirmData.certificateDer!,
     );
   }
 
@@ -308,22 +310,11 @@ class ControlClient {
         monitorPublicKeyBytes[0] != 0x04) {
       throw const FormatException('Invalid monitor public key format');
     }
-    final monitorPublicKey = EcPublicKey(
-      type: KeyPairType.p256,
-      x: monitorPublicKeyBytes.sublist(1, 33),
-      y: monitorPublicKeyBytes.sublist(33, 65),
-    );
 
-    // Convert our identity key pair to EcKeyPairData
-    final ourKeyPair = await _ecKeyPairFromIdentity();
-
-    // Compute shared secret via P-256 ECDH
-    final algorithm = Ecdh.p256(length: 32);
-    final sharedSecret = await algorithm.sharedSecretKey(
-      keyPair: ourKeyPair,
-      remotePublicKey: monitorPublicKey,
+    // Compute shared secret via P-256 ECDH using pointycastle
+    final sharedSecretBytes = await _computeEcdhSharedSecret(
+      theirPublicKeyUncompressed: monitorPublicKeyBytes,
     );
-    final sharedSecretBytes = await sharedSecret.extractBytes();
 
     // Derive comparison code and pairing key from shared secret
     final hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
@@ -346,17 +337,51 @@ class ControlClient {
     );
   }
 
-  /// Converts a DeviceIdentity's key pair to EcKeyPairData for use with ECDH.
-  Future<EcKeyPairData> _ecKeyPairFromIdentity() async {
-    final pubBytes = identity.publicKeyUncompressed;
-    final privateKeyData = await identity.keyPair.extract();
+  /// Computes ECDH shared secret using P-256 curve via pointycastle.
+  Future<List<int>> _computeEcdhSharedSecret({
+    required List<int> theirPublicKeyUncompressed,
+  }) async {
+    final domainParams = pc.ECDomainParameters('secp256r1');
 
-    return EcKeyPairData(
-      type: KeyPairType.p256,
-      d: (privateKeyData as SimpleKeyPairData).bytes,
-      x: pubBytes.sublist(1, 33),
-      y: pubBytes.sublist(33, 65),
+    // Parse their public key (uncompressed: 0x04 + x + y)
+    final theirPoint = domainParams.curve.decodePoint(
+      Uint8List.fromList(theirPublicKeyUncompressed),
     );
+    final theirPublicKey = pc.ECPublicKey(theirPoint, domainParams);
+
+    // Extract our private key
+    final privateKeyData = await identity.keyPair.extract();
+    final dBytes = (privateKeyData as SimpleKeyPairData).bytes;
+    final d = _bytesToBigInt(dBytes);
+    final ourPrivateKey = pc.ECPrivateKey(d, domainParams);
+
+    // Compute shared secret
+    final agreement = pc.ECDHBasicAgreement();
+    agreement.init(ourPrivateKey);
+    final sharedSecretBigInt = agreement.calculateAgreement(theirPublicKey);
+
+    // Convert to 32 bytes (P-256 field size)
+    return _bigIntToBytes(sharedSecretBigInt, 32);
+  }
+
+  /// Converts bytes to BigInt (big-endian unsigned).
+  BigInt _bytesToBigInt(List<int> bytes) {
+    var result = BigInt.zero;
+    for (final byte in bytes) {
+      result = (result << 8) | BigInt.from(byte);
+    }
+    return result;
+  }
+
+  /// Converts BigInt to fixed-length bytes (big-endian).
+  List<int> _bigIntToBytes(BigInt value, int length) {
+    final result = List<int>.filled(length, 0);
+    var remaining = value;
+    for (var i = length - 1; i >= 0; i--) {
+      result[i] = (remaining & BigInt.from(0xFF)).toInt();
+      remaining = remaining >> 8;
+    }
+    return result;
   }
 
   /// Closes the HTTP client.
@@ -371,16 +396,16 @@ class ControlClient {
     required String host,
     required int port,
     required String expectedFingerprint,
-    required String listenerId,
+    required String deviceId,
   }) async {
-    _log('Requesting unpair from $host:$port listenerId=$listenerId');
+    _log('Requesting unpair from $host:$port deviceId=$deviceId');
     HttpClient? client;
     try {
       client = await _buildHttpClient(expectedFingerprint);
       final uri = Uri.https('${_formatHost(host)}:$port', '/unpair');
       final request = await client.postUrl(uri);
       request.headers.contentType = ContentType.json;
-      request.write(jsonEncode({'listenerId': listenerId}));
+      request.write(jsonEncode({'deviceId': deviceId}));
 
       final response = await request.close().timeout(
         const Duration(seconds: 5),
@@ -405,6 +430,7 @@ class ControlClient {
   }
 
   /// Subscribe a noise fallback token via local HTTPS endpoint.
+  /// Optionally includes listener's noise detection preferences.
   Future<NoiseSubscribeResponse> subscribeNoise({
     required String host,
     required int port,
@@ -412,6 +438,10 @@ class ControlClient {
     required String fcmToken,
     required String platform,
     int? leaseSeconds,
+    int? threshold,
+    int? cooldownSeconds,
+    String? autoStreamType,
+    int? autoStreamDurationSec,
   }) async {
     HttpClient? client;
     try {
@@ -423,6 +453,11 @@ class ControlClient {
         'fcmToken': fcmToken,
         'platform': platform,
         if (leaseSeconds != null) 'leaseSeconds': leaseSeconds,
+        if (threshold != null) 'threshold': threshold,
+        if (cooldownSeconds != null) 'cooldownSeconds': cooldownSeconds,
+        if (autoStreamType != null) 'autoStreamType': autoStreamType,
+        if (autoStreamDurationSec != null)
+          'autoStreamDurationSec': autoStreamDurationSec,
       };
       request.write(canonicalizeJson(payload));
 
@@ -638,7 +673,7 @@ String _fingerprintHex(List<int> bytes) {
 
 String _shortFp(String fp) {
   if (fp.length <= 12) return fp;
-  return '${fp.substring(0, 6)}...${fp.substring(fp.length - 4)}';
+  return fp.substring(0, 12);
 }
 
 /// Converts 3 bytes to a 6-digit comparison code.

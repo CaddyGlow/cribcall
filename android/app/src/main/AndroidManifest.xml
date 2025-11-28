@@ -60,7 +60,7 @@
             android:name=".AudioCaptureService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="microphone" />
+            android:foregroundServiceType="microphone|dataSync" />
 
         <!-- Listener foreground service to keep WebSocket alive (Listener role) -->
         <service

@@ -2,7 +2,6 @@ package com.cribcall.cribcall
 
 import android.media.AudioAttributes
 import android.media.AudioFormat
-import android.media.AudioManager
 import android.media.AudioTrack
 import android.util.Log
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -24,6 +23,7 @@ class AudioPlaybackService {
     private var playbackThread: Thread? = null
     private var isPlaying = false
     private val audioQueue = ConcurrentLinkedQueue<ByteArray>()
+    private var volume = 1.0f
 
     fun start(): Boolean {
         if (isPlaying) return true
@@ -53,6 +53,7 @@ class AudioPlaybackService {
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
 
+            audioTrack?.setVolume(volume.coerceIn(0f, 2f))
             isPlaying = true
             audioTrack?.play()
 
@@ -84,6 +85,11 @@ class AudioPlaybackService {
         audioQueue.clear()
 
         Log.d(TAG, "Audio playback stopped")
+    }
+
+    fun setVolume(volume: Float) {
+        this.volume = volume.coerceIn(0f, 2f)
+        audioTrack?.setVolume(this.volume)
     }
 
     fun write(data: ByteArray) {

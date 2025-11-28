@@ -6,6 +6,7 @@ import '../../domain/models.dart';
 import '../../identity/device_identity.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
+import '../../util/format_utils.dart';
 import '../listener/listener_dashboard.dart';
 import '../monitor/monitor_dashboard.dart';
 
@@ -159,18 +160,13 @@ class _FingerprintChip extends StatelessWidget {
 
   final String fingerprint;
 
-  String get _shortFingerprint {
-    if (fingerprint.length <= 8) return fingerprint;
-    return '${fingerprint.substring(0, 4)}...${fingerprint.substring(fingerprint.length - 4)}';
-  }
-
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.only(right: 4),
       child: ActionChip(
         avatar: const Icon(Icons.fingerprint, size: 18),
-        label: Text(_shortFingerprint),
+        label: Text(shortFingerprint(fingerprint)),
         tooltip: 'Tap to copy fingerprint',
         onPressed: () {
           Clipboard.setData(ClipboardData(text: fingerprint));
@@ -340,6 +336,26 @@ class _MonitorSettingsTab extends ConsumerWidget {
           ),
           const SizedBox(height: 12),
           _SettingsTile(
+            icon: Icons.mic,
+            title: 'Input gain',
+            subtitle: '${settings.audioInputGain}%',
+            trailing: SizedBox(
+              width: 150,
+              child: Slider(
+                value: settings.audioInputGain.toDouble().clamp(0, 200),
+                min: 0,
+                max: 200,
+                divisions: 20,
+                onChanged: (value) {
+                  ref
+                      .read(monitorSettingsProvider.notifier)
+                      .setAudioInputGain(value.round());
+                },
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          _SettingsTile(
             icon: Icons.timer,
             title: 'Min duration',
             subtitle: '${settings.noise.minDurationMs}ms',
@@ -361,58 +377,30 @@ class _MonitorSettingsTab extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: 12),
-          _SettingsTile(
-            icon: Icons.hourglass_empty,
-            title: 'Cooldown',
-            subtitle: '${settings.noise.cooldownSeconds}s between alerts',
-            trailing: DropdownButton<int>(
-              value: settings.noise.cooldownSeconds,
-              underline: const SizedBox.shrink(),
-              onChanged: (value) {
-                if (value != null) {
-                  ref
-                      .read(monitorSettingsProvider.notifier)
-                      .setCooldownSeconds(value);
-                }
-              },
-              items: monitorDropdownItems(
-                selected: settings.noise.cooldownSeconds,
-                baseOptions: kMonitorCooldownOptionsSec,
-                suffix: 's',
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: AppColors.primary.withValues(alpha: 0.05),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: AppColors.primary.withValues(alpha: 0.1),
               ),
             ),
-          ),
-          const SizedBox(height: 12),
-          _SettingsTile(
-            icon: Icons.stream,
-            title: 'Auto-stream on noise',
-            subtitle: settings.autoStreamType == AutoStreamType.none
-                ? 'Disabled'
-                : settings.autoStreamType == AutoStreamType.audio
-                ? 'Audio only'
-                : 'Audio + Video',
-            trailing: DropdownButton<AutoStreamType>(
-              value: settings.autoStreamType,
-              underline: const SizedBox.shrink(),
-              onChanged: (value) {
-                if (value != null) {
-                  ref
-                      .read(monitorSettingsProvider.notifier)
-                      .setAutoStreamType(value);
-                }
-              },
-              items: const [
-                DropdownMenuItem(
-                  value: AutoStreamType.none,
-                  child: Text('Off'),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.info_outline,
+                  size: 18,
+                  color: AppColors.primary.withValues(alpha: 0.7),
                 ),
-                DropdownMenuItem(
-                  value: AutoStreamType.audio,
-                  child: Text('Audio'),
-                ),
-                DropdownMenuItem(
-                  value: AutoStreamType.audioVideo,
-                  child: Text('A+V'),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Cooldown and auto-stream settings are configured by listeners.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: AppColors.muted,
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -515,6 +503,26 @@ class _ListenerSettingsTab extends ConsumerWidget {
                   child: Text('Auto-open'),
                 ),
               ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          _SettingsTile(
+            icon: Icons.volume_up,
+            title: 'Playback volume',
+            subtitle: '${settings.playbackVolume}%',
+            trailing: SizedBox(
+              width: 150,
+              child: Slider(
+                value: settings.playbackVolume.toDouble().clamp(0, 200),
+                min: 0,
+                max: 200,
+                divisions: 20,
+                onChanged: (value) {
+                  ref
+                      .read(listenerSettingsProvider.notifier)
+                      .setPlaybackVolume(value.round());
+                },
+              ),
             ),
           ),
         ],

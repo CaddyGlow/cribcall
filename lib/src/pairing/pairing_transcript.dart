@@ -6,37 +6,37 @@ import '../utils/canonical_json.dart';
 
 class PairingTranscript {
   const PairingTranscript({
-    required this.monitorId,
-    required this.listenerId,
-    required this.listenerPublicKey,
-    required this.listenerCertFingerprint,
-    required this.monitorCertFingerprint,
+    required this.remoteDeviceId,
+    required this.deviceId,
+    required this.publicKey,
+    required this.certFingerprint,
+    required this.remoteCertFingerprint,
     required this.pairingSessionId,
   });
 
-  final String monitorId;
-  final String listenerId;
-  final String listenerPublicKey;
-  final String listenerCertFingerprint;
-  final String monitorCertFingerprint;
+  final String remoteDeviceId;
+  final String deviceId;
+  final String publicKey;
+  final String certFingerprint;
+  final String remoteCertFingerprint;
   final String pairingSessionId;
 
   Map<String, dynamic> toJson() => {
-    'monitorId': monitorId,
-    'listenerId': listenerId,
-    'listenerPublicKey': listenerPublicKey,
-    'listenerCertFingerprint': listenerCertFingerprint,
-    'monitorCertFingerprint': monitorCertFingerprint,
+    'remoteDeviceId': remoteDeviceId,
+    'deviceId': deviceId,
+    'publicKey': publicKey,
+    'certFingerprint': certFingerprint,
+    'remoteCertFingerprint': remoteCertFingerprint,
     'pairingSessionId': pairingSessionId,
   };
 
   factory PairingTranscript.fromJson(Map<String, dynamic> json) {
     return PairingTranscript(
-      monitorId: json['monitorId'] as String,
-      listenerId: json['listenerId'] as String,
-      listenerPublicKey: json['listenerPublicKey'] as String,
-      listenerCertFingerprint: json['listenerCertFingerprint'] as String,
-      monitorCertFingerprint: json['monitorCertFingerprint'] as String,
+      remoteDeviceId: json['remoteDeviceId'] as String,
+      deviceId: json['deviceId'] as String,
+      publicKey: json['publicKey'] as String,
+      certFingerprint: json['certFingerprint'] as String,
+      remoteCertFingerprint: json['remoteCertFingerprint'] as String,
       pairingSessionId: json['pairingSessionId'] as String,
     );
   }

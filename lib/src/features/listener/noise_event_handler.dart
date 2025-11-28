@@ -60,17 +60,17 @@ class _NoiseEventHandlerState extends ConsumerState<NoiseEventHandler> {
   }
 
   void _handleNoiseEvent(NoiseEventData event) {
-    _log('Noise event received: monitorId=${event.monitorId} peak=${event.peakLevel}');
+    _log('Noise event received: remoteDeviceId=${event.remoteDeviceId} peak=${event.peakLevel}');
 
     if (!mounted) return;
 
     // Check per-monitor settings first
     final perMonitorSettingsState = ref.read(perMonitorSettingsProvider).asData?.value;
-    final perMonitorSettings = perMonitorSettingsState?.getOrDefault(event.monitorId);
+    final perMonitorSettings = perMonitorSettingsState?.getOrDefault(event.remoteDeviceId);
 
     // Check if notifications are enabled for this monitor
     if (perMonitorSettings?.notificationsEnabled == false) {
-      _log('Notifications disabled for monitor ${event.monitorId}');
+      _log('Notifications disabled for monitor ${event.remoteDeviceId}');
       return;
     }
 
@@ -106,9 +106,9 @@ class _NoiseEventHandlerState extends ConsumerState<NoiseEventHandler> {
 
     // If not connected, try to connect first
     if (controlClientState.status != ControlClientStatus.connected) {
-      _log('Not connected, attempting to connect to monitor ${event.monitorId}');
+      _log('Not connected, attempting to connect to monitor ${event.remoteDeviceId}');
 
-      final connected = await _connectToMonitor(event.monitorId);
+      final connected = await _connectToMonitor(event.remoteDeviceId);
       if (!connected) {
         _log('Failed to connect, showing notification instead');
         _showNoiseNotification(event);
@@ -159,16 +159,16 @@ class _NoiseEventHandlerState extends ConsumerState<NoiseEventHandler> {
   }
 
   /// Connect to a monitor by ID. Returns true if successful.
-  Future<bool> _connectToMonitor(String monitorId) async {
+  Future<bool> _connectToMonitor(String remoteDeviceId) async {
     try {
       // Get trusted monitor
       final trustedMonitors = await ref.read(trustedMonitorsProvider.future);
       final monitor = trustedMonitors
-          .where((m) => m.monitorId == monitorId)
+          .where((m) => m.remoteDeviceId == remoteDeviceId)
           .firstOrNull;
 
       if (monitor == null) {
-        _log('Monitor $monitorId not in trusted list');
+        _log('Monitor $remoteDeviceId not in trusted list');
         return false;
       }
 
@@ -178,15 +178,15 @@ class _NoiseEventHandlerState extends ConsumerState<NoiseEventHandler> {
       // Try to find monitor via mDNS first
       final advertisements = ref.read(discoveredMonitorsProvider);
       var ad = advertisements
-          .where((a) => a.monitorId == monitorId)
+          .where((a) => a.remoteDeviceId == remoteDeviceId)
           .firstOrNull;
 
       // Fall back to last known address if not discovered
       if (ad == null && monitor.lastKnownIp != null) {
         ad = MdnsAdvertisement(
-          monitorId: monitor.monitorId,
+          remoteDeviceId: monitor.remoteDeviceId,
           monitorName: monitor.monitorName,
-          monitorCertFingerprint: monitor.certFingerprint,
+          certFingerprint: monitor.certFingerprint,
           controlPort: monitor.controlPort,
           pairingPort: monitor.pairingPort,
           version: monitor.serviceVersion,
@@ -196,7 +196,7 @@ class _NoiseEventHandlerState extends ConsumerState<NoiseEventHandler> {
       }
 
       if (ad == null) {
-        _log('No connection info for monitor $monitorId');
+        _log('No connection info for monitor $remoteDeviceId');
         return false;
       }
 

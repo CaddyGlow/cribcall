@@ -81,11 +81,11 @@ class PairingClient {
     );
 
     final requestBody = PairInitRequest(
-      listenerId: listenerIdentity.deviceId,
-      listenerName: listenerName,
-      listenerCertFingerprint: listenerIdentity.certFingerprint,
-      listenerCertificateDer: listenerIdentity.certificateDer,
-      listenerPublicKey: base64Encode(listenerIdentity.publicKeyUncompressed),
+      deviceId: listenerIdentity.deviceId,
+      deviceName: listenerName,
+      certFingerprint: listenerIdentity.certFingerprint,
+      certificateDer: listenerIdentity.certificateDer,
+      publicKey: base64Encode(listenerIdentity.publicKeyUncompressed),
     );
 
     _log('POST $uri');
@@ -288,10 +288,10 @@ class PairingClient {
 
     final requestBody = PairTokenRequest(
       pairingToken: pairingToken,
-      listenerId: listenerIdentity.deviceId,
-      listenerName: listenerName,
-      listenerCertFingerprint: listenerIdentity.certFingerprint,
-      listenerCertificateDer: listenerIdentity.certificateDer,
+      deviceId: listenerIdentity.deviceId,
+      deviceName: listenerName,
+      certFingerprint: listenerIdentity.certFingerprint,
+      certificateDer: listenerIdentity.certificateDer,
     );
 
     _log('POST $uri');
@@ -452,7 +452,7 @@ String _fingerprintHex(List<int> bytes) {
 
 String _shortFingerprint(String fingerprint) {
   if (fingerprint.length <= 12) return fingerprint;
-  return '${fingerprint.substring(0, 6)}...${fingerprint.substring(fingerprint.length - 4)}';
+  return fingerprint.substring(0, 12);
 }
 
 /// Converts 3 bytes to a 6-digit comparison code.

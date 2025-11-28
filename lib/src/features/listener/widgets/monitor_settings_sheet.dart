@@ -1,13 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../domain/models.dart';
+import '../../../state/app_state.dart';
 import '../../../state/per_monitor_settings.dart';
 import '../../../theme.dart';
 
 /// Shows the per-monitor settings bottom sheet.
 void showMonitorSettingsSheet(
   BuildContext context, {
-  required String monitorId,
+  required String remoteDeviceId,
   required String monitorName,
 }) {
   showModalBottomSheet(
@@ -15,7 +17,7 @@ void showMonitorSettingsSheet(
     showDragHandle: true,
     isScrollControlled: true,
     builder: (context) => MonitorSettingsSheet(
-      monitorId: monitorId,
+      remoteDeviceId: remoteDeviceId,
       monitorName: monitorName,
     ),
   );
@@ -25,18 +27,18 @@ void showMonitorSettingsSheet(
 class MonitorSettingsSheet extends ConsumerWidget {
   const MonitorSettingsSheet({
     super.key,
-    required this.monitorId,
+    required this.remoteDeviceId,
     required this.monitorName,
   });
 
-  final String monitorId;
+  final String remoteDeviceId;
   final String monitorName;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final settingsAsync = ref.watch(perMonitorSettingsProvider);
-    final settings = settingsAsync.asData?.value.getOrDefault(monitorId) ??
-        PerMonitorSettings.defaults(monitorId);
+    final settings = settingsAsync.asData?.value.getOrDefault(remoteDeviceId) ??
+        PerMonitorSettings.defaults(remoteDeviceId);
 
     return DraggableScrollableSheet(
       initialChildSize: 0.45,
@@ -101,7 +103,7 @@ class MonitorSettingsSheet extends ConsumerWidget {
                   onChanged: (value) {
                     ref
                         .read(perMonitorSettingsProvider.notifier)
-                        .setNotificationsEnabled(monitorId, value);
+                        .setNotificationsEnabled(remoteDeviceId, value);
                   },
                 ),
               ),
@@ -117,7 +119,7 @@ class MonitorSettingsSheet extends ConsumerWidget {
                   onChanged: (value) {
                     ref
                         .read(perMonitorSettingsProvider.notifier)
-                        .setAutoPlayOnNoise(monitorId, value);
+                        .setAutoPlayOnNoise(remoteDeviceId, value);
                   },
                 ),
               ),
@@ -135,7 +137,7 @@ class MonitorSettingsSheet extends ConsumerWidget {
                       if (value != null) {
                         ref
                             .read(perMonitorSettingsProvider.notifier)
-                            .setAutoPlayDuration(monitorId, value);
+                            .setAutoPlayDuration(remoteDeviceId, value);
                       }
                     },
                     items: const [
@@ -147,6 +149,90 @@ class MonitorSettingsSheet extends ConsumerWidget {
                   ),
                 ),
               ],
+
+              const SizedBox(height: 24),
+
+              // Noise preferences header
+              Text(
+                'Noise detection overrides',
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Override global settings for this monitor only',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: AppColors.muted,
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              // Threshold override
+              _buildNoisePreferenceOverride(
+                context,
+                ref,
+                title: 'Sensitivity',
+                subtitle: 'Noise threshold for this monitor',
+                currentOverride: settings.thresholdOverride,
+                globalDefault: ref
+                        .watch(listenerSettingsProvider)
+                        .asData
+                        ?.value
+                        .noisePreferences
+                        .threshold ??
+                    50,
+                options: [20, 30, 40, 50, 60, 70, 80, 90],
+                formatValue: (v) => '$v%',
+                onChanged: (value) {
+                  ref
+                      .read(perMonitorSettingsProvider.notifier)
+                      .setThresholdOverride(remoteDeviceId, value);
+                  // Refresh subscription with new preferences
+                  ref
+                      .read(controlClientProvider.notifier)
+                      .refreshNoiseSubscription();
+                },
+              ),
+
+              const SizedBox(height: 12),
+
+              // Cooldown override
+              _buildNoisePreferenceOverride(
+                context,
+                ref,
+                title: 'Cooldown',
+                subtitle: 'Seconds between alerts',
+                currentOverride: settings.cooldownSecondsOverride,
+                globalDefault: ref
+                        .watch(listenerSettingsProvider)
+                        .asData
+                        ?.value
+                        .noisePreferences
+                        .cooldownSeconds ??
+                    8,
+                options: [3, 5, 8, 10, 15, 30],
+                formatValue: (v) => '${v}s',
+                onChanged: (value) {
+                  ref
+                      .read(perMonitorSettingsProvider.notifier)
+                      .setCooldownSecondsOverride(remoteDeviceId, value);
+                  // Refresh subscription with new preferences
+                  ref
+                      .read(controlClientProvider.notifier)
+                      .refreshNoiseSubscription();
+                },
+              ),
+
+              const SizedBox(height: 12),
+
+              // Auto-stream type override
+              _buildAutoStreamTypeOverride(
+                context,
+                ref,
+                settings: settings,
+                remoteDeviceId: remoteDeviceId,
+              ),
 
               const SizedBox(height: 24),
 
@@ -194,6 +280,146 @@ class MonitorSettingsSheet extends ConsumerWidget {
           ),
         );
       },
+    );
+  }
+
+  Widget _buildNoisePreferenceOverride(
+    BuildContext context,
+    WidgetRef ref, {
+    required String title,
+    required String subtitle,
+    required int? currentOverride,
+    required int globalDefault,
+    required List<int> options,
+    required String Function(int) formatValue,
+    required void Function(int?) onChanged,
+  }) {
+    final hasOverride = currentOverride != null;
+    final displayValue = currentOverride ?? globalDefault;
+
+    return _SettingsCard(
+      title: title,
+      subtitle: hasOverride
+          ? '$subtitle (override: ${formatValue(displayValue)})'
+          : '$subtitle (global: ${formatValue(globalDefault)})',
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (hasOverride)
+            IconButton(
+              icon: const Icon(Icons.close, size: 18),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              onPressed: () {
+                onChanged(null);
+                // Note: onChanged should call refreshNoiseSubscription
+              },
+              tooltip: 'Clear override',
+            ),
+          DropdownButton<int>(
+            value: displayValue,
+            underline: const SizedBox.shrink(),
+            onChanged: (value) {
+              if (value != null) {
+                onChanged(value);
+                // Note: onChanged should call refreshNoiseSubscription
+              }
+            },
+            items: options
+                .map((v) => DropdownMenuItem(
+                      value: v,
+                      child: Text(formatValue(v)),
+                    ))
+                .toList(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutoStreamTypeOverride(
+    BuildContext context,
+    WidgetRef ref, {
+    required PerMonitorSettings settings,
+    required String remoteDeviceId,
+  }) {
+    final globalDefault = ref
+            .watch(listenerSettingsProvider)
+            .asData
+            ?.value
+            .noisePreferences
+            .autoStreamType ??
+        AutoStreamType.audio;
+
+    final hasOverride = settings.autoStreamTypeOverride != null;
+    final displayValue = settings.autoStreamTypeOverride ?? globalDefault;
+
+    String formatType(AutoStreamType type) {
+      switch (type) {
+        case AutoStreamType.none:
+          return 'Off';
+        case AutoStreamType.audio:
+          return 'Audio';
+        case AutoStreamType.audioVideo:
+          return 'A+V';
+      }
+    }
+
+    return _SettingsCard(
+      title: 'Auto-stream on noise',
+      subtitle: hasOverride
+          ? 'Override: ${formatType(displayValue)}'
+          : 'Global: ${formatType(globalDefault)}',
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (hasOverride)
+            IconButton(
+              icon: const Icon(Icons.close, size: 18),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              onPressed: () {
+                ref
+                    .read(perMonitorSettingsProvider.notifier)
+                    .setAutoStreamTypeOverride(remoteDeviceId, null);
+                // Refresh subscription with new preferences
+                ref
+                    .read(controlClientProvider.notifier)
+                    .refreshNoiseSubscription();
+              },
+              tooltip: 'Clear override',
+            ),
+          DropdownButton<AutoStreamType>(
+            value: displayValue,
+            underline: const SizedBox.shrink(),
+            onChanged: (value) {
+              if (value != null) {
+                ref
+                    .read(perMonitorSettingsProvider.notifier)
+                    .setAutoStreamTypeOverride(remoteDeviceId, value);
+                // Refresh subscription with new preferences
+                ref
+                    .read(controlClientProvider.notifier)
+                    .refreshNoiseSubscription();
+              }
+            },
+            items: const [
+              DropdownMenuItem(
+                value: AutoStreamType.none,
+                child: Text('Off'),
+              ),
+              DropdownMenuItem(
+                value: AutoStreamType.audio,
+                child: Text('Audio'),
+              ),
+              DropdownMenuItem(
+                value: AutoStreamType.audioVideo,
+                child: Text('A+V'),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }

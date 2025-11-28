@@ -46,10 +46,11 @@ class AudioCaptureService : Service() {
         const val CHANNEL_ID = "cribcall_monitoring"
         const val NOTIFICATION_ID = 1001
         const val ACTION_START = "com.cribcall.START_CAPTURE"
+        const val ACTION_ADVERTISE_ONLY = "com.cribcall.ADVERTISE_ONLY"
         const val ACTION_STOP = "com.cribcall.STOP_CAPTURE"
 
         // mDNS extras
-        const val EXTRA_MONITOR_ID = "monitorId"
+        const val EXTRA_REMOTE_DEVICE_ID = "remoteDeviceId"
         const val EXTRA_MONITOR_NAME = "monitorName"
         const val EXTRA_MONITOR_CERT_FINGERPRINT = "monitorCertFingerprint"
         const val EXTRA_CONTROL_PORT = "controlPort"
@@ -76,20 +77,40 @@ class AudioCaptureService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 val monitorName = intent.getStringExtra(EXTRA_MONITOR_NAME) ?: "Monitor"
-                startForegroundWithNotification(monitorName)
+                startForegroundWithNotification(monitorName, useMicServiceType = true)
                 startAudioCapture()
 
                 // Start mDNS advertising if parameters provided
-                val monitorId = intent.getStringExtra(EXTRA_MONITOR_ID)
-                if (monitorId != null) {
+                val remoteDeviceId = intent.getStringExtra(EXTRA_REMOTE_DEVICE_ID)
+                if (remoteDeviceId != null) {
                     startMdnsAdvertise(
-                        monitorId = monitorId,
+                        remoteDeviceId = remoteDeviceId,
                         monitorName = monitorName,
                         monitorCertFingerprint = intent.getStringExtra(EXTRA_MONITOR_CERT_FINGERPRINT) ?: "",
                         controlPort = intent.getIntExtra(EXTRA_CONTROL_PORT, 48080),
                         pairingPort = intent.getIntExtra(EXTRA_PAIRING_PORT, 48081),
                         version = intent.getIntExtra(EXTRA_VERSION, 1)
                     )
+                } else {
+                    Log.w(mdnsLogTag, "Missing remoteDeviceId for ACTION_START, skipping mDNS advertise")
+                }
+            }
+            ACTION_ADVERTISE_ONLY -> {
+                val monitorName = intent.getStringExtra(EXTRA_MONITOR_NAME) ?: "Monitor"
+                startForegroundWithNotification(monitorName, useMicServiceType = false)
+
+                val remoteDeviceId = intent.getStringExtra(EXTRA_REMOTE_DEVICE_ID)
+                if (remoteDeviceId != null) {
+                    startMdnsAdvertise(
+                        remoteDeviceId = remoteDeviceId,
+                        monitorName = monitorName,
+                        monitorCertFingerprint = intent.getStringExtra(EXTRA_MONITOR_CERT_FINGERPRINT) ?: "",
+                        controlPort = intent.getIntExtra(EXTRA_CONTROL_PORT, 48080),
+                        pairingPort = intent.getIntExtra(EXTRA_PAIRING_PORT, 48081),
+                        version = intent.getIntExtra(EXTRA_VERSION, 1)
+                    )
+                } else {
+                    Log.w(mdnsLogTag, "Missing remoteDeviceId for ACTION_ADVERTISE_ONLY, skipping mDNS advertise")
                 }
             }
             ACTION_STOP -> {
@@ -125,7 +146,10 @@ class AudioCaptureService : Service() {
         }
     }
 
-    private fun startForegroundWithNotification(monitorName: String) {
+    private fun startForegroundWithNotification(
+        monitorName: String,
+        useMicServiceType: Boolean,
+    ) {
         val notificationIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
@@ -169,11 +193,12 @@ class AudioCaptureService : Service() {
         }.build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
+            val serviceType = if (useMicServiceType) {
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            )
+            } else {
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            }
+            startForeground(NOTIFICATION_ID, notification, serviceType)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
@@ -270,7 +295,7 @@ class AudioCaptureService : Service() {
 
     // mDNS advertising methods
     private fun startMdnsAdvertise(
-        monitorId: String,
+        remoteDeviceId: String,
         monitorName: String,
         monitorCertFingerprint: String,
         controlPort: Int,
@@ -281,10 +306,10 @@ class AudioCaptureService : Service() {
         stopMdnsAdvertise() // Stop any existing registration
 
         val info = NsdServiceInfo().apply {
-            serviceName = "$monitorName-$monitorId"
+            serviceName = "$monitorName-$remoteDeviceId"
             serviceType = this@AudioCaptureService.serviceType
             port = controlPort
-            setAttribute("monitorId", monitorId)
+            setAttribute("remoteDeviceId", remoteDeviceId)
             setAttribute("monitorName", monitorName)
             setAttribute("monitorCertFingerprint", monitorCertFingerprint)
             setAttribute("controlPort", controlPort.toString())
@@ -292,7 +317,7 @@ class AudioCaptureService : Service() {
             setAttribute("version", version.toString())
         }
 
-        Log.i(mdnsLogTag, "Starting NSD advertise name=${info.serviceName} port=${info.port} monitorId=$monitorId")
+        Log.i(mdnsLogTag, "Starting NSD advertise name=${info.serviceName} port=${info.port} remoteDeviceId=$remoteDeviceId")
 
         val listener = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(serviceInfo: NsdServiceInfo?) {

@@ -7,6 +7,7 @@ import '../../domain/models.dart';
 import '../../pairing/pin_pairing_controller.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
+import '../../util/format_utils.dart';
 
 void _logPairingPage(String message) {
   developer.log(message, name: 'listener_pairing_page');
@@ -40,10 +41,10 @@ class _ListenerPinPageState extends ConsumerState<ListenerPinPage> {
     super.initState();
     _pairingNotifier = ref.read(pairingSessionProvider.notifier);
     _logPairingPage(
-      'Pairing page opened for monitor=${widget.advertisement.monitorId} '
+      'Pairing page opened for remoteDeviceId=${widget.advertisement.remoteDeviceId} '
       'name=${widget.advertisement.monitorName} '
       'ip=${widget.advertisement.ip ?? 'unknown'} '
-      'fingerprint=${_shortFingerprint(widget.advertisement.monitorCertFingerprint)}',
+      'fingerprint=${shortFingerprint(widget.advertisement.certFingerprint)}',
     );
     _initiatePairing();
   }
@@ -171,7 +172,7 @@ class _ListenerPinPageState extends ConsumerState<ListenerPinPage> {
           ),
           const SizedBox(height: 8),
           Text(
-            '${widget.advertisement.monitorName} - ${_shortFingerprint(widget.advertisement.monitorCertFingerprint)}',
+            '${widget.advertisement.monitorName} - ${shortFingerprint(widget.advertisement.certFingerprint)}',
             style: Theme.of(context)
                 .textTheme
                 .bodyMedium
@@ -291,10 +292,5 @@ class _ListenerPinPageState extends ConsumerState<ListenerPinPage> {
         ],
       ),
     );
-  }
-
-  String _shortFingerprint(String fingerprint) {
-    if (fingerprint.length <= 12) return fingerprint;
-    return fingerprint.substring(0, 12);
   }
 }

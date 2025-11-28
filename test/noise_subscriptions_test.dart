@@ -14,7 +14,7 @@ void main() {
     late Directory tempDir;
     late ProviderContainer container;
     const peer = TrustedPeer(
-      deviceId: 'listener-1',
+      remoteDeviceId: 'listener-1',
       name: 'Listener One',
       certFingerprint: 'abc123fingerprint',
       addedAtEpochSec: 0,
@@ -59,7 +59,7 @@ void main() {
       expect(subs.single.fcmToken, 'token-2');
       expect(
         subs.single.subscriptionId,
-        noiseSubscriptionId(peer.deviceId, 'token-2'),
+        noiseSubscriptionId(peer.remoteDeviceId, 'token-2'),
       );
       expect(second.subscription.subscriptionId, subs.single.subscriptionId);
     });

@@ -17,8 +17,8 @@ void main() {
       identity: identity,
       monitorName: 'Nursery',
     );
-    expect(qr.monitorId, 'device-123');
-    expect(qr.monitorCertFingerprint, identity.certFingerprint);
+    expect(qr.remoteDeviceId, 'device-123');
+    expect(qr.certFingerprint, identity.certFingerprint);
     expect(qr.service.controlPort, kControlDefaultPort);
     expect(qr.service.pairingPort, kPairingDefaultPort);
     expect(qr.service.transport, kTransportHttpWs);
@@ -30,7 +30,7 @@ void main() {
       controlPort: kControlDefaultPort,
       pairingPort: kPairingDefaultPort,
     );
-    expect(mdns.monitorCertFingerprint, identity.certFingerprint);
+    expect(mdns.certFingerprint, identity.certFingerprint);
     expect(mdns.controlPort, kControlDefaultPort);
     expect(mdns.pairingPort, kPairingDefaultPort);
     expect(mdns.transport, kTransportHttpWs);
@@ -50,7 +50,7 @@ void main() {
       monitorName: 'Nursery',
       ips: ['192.168.1.100', '10.0.0.5'],
     );
-    expect(qr.monitorId, 'device-123');
+    expect(qr.remoteDeviceId, 'device-123');
     expect(qr.ips, equals(['192.168.1.100', '10.0.0.5']));
   });
 

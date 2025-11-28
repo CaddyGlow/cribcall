@@ -42,52 +42,52 @@ abstract class ControlMessage {
 
 class PairRequestMessage extends ControlMessage {
   PairRequestMessage({
-    required this.listenerId,
-    required this.listenerName,
-    required this.listenerPublicKey,
-    required this.listenerCertFingerprint,
+    required this.deviceId,
+    required this.deviceName,
+    required this.publicKey,
+    required this.certFingerprint,
   });
 
-  final String listenerId;
-  final String listenerName;
-  final String listenerPublicKey;
-  final String listenerCertFingerprint;
+  final String deviceId;
+  final String deviceName;
+  final String publicKey;
+  final String certFingerprint;
 
   @override
   ControlMessageType get type => ControlMessageType.pairRequest;
 
   factory PairRequestMessage.fromJson(Map<String, dynamic> json) {
     return PairRequestMessage(
-      listenerId: json['listenerId'] as String,
-      listenerName: json['listenerName'] as String,
-      listenerPublicKey: json['listenerPublicKey'] as String,
-      listenerCertFingerprint: json['listenerCertFingerprint'] as String,
+      deviceId: json['deviceId'] as String,
+      deviceName: json['deviceName'] as String,
+      publicKey: json['publicKey'] as String,
+      certFingerprint: json['certFingerprint'] as String,
     );
   }
 
   @override
   Map<String, dynamic> toJson() => {
-    'listenerId': listenerId,
-    'listenerName': listenerName,
-    'listenerPublicKey': listenerPublicKey,
-    'listenerCertFingerprint': listenerCertFingerprint,
+    'deviceId': deviceId,
+    'deviceName': deviceName,
+    'publicKey': publicKey,
+    'certFingerprint': certFingerprint,
   };
 }
 
 class PairAcceptedMessage extends ControlMessage {
-  PairAcceptedMessage({required this.monitorId});
+  PairAcceptedMessage({required this.remoteDeviceId});
 
-  final String monitorId;
+  final String remoteDeviceId;
 
   @override
   ControlMessageType get type => ControlMessageType.pairAccepted;
 
   factory PairAcceptedMessage.fromJson(Map<String, dynamic> json) {
-    return PairAcceptedMessage(monitorId: json['monitorId'] as String);
+    return PairAcceptedMessage(remoteDeviceId: json['remoteDeviceId'] as String);
   }
 
   @override
-  Map<String, dynamic> toJson() => {'monitorId': monitorId};
+  Map<String, dynamic> toJson() => {'remoteDeviceId': remoteDeviceId};
 }
 
 class PairRejectedMessage extends ControlMessage {
@@ -108,35 +108,35 @@ class PairRejectedMessage extends ControlMessage {
 
 class PinPairingInitMessage extends ControlMessage {
   PinPairingInitMessage({
-    required this.listenerId,
-    required this.listenerName,
+    required this.deviceId,
+    required this.deviceName,
     required this.protocolVersion,
-    required this.listenerCertFingerprint,
+    required this.certFingerprint,
   });
 
-  final String listenerId;
-  final String listenerName;
+  final String deviceId;
+  final String deviceName;
   final int protocolVersion;
-  final String listenerCertFingerprint;
+  final String certFingerprint;
 
   @override
   ControlMessageType get type => ControlMessageType.pinPairingInit;
 
   factory PinPairingInitMessage.fromJson(Map<String, dynamic> json) {
     return PinPairingInitMessage(
-      listenerId: json['listenerId'] as String,
-      listenerName: json['listenerName'] as String,
+      deviceId: json['deviceId'] as String,
+      deviceName: json['deviceName'] as String,
       protocolVersion: json['protocolVersion'] as int,
-      listenerCertFingerprint: json['listenerCertFingerprint'] as String,
+      certFingerprint: json['certFingerprint'] as String,
     );
   }
 
   @override
   Map<String, dynamic> toJson() => {
-    'listenerId': listenerId,
-    'listenerName': listenerName,
+    'deviceId': deviceId,
+    'deviceName': deviceName,
     'protocolVersion': protocolVersion,
-    'listenerCertFingerprint': listenerCertFingerprint,
+    'certFingerprint': certFingerprint,
   };
 }
 
@@ -210,12 +210,12 @@ class PinSubmitMessage extends ControlMessage {
 
 class NoiseEventMessage extends ControlMessage {
   NoiseEventMessage({
-    required this.monitorId,
+    required this.deviceId,
     required this.timestamp,
     required this.peakLevel,
   });
 
-  final String monitorId;
+  final String deviceId;
   final int timestamp;
   final int peakLevel;
 
@@ -224,7 +224,7 @@ class NoiseEventMessage extends ControlMessage {
 
   factory NoiseEventMessage.fromJson(Map<String, dynamic> json) {
     return NoiseEventMessage(
-      monitorId: json['monitorId'] as String,
+      deviceId: json['deviceId'] as String,
       timestamp: json['timestamp'] as int,
       peakLevel: json['peakLevel'] as int,
     );
@@ -232,7 +232,7 @@ class NoiseEventMessage extends ControlMessage {
 
   @override
   Map<String, dynamic> toJson() => {
-    'monitorId': monitorId,
+    'deviceId': deviceId,
     'timestamp': timestamp,
     'peakLevel': peakLevel,
   };
