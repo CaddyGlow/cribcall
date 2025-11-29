@@ -244,31 +244,33 @@ class ControlWebSocketServer {
     private func getClientFingerprint(connection: NWConnection) -> String? {
         // Get TLS metadata
         guard let tlsMetadata = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata else {
+            os_log("No TLS metadata available for connection", log: log, type: .debug)
             return nil
         }
 
         // Access the security protocol metadata
         let secMetadata = tlsMetadata.securityProtocolMetadata
 
-        // Get peer certificate chain
-        var peerTrust: SecTrust?
+        // Extract client certificate fingerprint from peer certificate chain
+        // Note: sec_protocol_metadata_access_peer_certificate_chain calls the handler synchronously
+        var fingerprint: String? = nil
+
         sec_protocol_metadata_access_peer_certificate_chain(secMetadata) { certChain in
             // Get the first certificate (client cert)
-            if sec_certificate_chain_get_count(certChain) > 0,
-               let certRef = sec_certificate_chain_get_certificate(certChain, 0) {
-                let cert = sec_certificate_copy_ref(certRef).takeRetainedValue()
+            let certCount = sec_certificate_chain_get_count(certChain)
+            guard certCount > 0,
+                  let certRef = sec_certificate_chain_get_certificate(certChain, 0) else {
+                return
+            }
 
-                if let certData = SecCertificateCopyData(cert) as Data? {
-                    let fingerprint = MonitorTlsManager.fingerprintHex(certData)
-                    // Store in thread-local or use callback
-                    // For now, we'll need a different approach
-                }
+            let cert = sec_certificate_copy_ref(certRef).takeRetainedValue()
+
+            if let certData = SecCertificateCopyData(cert) as Data? {
+                fingerprint = MonitorTlsManager.fingerprintHex(certData)
             }
         }
 
-        // Simplified: we already validated in the TLS verify block
-        // Return a placeholder that indicates validation passed
-        return nil
+        return fingerprint
     }
 
     // MARK: - Request Routing

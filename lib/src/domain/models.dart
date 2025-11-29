@@ -7,6 +7,18 @@ enum DeviceRole { monitor, listener }
 
 enum AutoStreamType { none, audio, audioVideo }
 
+/// Notification delivery method for noise events.
+enum NotificationType {
+  /// Firebase Cloud Messaging (Android/iOS).
+  fcm,
+
+  /// HTTP POST to a webhook URL (Linux/desktop).
+  webhook,
+
+  /// Apple Push Notification Service (iOS native, future use).
+  apns,
+}
+
 enum ListenerDefaultAction { notify, autoOpenStream }
 
 class NoiseSettings {

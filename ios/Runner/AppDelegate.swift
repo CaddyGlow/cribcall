@@ -235,22 +235,30 @@ import os.log
 
   private func startAdvertise(args: [String: Any]) {
     stopMdns()
-    let port = args["servicePort"] as? Int ?? 48080
-    let name = "\(args["monitorName"] as? String ?? "monitor")-\(args["deviceId"] as? String ?? "id")"
+    let controlPort = args["servicePort"] as? Int ?? 48080
+    let pairingPort = args["pairingPort"] as? Int ?? 48081
+    let remoteDeviceId = args["deviceId"] as? String ?? ""
+    let monitorName = args["monitorName"] as? String ?? "monitor"
+    let name = "\(monitorName)-\(remoteDeviceId)"
     os_log(
-      "Starting mDNS advertise name=%{public}@ port=%{public}d deviceId=%{public}@",
+      "Starting mDNS advertise name=%{public}@ controlPort=%{public}d remoteDeviceId=%{public}@",
       log: log,
       type: .info,
       name,
-      port,
-      args["deviceId"] as? String ?? ""
+      controlPort,
+      remoteDeviceId
     )
-    advertiser = NetService(domain: "local.", type: serviceType, name: name, port: Int32(port))
+    advertiser = NetService(domain: "local.", type: serviceType, name: name, port: Int32(controlPort))
+    // TXT record keys aligned with Android: remoteDeviceId, monitorName, monitorCertFingerprint,
+    // controlPort, pairingPort, version, transport
     let txt: [String: Data] = [
-      "deviceId": (args["deviceId"] as? String ?? "").data(using: .utf8) ?? Data(),
-      "monitorName": (args["monitorName"] as? String ?? "").data(using: .utf8) ?? Data(),
-      "certFingerprint": (args["certFingerprint"] as? String ?? "").data(using: .utf8) ?? Data(),
-      "version": "\(args["version"] ?? "1")".data(using: .utf8) ?? Data(),
+      "remoteDeviceId": remoteDeviceId.data(using: .utf8) ?? Data(),
+      "monitorName": monitorName.data(using: .utf8) ?? Data(),
+      "monitorCertFingerprint": (args["certFingerprint"] as? String ?? "").data(using: .utf8) ?? Data(),
+      "controlPort": "\(controlPort)".data(using: .utf8) ?? Data(),
+      "pairingPort": "\(pairingPort)".data(using: .utf8) ?? Data(),
+      "version": "\(args["version"] ?? 1)".data(using: .utf8) ?? Data(),
+      "transport": "http-ws".data(using: .utf8) ?? Data(),
     ]
     advertiser?.setTXTRecord(NetService.data(fromTXTRecord: txt))
     advertiser?.publish()
@@ -356,22 +364,36 @@ extension AppDelegate: NetServiceBrowserDelegate, NetServiceDelegate {
       }
       if ipString != nil { break }
     }
+    // Read TXT keys aligned with Android: remoteDeviceId, monitorName, monitorCertFingerprint,
+    // controlPort, pairingPort, version, transport
+    let remoteDeviceId = decode("remoteDeviceId")
+    let monitorName = decode("monitorName").isEmpty ? sender.name : decode("monitorName")
+    let controlPort = Int(decode("controlPort")) ?? sender.port
+    let pairingPort = Int(decode("pairingPort")) ?? 48081
+    let version = Int(decode("version")) ?? 1
+    let transport = decode("transport").isEmpty ? "http-ws" : decode("transport")
+    let certFingerprint = decode("monitorCertFingerprint")
+
     let payload: [String: Any?] = [
-      "remoteDeviceId": decode("deviceId"),
-      "monitorName": decode("monitorName").isEmpty ? sender.name : decode("monitorName"),
-      "certFingerprint": decode("certFingerprint"),
-      "servicePort": sender.port,
-      "version": Int(decode("version")) ?? 1,
+      "remoteDeviceId": remoteDeviceId,
+      "monitorName": monitorName,
+      "certFingerprint": certFingerprint,
+      "controlPort": controlPort,
+      "pairingPort": pairingPort,
+      "version": version,
+      "transport": transport,
       "ip": ipString,
     ]
     mdnsEventSink?(payload)
     os_log(
-      "Resolved service remoteDeviceId=%{public}@ ip=%{public}@ port=%{public}d",
+      "Resolved service remoteDeviceId=%{public}@ ip=%{public}@ controlPort=%{public}d pairingPort=%{public}d transport=%{public}@",
       log: log,
       type: .info,
-      decode("deviceId"),
+      remoteDeviceId,
       ipString ?? "unknown",
-      sender.port
+      controlPort,
+      pairingPort,
+      transport
     )
   }
 }

@@ -15,6 +15,8 @@ class NoiseSubscription {
     required this.expiresAtEpochSec,
     required this.subscriptionId,
     required this.createdAtEpochSec,
+    this.notificationType,
+    this.webhookUrl,
     this.threshold,
     this.cooldownSeconds,
     this.autoStreamType,
@@ -23,11 +25,19 @@ class NoiseSubscription {
 
   final String deviceId;
   final String certFingerprint;
+
+  /// Push token (FCM token, or placeholder for webhook/ws-only).
   final String fcmToken;
   final String platform;
   final int expiresAtEpochSec;
   final int createdAtEpochSec;
   final String subscriptionId;
+
+  /// Notification delivery method. Null defaults to FCM for backward compat.
+  final NotificationType? notificationType;
+
+  /// Webhook URL for HTTP POST delivery (required when notificationType=webhook).
+  final String? webhookUrl;
 
   /// Listener's noise threshold preference (0-100). Null means use monitor default.
   final int? threshold;
@@ -41,8 +51,17 @@ class NoiseSubscription {
   /// Listener's auto-stream duration preference. Null means use monitor default.
   final int? autoStreamDurationSec;
 
+  /// Effective notification type with backward-compatible default.
+  NotificationType get effectiveNotificationType =>
+      notificationType ?? NotificationType.fcm;
+
+  /// Whether this subscription uses webhook delivery.
+  bool get isWebhook => effectiveNotificationType == NotificationType.webhook;
+
   /// Whether this subscription can only receive events over WebSocket.
-  bool get isWebsocketOnly => isWebsocketOnlyNoiseToken(fcmToken);
+  /// WebSocket-only tokens without webhook URLs cannot receive push.
+  bool get isWebsocketOnly =>
+      isWebsocketOnlyNoiseToken(fcmToken) && !isWebhook;
 
   /// Get effective threshold, with fallback to default.
   int get effectiveThreshold =>
@@ -65,6 +84,8 @@ class NoiseSubscription {
     String? platform,
     int? expiresAtEpochSec,
     int? createdAtEpochSec,
+    NotificationType? notificationType,
+    String? webhookUrl,
     int? threshold,
     int? cooldownSeconds,
     AutoStreamType? autoStreamType,
@@ -78,6 +99,8 @@ class NoiseSubscription {
       expiresAtEpochSec: expiresAtEpochSec ?? this.expiresAtEpochSec,
       createdAtEpochSec: createdAtEpochSec ?? this.createdAtEpochSec,
       subscriptionId: subscriptionId,
+      notificationType: notificationType ?? this.notificationType,
+      webhookUrl: webhookUrl ?? this.webhookUrl,
       threshold: threshold ?? this.threshold,
       cooldownSeconds: cooldownSeconds ?? this.cooldownSeconds,
       autoStreamType: autoStreamType ?? this.autoStreamType,
