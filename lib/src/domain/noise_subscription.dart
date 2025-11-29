@@ -120,6 +120,8 @@ class NoiseSubscription {
     'expiresAtEpochSec': expiresAtEpochSec,
     'createdAtEpochSec': createdAtEpochSec,
     'subscriptionId': subscriptionId,
+    if (notificationType != null) 'notificationType': notificationType!.name,
+    if (webhookUrl != null) 'webhookUrl': webhookUrl,
     if (threshold != null) 'threshold': threshold,
     if (cooldownSeconds != null) 'cooldownSeconds': cooldownSeconds,
     if (autoStreamType != null) 'autoStreamType': autoStreamType!.name,
@@ -128,6 +130,7 @@ class NoiseSubscription {
   };
 
   factory NoiseSubscription.fromJson(Map<String, dynamic> json) {
+    final notificationTypeName = json['notificationType'] as String?;
     final autoStreamTypeName = json['autoStreamType'] as String?;
     return NoiseSubscription(
       deviceId: json['deviceId'] as String,
@@ -137,6 +140,10 @@ class NoiseSubscription {
       expiresAtEpochSec: json['expiresAtEpochSec'] as int,
       createdAtEpochSec: json['createdAtEpochSec'] as int,
       subscriptionId: json['subscriptionId'] as String,
+      notificationType: notificationTypeName != null
+          ? NotificationType.values.byName(notificationTypeName)
+          : null,
+      webhookUrl: json['webhookUrl'] as String?,
       threshold: json['threshold'] as int?,
       cooldownSeconds: json['cooldownSeconds'] as int?,
       autoStreamType: autoStreamTypeName != null
@@ -157,3 +164,15 @@ String websocketOnlyNoiseToken(String deviceId) =>
 
 bool isWebsocketOnlyNoiseToken(String token) =>
     token.startsWith(kWebsocketOnlyNoiseTokenPrefix);
+
+/// Validates a webhook URL. Returns null if valid, error message if invalid.
+String? validateWebhookUrl(String url) {
+  final uri = Uri.tryParse(url);
+  if (uri == null) return 'Invalid URL format';
+  if (uri.scheme != 'https') return 'Webhook URL must use HTTPS';
+  if (uri.host.isEmpty) return 'Webhook URL must have a host';
+  return null;
+}
+
+/// Returns true if the URL is a valid HTTPS webhook URL.
+bool isValidWebhookUrl(String url) => validateWebhookUrl(url) == null;
