@@ -4,30 +4,48 @@ import os.log
 
 @main
 @objc class AppDelegate: FlutterAppDelegate {
+  // MARK: - mDNS
   private var mdnsEventSink: FlutterEventSink?
   private let serviceType = "_baby-monitor._tcp."
   private var advertiser: NetService?
   private var browser: NetServiceBrowser?
   private var discovered: [NetService] = []
-  private let log = OSLog(subsystem: "com.cribcall.cribcall", category: "mdns")
+  private let log = OSLog(subsystem: "com.cribcall.cribcall", category: "app_delegate")
+
+  // MARK: - Monitor Server
+  private var monitorEventSink: FlutterEventSink?
 
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     let controller: FlutterViewController = window?.rootViewController as! FlutterViewController
-    let mdnsChannel = FlutterMethodChannel(name: "cribcall/mdns", binaryMessenger: controller.binaryMessenger)
-    let mdnsEvents = FlutterEventChannel(name: "cribcall/mdns_events", binaryMessenger: controller.binaryMessenger)
+    let messenger = controller.binaryMessenger
 
-    mdnsChannel.setMethodCallHandler { call, result in
+    // Setup all platform channels
+    setupMdnsChannels(messenger: messenger)
+    setupAudioChannels(messenger: messenger)
+    setupMonitorServerChannels(messenger: messenger)
+
+    GeneratedPluginRegistrant.register(with: self)
+    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  // MARK: - mDNS Channels
+
+  private func setupMdnsChannels(messenger: FlutterBinaryMessenger) {
+    let mdnsChannel = FlutterMethodChannel(name: "cribcall/mdns", binaryMessenger: messenger)
+    let mdnsEvents = FlutterEventChannel(name: "cribcall/mdns_events", binaryMessenger: messenger)
+
+    mdnsChannel.setMethodCallHandler { [weak self] call, result in
       switch call.method {
       case "startAdvertise":
         if let args = call.arguments as? [String: Any] {
-          self.startAdvertise(args: args)
+          self?.startAdvertise(args: args)
         }
         result(nil)
       case "stop":
-        self.stopMdns()
+        self?.stopMdns()
         result(nil)
       default:
         result(FlutterMethodNotImplemented)
@@ -35,10 +53,185 @@ import os.log
     }
 
     mdnsEvents.setStreamHandler(MdnsStreamHandler())
-
-    GeneratedPluginRegistrant.register(with: self)
-    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
+
+  // MARK: - Audio Channels
+
+  private func setupAudioChannels(messenger: FlutterBinaryMessenger) {
+    let audioChannel = FlutterMethodChannel(name: "cribcall/audio", binaryMessenger: messenger)
+    let audioEvents = FlutterEventChannel(name: "cribcall/audio_events", binaryMessenger: messenger)
+
+    audioChannel.setMethodCallHandler { call, result in
+      switch call.method {
+      case "hasPermission":
+        result(AudioCaptureService.shared.hasPermission())
+
+      case "requestPermission":
+        AudioCaptureService.shared.requestPermission { granted in
+          result(granted)
+        }
+
+      case "start":
+        let mdnsParams = call.arguments as? [String: Any]
+        AudioCaptureService.shared.start(mdnsParams: mdnsParams)
+        result(nil)
+
+      case "stop":
+        AudioCaptureService.shared.stop()
+        result(nil)
+
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
+    audioEvents.setStreamHandler(AudioCaptureStreamHandler())
+  }
+
+  // MARK: - Monitor Server Channels
+
+  private func setupMonitorServerChannels(messenger: FlutterBinaryMessenger) {
+    let serverChannel = FlutterMethodChannel(name: "cribcall/monitor_server", binaryMessenger: messenger)
+    let serverEvents = FlutterEventChannel(name: "cribcall/monitor_events", binaryMessenger: messenger)
+
+    // Setup callbacks from MonitorService to emit events
+    MonitorService.shared.onServerStarted = { [weak self] port in
+      DispatchQueue.main.async {
+        self?.monitorEventSink?(["event": "serverStarted", "port": port])
+      }
+    }
+
+    MonitorService.shared.onServerError = { [weak self] error in
+      DispatchQueue.main.async {
+        self?.monitorEventSink?(["event": "serverError", "error": error])
+      }
+    }
+
+    MonitorService.shared.onClientConnected = { [weak self] connectionId, fingerprint, remoteAddress in
+      DispatchQueue.main.async {
+        self?.monitorEventSink?([
+          "event": "clientConnected",
+          "connectionId": connectionId,
+          "fingerprint": fingerprint,
+          "remoteAddress": remoteAddress
+        ])
+      }
+    }
+
+    MonitorService.shared.onClientDisconnected = { [weak self] connectionId, reason in
+      DispatchQueue.main.async {
+        self?.monitorEventSink?([
+          "event": "clientDisconnected",
+          "connectionId": connectionId,
+          "reason": reason as Any
+        ])
+      }
+    }
+
+    MonitorService.shared.onWsMessage = { [weak self] connectionId, message in
+      DispatchQueue.main.async {
+        self?.monitorEventSink?([
+          "event": "wsMessage",
+          "connectionId": connectionId,
+          "message": message
+        ])
+      }
+    }
+
+    MonitorService.shared.onHttpRequest = { [weak self] requestId, method, path, fingerprint, body in
+      DispatchQueue.main.async {
+        self?.monitorEventSink?([
+          "event": "httpRequest",
+          "requestId": requestId,
+          "method": method,
+          "path": path,
+          "fingerprint": fingerprint as Any,
+          "body": body as Any
+        ])
+      }
+    }
+
+    serverChannel.setMethodCallHandler { call, result in
+      switch call.method {
+      case "start":
+        guard let args = call.arguments as? [String: Any],
+              let port = args["port"] as? Int,
+              let identityJson = args["identityJson"] as? String,
+              let trustedPeersJson = args["trustedPeersJson"] as? String else {
+          result(FlutterError(code: "INVALID_ARGS", message: "Missing required arguments", details: nil))
+          return
+        }
+        MonitorService.shared.start(port: port, identityJson: identityJson, trustedPeersJson: trustedPeersJson)
+        result(nil)
+
+      case "stop":
+        MonitorService.shared.stop()
+        result(nil)
+
+      case "isRunning":
+        result(MonitorService.shared.isRunning)
+
+      case "addTrustedPeer":
+        guard let args = call.arguments as? [String: Any],
+              let peerJson = args["peerJson"] as? String else {
+          result(FlutterError(code: "INVALID_ARGS", message: "Missing peerJson", details: nil))
+          return
+        }
+        MonitorService.shared.addTrustedPeer(peerJson: peerJson)
+        result(nil)
+
+      case "removeTrustedPeer":
+        guard let args = call.arguments as? [String: Any],
+              let fingerprint = args["fingerprint"] as? String else {
+          result(FlutterError(code: "INVALID_ARGS", message: "Missing fingerprint", details: nil))
+          return
+        }
+        MonitorService.shared.removeTrustedPeer(fingerprint: fingerprint)
+        result(nil)
+
+      case "broadcast":
+        guard let args = call.arguments as? [String: Any],
+              let messageJson = args["messageJson"] as? String else {
+          result(FlutterError(code: "INVALID_ARGS", message: "Missing messageJson", details: nil))
+          return
+        }
+        MonitorService.shared.broadcast(messageJson: messageJson)
+        result(nil)
+
+      case "sendTo":
+        guard let args = call.arguments as? [String: Any],
+              let connectionId = args["connectionId"] as? String,
+              let messageJson = args["messageJson"] as? String else {
+          result(FlutterError(code: "INVALID_ARGS", message: "Missing connectionId or messageJson", details: nil))
+          return
+        }
+        MonitorService.shared.sendTo(connectionId: connectionId, messageJson: messageJson)
+        result(nil)
+
+      case "respondHttp":
+        guard let args = call.arguments as? [String: Any],
+              let requestId = args["requestId"] as? String,
+              let statusCode = args["statusCode"] as? Int else {
+          result(FlutterError(code: "INVALID_ARGS", message: "Missing requestId or statusCode", details: nil))
+          return
+        }
+        let bodyJson = args["bodyJson"] as? String
+        MonitorService.shared.respondHttp(requestId: requestId, statusCode: statusCode, bodyJson: bodyJson)
+        result(nil)
+
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
+    serverEvents.setStreamHandler(MonitorServerStreamHandler { [weak self] sink in
+      self?.monitorEventSink = sink
+    } onCancel: { [weak self] in
+      self?.monitorEventSink = nil
+    })
+  }
+
+  // MARK: - mDNS Implementation
 
   private func startAdvertise(args: [String: Any]) {
     stopMdns()
@@ -63,7 +256,7 @@ import os.log
     advertiser?.publish()
   }
 
-  private func startBrowse(eventSink: @escaping FlutterEventSink) {
+  func startBrowse(eventSink: @escaping FlutterEventSink) {
     browser = NetServiceBrowser()
     browser?.delegate = self
     mdnsEventSink = eventSink
@@ -71,7 +264,7 @@ import os.log
     browser?.searchForServices(ofType: serviceType, inDomain: "local.")
   }
 
-  private func stopMdns() {
+  func stopMdns() {
     os_log("Stopping mDNS advertise/browse", log: log, type: .info)
     advertiser?.stop()
     advertiser = nil
@@ -80,6 +273,8 @@ import os.log
     discovered.removeAll()
   }
 }
+
+// MARK: - Stream Handlers
 
 class MdnsStreamHandler: NSObject, FlutterStreamHandler {
   private var eventSink: FlutterEventSink?
@@ -99,6 +294,28 @@ class MdnsStreamHandler: NSObject, FlutterStreamHandler {
     return nil
   }
 }
+
+class MonitorServerStreamHandler: NSObject, FlutterStreamHandler {
+  private let onListen: (FlutterEventSink?) -> Void
+  private let onCancelHandler: () -> Void
+
+  init(onListen: @escaping (FlutterEventSink?) -> Void, onCancel: @escaping () -> Void) {
+    self.onListen = onListen
+    self.onCancelHandler = onCancel
+  }
+
+  func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+    onListen(events)
+    return nil
+  }
+
+  func onCancel(withArguments arguments: Any?) -> FlutterError? {
+    onCancelHandler()
+    return nil
+  }
+}
+
+// MARK: - NetService Delegates
 
 extension AppDelegate: NetServiceBrowserDelegate, NetServiceDelegate {
   func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {

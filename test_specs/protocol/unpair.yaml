@@ -1,0 +1,81 @@
+endpoint: /unpair
+method: POST
+description: Unpair endpoint - removes a trusted listener from the monitor
+
+cases:
+  - name: unpair_no_cert
+    description: Unpair rejected without client certificate
+    request:
+      client_cert: null
+      body: {}
+    expect:
+      status: 401
+      body:
+        error: client_certificate_required
+        message: $nonempty
+
+  - name: unpair_untrusted_cert
+    description: Unpair rejected with untrusted certificate
+    request:
+      client_cert: untrusted
+      body: {}
+    expect:
+      status: 403
+      body:
+        error: certificate_not_trusted
+        fingerprint: $nonempty
+
+  - name: unpair_success_with_device_id
+    description: Unpair succeeds with trusted certificate and deviceId
+    setup:
+      unpair_handler_returns: true
+    request:
+      client_cert: trusted
+      body:
+        deviceId: listener-device-123
+    expect:
+      status: 200
+      body:
+        status: ok
+        unpaired: true
+        deviceId: listener-device-123
+
+  - name: unpair_success_without_device_id
+    description: Unpair succeeds with trusted certificate, no deviceId
+    setup:
+      unpair_handler_returns: true
+    request:
+      client_cert: trusted
+      body: {}
+    expect:
+      status: 200
+      body:
+        status: ok
+        unpaired: true
+
+  - name: unpair_not_found
+    description: Unpair returns unpaired false when device not found
+    setup:
+      unpair_handler_returns: false
+    request:
+      client_cert: trusted
+      body:
+        deviceId: unknown-device
+    expect:
+      status: 200
+      body:
+        status: ok
+        unpaired: false
+        reason: device_not_found
+
+  - name: unpair_invalid_json
+    description: Unpair rejects malformed JSON body
+    request:
+      client_cert: trusted
+      headers:
+        Content-Type: application/json
+      raw_body: "not valid json {"
+    expect:
+      status: 400
+      body:
+        error: invalid_body

@@ -1,0 +1,260 @@
+endpoint: /control/ws
+method: GET
+upgrade: websocket
+description: WebSocket upgrade endpoint for real-time control communication
+
+cases:
+  # Authentication tests
+  - name: ws_upgrade_no_cert
+    description: WebSocket upgrade rejected without client certificate
+    request:
+      client_cert: null
+      headers:
+        Upgrade: websocket
+        Connection: Upgrade
+        Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+        Sec-WebSocket-Version: "13"
+    expect:
+      status: 401
+      body:
+        error: unauthenticated
+        message: $nonempty
+
+  - name: ws_upgrade_untrusted_cert
+    description: WebSocket upgrade rejected with untrusted certificate
+    request:
+      client_cert: untrusted
+      headers:
+        Upgrade: websocket
+        Connection: Upgrade
+        Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+        Sec-WebSocket-Version: "13"
+    expect:
+      status: 403
+      body:
+        error: untrusted
+        message: $nonempty
+
+  # Missing WebSocket headers
+  - name: ws_upgrade_missing_upgrade_header
+    description: Request rejected when Upgrade header missing
+    request:
+      client_cert: trusted
+      headers:
+        Connection: Upgrade
+        Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+        Sec-WebSocket-Version: "13"
+    expect:
+      status: 400
+      body:
+        error: invalid_upgrade
+
+  - name: ws_upgrade_missing_connection_header
+    description: Request rejected when Connection header missing
+    request:
+      client_cert: trusted
+      headers:
+        Upgrade: websocket
+        Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+        Sec-WebSocket-Version: "13"
+    expect:
+      status: 400
+      body:
+        error: invalid_upgrade
+
+  - name: ws_upgrade_missing_websocket_key
+    description: Request rejected when Sec-WebSocket-Key missing
+    request:
+      client_cert: trusted
+      headers:
+        Upgrade: websocket
+        Connection: Upgrade
+        Sec-WebSocket-Version: "13"
+    expect:
+      status: 400
+      body:
+        error: invalid_upgrade
+
+  - name: ws_upgrade_missing_websocket_version
+    description: Request rejected when Sec-WebSocket-Version missing
+    request:
+      client_cert: trusted
+      headers:
+        Upgrade: websocket
+        Connection: Upgrade
+        Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+    expect:
+      status: 400
+      body:
+        error: invalid_upgrade
+
+  - name: ws_upgrade_wrong_version
+    description: Request rejected when WebSocket version is not 13
+    request:
+      client_cert: trusted
+      headers:
+        Upgrade: websocket
+        Connection: Upgrade
+        Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+        Sec-WebSocket-Version: "8"
+    expect:
+      status: 426
+      headers:
+        Sec-WebSocket-Version: "13"
+
+  - name: ws_upgrade_wrong_upgrade_value
+    description: Request rejected when Upgrade is not websocket
+    request:
+      client_cert: trusted
+      headers:
+        Upgrade: http/2
+        Connection: Upgrade
+        Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+        Sec-WebSocket-Version: "13"
+    expect:
+      status: 400
+      body:
+        error: invalid_upgrade
+
+  # Successful upgrade
+  - name: ws_upgrade_success
+    description: WebSocket upgrade succeeds with trusted cert and proper headers
+    request:
+      client_cert: trusted
+      headers:
+        Upgrade: websocket
+        Connection: Upgrade
+        Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+        Sec-WebSocket-Version: "13"
+    expect:
+      status: 101
+      headers:
+        Upgrade: websocket
+        Connection: Upgrade
+        Sec-WebSocket-Accept: $nonempty
+
+  - name: ws_upgrade_accept_key_correct
+    description: Sec-WebSocket-Accept is correctly computed from key
+    request:
+      client_cert: trusted
+      headers:
+        Upgrade: websocket
+        Connection: Upgrade
+        Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+        Sec-WebSocket-Version: "13"
+    expect:
+      status: 101
+      headers:
+        Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+
+  - name: ws_upgrade_case_insensitive_headers
+    description: WebSocket upgrade headers are case-insensitive
+    request:
+      client_cert: trusted
+      headers:
+        upgrade: WEBSOCKET
+        connection: UPGRADE
+        Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+        Sec-WebSocket-Version: "13"
+    expect:
+      status: 101
+      headers:
+        Upgrade: websocket
+        Connection: Upgrade
+
+  # WebSocket message tests (after upgrade)
+  - name: ws_ping_pong
+    description: Server responds to ping frames with pong
+    request:
+      client_cert: trusted
+      headers:
+        Upgrade: websocket
+        Connection: Upgrade
+        Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+        Sec-WebSocket-Version: "13"
+      ws_messages:
+        - type: ping
+          payload: hello
+    expect:
+      status: 101
+      ws_messages:
+        - type: pong
+          payload: hello
+
+  - name: ws_close_frame_echoed
+    description: Server echoes close frame and closes connection
+    request:
+      client_cert: trusted
+      headers:
+        Upgrade: websocket
+        Connection: Upgrade
+        Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+        Sec-WebSocket-Version: "13"
+      ws_messages:
+        - type: close
+          code: 1000
+    expect:
+      status: 101
+      ws_messages:
+        - type: close
+          code: 1000
+      connection_closed: true
+
+  - name: ws_text_message_json
+    description: Server accepts JSON text messages
+    request:
+      client_cert: trusted
+      headers:
+        Upgrade: websocket
+        Connection: Upgrade
+        Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+        Sec-WebSocket-Version: "13"
+      ws_messages:
+        - type: text
+          payload: '{"type":"ping"}'
+    expect:
+      status: 101
+      ws_messages:
+        - type: text
+          json:
+            type: pong
+
+  - name: ws_invalid_json_message
+    description: Server handles invalid JSON gracefully
+    request:
+      client_cert: trusted
+      headers:
+        Upgrade: websocket
+        Connection: Upgrade
+        Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+        Sec-WebSocket-Version: "13"
+      ws_messages:
+        - type: text
+          payload: "not valid json {"
+    expect:
+      status: 101
+      ws_messages:
+        - type: text
+          json:
+            type: error
+            error: invalid_json
+
+  - name: ws_unknown_message_type
+    description: Server returns error for unknown message types
+    request:
+      client_cert: trusted
+      headers:
+        Upgrade: websocket
+        Connection: Upgrade
+        Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+        Sec-WebSocket-Version: "13"
+      ws_messages:
+        - type: text
+          payload: '{"type":"unknown_command"}'
+    expect:
+      status: 101
+      ws_messages:
+        - type: text
+          json:
+            type: error
+            error: unknown_type

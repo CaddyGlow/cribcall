@@ -755,3 +755,140 @@ class AndroidAudioCaptureService extends AudioCaptureService {
     await super.stop();
   }
 }
+
+/// iOS audio capture using platform channels to AVAudioEngine.
+/// Receives signed 16-bit little-endian mono PCM at [sampleRate] Hz.
+class IOSAudioCaptureService extends AudioCaptureService {
+  IOSAudioCaptureService({
+    required super.settings,
+    required super.onNoise,
+    super.onLevel,
+    super.sampleRate,
+    super.frameSize,
+    super.inputGain,
+    MethodChannel? methodChannel,
+    EventChannel? eventChannel,
+    this.mdnsAdvertisement,
+  }) : _method = methodChannel ?? const MethodChannel('cribcall/audio'),
+       _events = eventChannel ?? const EventChannel('cribcall/audio_events');
+
+  final MethodChannel _method;
+  final EventChannel _events;
+  StreamSubscription<dynamic>? _subscription;
+  final _buffer = BytesBuilder(copy: false);
+  int _bytesPerFrame = 0;
+  int _dataCount = 0;
+
+  /// Optional mDNS advertisement to pass to the audio capture service.
+  final MdnsAdvertisement? mdnsAdvertisement;
+
+  @override
+  Future<void> start() async {
+    if (_subscription != null) return;
+
+    _bytesPerFrame = frameSize * 2; // 16-bit = 2 bytes per sample
+
+    // Check/request permission first
+    final hasPermission = await _method.invokeMethod<bool>('hasPermission');
+    if (hasPermission != true) {
+      developer.log('Requesting audio permission', name: 'audio_capture');
+      await _method.invokeMethod<bool>('requestPermission');
+      // Wait a moment for permission dialog
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    }
+
+    // Start listening to the event channel
+    _subscription = _events.receiveBroadcastStream().listen(
+      _onData,
+      onError: (Object e) {
+        developer.log('Audio capture stream error: $e', name: 'audio_capture');
+      },
+      onDone: () {
+        developer.log('Audio capture stream ended', name: 'audio_capture');
+      },
+    );
+
+    try {
+      // Pass mDNS params if available
+      final params = <String, dynamic>{};
+      if (mdnsAdvertisement != null) {
+        params['remoteDeviceId'] = mdnsAdvertisement!.remoteDeviceId;
+        params['monitorName'] = mdnsAdvertisement!.monitorName;
+        params['certFingerprint'] = mdnsAdvertisement!.certFingerprint;
+        params['controlPort'] = mdnsAdvertisement!.controlPort;
+        params['pairingPort'] = mdnsAdvertisement!.pairingPort;
+        params['version'] = mdnsAdvertisement!.version;
+      }
+      await _method.invokeMethod<void>(
+        'start',
+        params.isNotEmpty ? params : null,
+      );
+      developer.log(
+        'Started iOS audio capture${mdnsAdvertisement != null ? " with mDNS" : ""}',
+        name: 'audio_capture',
+      );
+    } catch (e) {
+      developer.log('Failed to start audio capture: $e', name: 'audio_capture');
+      await _subscription?.cancel();
+      _subscription = null;
+    }
+  }
+
+  void _onData(dynamic data) {
+    _dataCount++;
+    if (_dataCount == 1 || _dataCount % 100 == 0) {
+      developer.log(
+        '_onData: received #$_dataCount (type=${data.runtimeType}, isUint8List=${data is Uint8List})',
+        name: 'audio_capture',
+      );
+    }
+    if (data is! Uint8List) return;
+
+    _buffer.add(data);
+    final bytes = Uint8List.fromList(_buffer.takeBytes());
+    var offset = 0;
+
+    while (offset + _bytesPerFrame <= bytes.length) {
+      final frameBytes = Uint8List.sublistView(
+        bytes,
+        offset,
+        offset + _bytesPerFrame,
+      );
+      final gained = applyInputGain(frameBytes);
+      final samples = _pcmBytesToSamples(gained);
+      emitRawData(gained);
+      final timestampMs = DateTime.now().millisecondsSinceEpoch;
+      detector.addFrame(samples, timestampMs: timestampMs);
+      offset += _bytesPerFrame;
+    }
+
+    // Keep remaining bytes for next chunk
+    if (offset < bytes.length) {
+      _buffer.add(bytes.sublist(offset));
+    }
+  }
+
+  List<double> _pcmBytesToSamples(Uint8List bytes) {
+    final samples = <double>[];
+    final byteData = ByteData.sublistView(bytes);
+    for (var i = 0; i < bytes.length; i += 2) {
+      final int16 = byteData.getInt16(i, Endian.little);
+      samples.add(int16 / 32768.0);
+    }
+    return samples;
+  }
+
+  @override
+  Future<void> stop() async {
+    await _subscription?.cancel();
+    _subscription = null;
+    _buffer.clear();
+    try {
+      await _method.invokeMethod<void>('stop');
+    } catch (e) {
+      developer.log('Error stopping audio capture: $e', name: 'audio_capture');
+    }
+    developer.log('iOS audio capture stopped', name: 'audio_capture');
+    await super.stop();
+  }
+}

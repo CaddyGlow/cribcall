@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'features/listener/noise_event_handler.dart';
+import 'lifecycle/service_registration.dart';
 import 'notifications/notification_action_handler.dart';
 import 'routing/app_router.dart';
 import 'theme.dart';
@@ -33,6 +34,9 @@ class _CribCallAppState extends ConsumerState<CribCallApp> {
 
   @override
   Widget build(BuildContext context) {
+    // Watch service lifecycle to trigger service startup/shutdown
+    ref.watch(serviceLifecycleProvider);
+
     return MaterialApp.router(
       title: 'CribCall',
       debugShowCheckedModeBanner: false,

@@ -1,0 +1,296 @@
+endpoint: /noise/subscribe
+method: POST
+description: Subscribe to noise detection events via FCM push notifications
+
+cases:
+  # Authentication tests
+  - name: subscribe_no_cert
+    description: Subscribe rejected without client certificate
+    request:
+      client_cert: null
+      body:
+        fcmToken: token123
+        platform: android
+    expect:
+      status: 401
+      body:
+        error: unauthenticated
+        message: $nonempty
+
+  - name: subscribe_untrusted_cert
+    description: Subscribe rejected with untrusted certificate
+    request:
+      client_cert: untrusted
+      body:
+        fcmToken: token123
+        platform: android
+    expect:
+      status: 403
+      body:
+        error: untrusted
+        message: $nonempty
+
+  # Required field validation
+  - name: subscribe_missing_fcm_token
+    description: Subscribe rejected when fcmToken missing
+    request:
+      client_cert: trusted
+      body:
+        platform: android
+    expect:
+      status: 400
+      body:
+        error: invalid_fcm_token
+        message: $nonempty
+
+  - name: subscribe_empty_fcm_token
+    description: Subscribe rejected when fcmToken is empty string
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: ""
+        platform: android
+    expect:
+      status: 400
+      body:
+        error: invalid_fcm_token
+
+  - name: subscribe_missing_platform
+    description: Subscribe rejected when platform missing
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+    expect:
+      status: 400
+      body:
+        error: invalid_platform
+        message: $nonempty
+
+  - name: subscribe_empty_platform
+    description: Subscribe rejected when platform is empty string
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+        platform: ""
+    expect:
+      status: 400
+      body:
+        error: invalid_platform
+
+  # Field type validation
+  - name: subscribe_invalid_lease_type
+    description: Subscribe rejected when leaseSeconds is not integer
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+        platform: android
+        leaseSeconds: "not a number"
+    expect:
+      status: 400
+      body:
+        error: invalid_lease
+
+  - name: subscribe_invalid_threshold_type
+    description: Subscribe rejected when threshold is not integer
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+        platform: android
+        threshold: "fifty"
+    expect:
+      status: 400
+      body:
+        error: invalid_threshold
+
+  - name: subscribe_invalid_cooldown_type
+    description: Subscribe rejected when cooldownSeconds is not integer
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+        platform: android
+        cooldownSeconds: true
+    expect:
+      status: 400
+      body:
+        error: invalid_cooldown
+
+  - name: subscribe_invalid_auto_stream_duration_type
+    description: Subscribe rejected when autoStreamDurationSec is not integer
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+        platform: android
+        autoStreamDurationSec: "30"
+    expect:
+      status: 400
+      body:
+        error: invalid_auto_stream_duration
+
+  - name: subscribe_invalid_auto_stream_type_value
+    description: Subscribe rejected when autoStreamType is invalid enum
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+        platform: android
+        autoStreamType: invalid_type
+    expect:
+      status: 400
+      body:
+        error: invalid_auto_stream_type
+
+  # Forbidden fields
+  - name: subscribe_rejects_device_id_field
+    description: Subscribe rejects explicit deviceId (derived from cert)
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+        platform: android
+        deviceId: spoofed-id
+    expect:
+      status: 400
+      body:
+        error: device_id_forbidden
+        message: $contains:certificate
+
+  - name: subscribe_rejects_pairing_id_field
+    description: Subscribe rejects explicit pairingId
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+        platform: android
+        pairingId: spoofed-pairing
+    expect:
+      status: 400
+      body:
+        error: device_id_forbidden
+
+  # Unknown fields
+  - name: subscribe_rejects_unknown_fields
+    description: Subscribe rejects unknown fields
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+        platform: android
+        unknownField: value
+        anotherUnknown: 123
+    expect:
+      status: 400
+      body:
+        error: unknown_fields
+        fields:
+          - unknownField
+          - anotherUnknown
+
+  # Success cases
+  - name: subscribe_success_minimal
+    description: Subscribe succeeds with minimal required fields
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+        platform: android
+    expect:
+      status: 200
+      body:
+        subscriptionId: $nonempty
+        deviceId: $nonempty
+        expiresAt: $iso8601
+        acceptedLeaseSeconds: $positive_int
+
+  - name: subscribe_success_with_lease
+    description: Subscribe succeeds with custom lease duration
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+        platform: android
+        leaseSeconds: 7200
+    expect:
+      status: 200
+      body:
+        subscriptionId: $nonempty
+        deviceId: $nonempty
+        expiresAt: $iso8601
+        acceptedLeaseSeconds: 7200
+
+  - name: subscribe_success_with_all_options
+    description: Subscribe succeeds with all optional fields
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+        platform: android
+        leaseSeconds: 3600
+        threshold: 50
+        cooldownSeconds: 10
+        autoStreamType: audio
+        autoStreamDurationSec: 30
+    expect:
+      status: 200
+      body:
+        subscriptionId: $nonempty
+        deviceId: $nonempty
+        expiresAt: $iso8601
+        acceptedLeaseSeconds: 3600
+
+  - name: subscribe_success_auto_stream_none
+    description: Subscribe succeeds with autoStreamType none
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+        platform: android
+        autoStreamType: none
+    expect:
+      status: 200
+      body:
+        subscriptionId: $nonempty
+
+  - name: subscribe_success_auto_stream_audio_video
+    description: Subscribe succeeds with autoStreamType audioVideo
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+        platform: android
+        autoStreamType: audioVideo
+    expect:
+      status: 200
+      body:
+        subscriptionId: $nonempty
+
+  - name: subscribe_success_ios_platform
+    description: Subscribe succeeds with iOS platform
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: apns-token-123
+        platform: ios
+    expect:
+      status: 200
+      body:
+        subscriptionId: $nonempty
+        deviceId: $nonempty
+
+  - name: subscribe_success_linux_platform
+    description: Subscribe succeeds with Linux platform (websocket-only)
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: ws-only-token
+        platform: linux
+    expect:
+      status: 200
+      body:
+        subscriptionId: $nonempty
+        deviceId: $nonempty

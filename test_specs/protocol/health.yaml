@@ -1,0 +1,66 @@
+endpoint: /health
+method: GET
+description: Health check endpoint - returns server status and mTLS info
+
+cases:
+  - name: health_no_client_cert
+    description: Health endpoint accessible without client certificate
+    request:
+      client_cert: null
+    expect:
+      status: 200
+      body:
+        status: ok
+        role: monitor
+        protocol: http-ws
+        mTLS: false
+        trusted: false
+
+  - name: health_with_untrusted_cert
+    description: Health shows mTLS true but trusted false for unknown cert
+    request:
+      client_cert: untrusted
+    expect:
+      status: 200
+      body:
+        status: ok
+        role: monitor
+        protocol: http-ws
+        mTLS: true
+        trusted: false
+        clientFingerprint: $nonempty
+
+  - name: health_with_trusted_cert
+    description: Health shows trusted true for known peer
+    request:
+      client_cert: trusted
+    expect:
+      status: 200
+      body:
+        status: ok
+        role: monitor
+        protocol: http-ws
+        mTLS: true
+        trusted: true
+        clientFingerprint: $nonempty
+        fingerprint: $nonempty
+
+  - name: health_includes_uptime
+    description: Health includes uptime in seconds
+    request:
+      client_cert: null
+    expect:
+      status: 200
+      body:
+        status: ok
+        uptimeSec: $positive_int
+
+  - name: health_includes_connection_count
+    description: Health includes active connection count
+    request:
+      client_cert: null
+    expect:
+      status: 200
+      body:
+        status: ok
+        activeConnections: $any

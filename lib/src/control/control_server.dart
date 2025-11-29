@@ -103,10 +103,15 @@ class ControlServer {
   Stream<ControlServerEvent> get events => _eventsController.stream;
 
   /// Start the control server.
+  ///
+  /// [trustedPeers] - Peers that are both TLS-accepted and application-trusted.
+  /// [knownUntrustedCerts] - Certificates accepted at TLS level but not
+  /// application-trusted. Useful for testing "untrusted certificate" scenarios.
   Future<void> start({
     required int port,
     required DeviceIdentity identity,
     required List<TrustedPeer> trustedPeers,
+    List<List<int>>? knownUntrustedCerts,
   }) async {
     await stop();
     _identity = identity;
@@ -126,6 +131,13 @@ class ControlServer {
     // Also trust our own certificate (for same-device testing)
     _trustedFingerprints.add(identity.certFingerprint);
     _trustedCertificates.add(identity.certificateDer);
+
+    // Add known but untrusted certs to TLS context only (not to fingerprints)
+    if (knownUntrustedCerts != null) {
+      for (final certDer in knownUntrustedCerts) {
+        _trustedCertificates.add(certDer);
+      }
+    }
 
     await _bindServer(port, identity);
   }

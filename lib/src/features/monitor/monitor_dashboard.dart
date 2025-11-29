@@ -256,10 +256,8 @@ class _MonitorDashboardState extends ConsumerState<MonitorDashboard> {
 
   @override
   Widget build(BuildContext context) {
-    // Trigger auto-start providers
-    // Note: On Android, audioCaptureAutoStartProvider handles mDNS via foreground service
-    ref.watch(controlServerAutoStartProvider);
-    ref.watch(audioCaptureAutoStartProvider);
+    // Service lifecycle is managed by serviceLifecycleProvider (watched in app.dart)
+    // Nothing to do here - services auto-start based on role and monitoring status
 
     // Watch providers for advertisement (Linux/iOS mDNS)
     final identityForAd = ref.watch(identityProvider);

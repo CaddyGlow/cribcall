@@ -4,6 +4,7 @@ import 'dart:developer' as developer;
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 
+import '../lifecycle/service_lifecycle.dart';
 import '../notifications/notification_service.dart';
 
 /// Data extracted from an FCM noise event message.
@@ -49,24 +50,23 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 }
 
 /// Singleton service for handling Firebase Cloud Messaging.
-class FcmService {
-  FcmService._();
+class FcmService extends BaseManagedService {
+  FcmService._() : super('fcm', 'FCM Service');
 
   static final instance = FcmService._();
 
   FirebaseMessaging? _messaging;
   String? _currentToken;
-  bool _initialized = false;
+  StreamSubscription<String>? _tokenRefreshSubscription;
+  StreamSubscription<RemoteMessage>? _foregroundMessageSubscription;
+  StreamSubscription<RemoteMessage>? _messageOpenedAppSubscription;
 
   /// Callback for noise events received via FCM.
   /// Set this to handle incoming noise events.
   void Function(NoiseEventData event)? onNoiseEvent;
 
-  /// Initialize Firebase and FCM.
-  /// Call this early in app startup.
-  Future<void> initialize() async {
-    if (_initialized) return;
-
+  @override
+  Future<void> onStart() async {
     await Firebase.initializeApp();
     _messaging = FirebaseMessaging.instance;
 
@@ -87,27 +87,45 @@ class FcmService {
     developer.log('FCM token: $_currentToken', name: 'fcm_service');
 
     // Listen for token refresh
-    _messaging!.onTokenRefresh.listen(_handleTokenRefresh);
+    _tokenRefreshSubscription = _messaging!.onTokenRefresh.listen(_handleTokenRefresh);
 
     // Set up message handlers
     FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
-    FirebaseMessaging.onMessage.listen(_handleForegroundMessage);
-    FirebaseMessaging.onMessageOpenedApp.listen(_handleMessageOpenedApp);
+    _foregroundMessageSubscription = FirebaseMessaging.onMessage.listen(_handleForegroundMessage);
+    _messageOpenedAppSubscription = FirebaseMessaging.onMessageOpenedApp.listen(_handleMessageOpenedApp);
 
     // Check for initial message (app launched from notification tap)
     final initialMessage = await _messaging!.getInitialMessage();
     if (initialMessage != null) {
       _handleMessage(initialMessage.data);
     }
+  }
 
-    _initialized = true;
+  @override
+  Future<void> onStop() async {
+    await _tokenRefreshSubscription?.cancel();
+    await _foregroundMessageSubscription?.cancel();
+    await _messageOpenedAppSubscription?.cancel();
+    _tokenRefreshSubscription = null;
+    _foregroundMessageSubscription = null;
+    _messageOpenedAppSubscription = null;
+    _messaging = null;
+    _currentToken = null;
+    developer.log('FCM service stopped', name: 'fcm_service');
+  }
+
+  /// Initialize Firebase and FCM.
+  /// @deprecated Use start() instead via ServiceCoordinator.
+  Future<void> initialize() async {
+    if (state == ServiceLifecycleState.running) return;
+    await start();
   }
 
   /// Current FCM token. May be null if not yet initialized or permission denied.
   String? get currentToken => _currentToken;
 
   /// Whether FCM has been initialized.
-  bool get isInitialized => _initialized;
+  bool get isInitialized => state == ServiceLifecycleState.running;
 
   void _handleTokenRefresh(String newToken) {
     developer.log('FCM token refreshed: $newToken', name: 'fcm_service');

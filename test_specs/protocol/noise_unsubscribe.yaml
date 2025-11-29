@@ -1,0 +1,196 @@
+endpoint: /noise/unsubscribe
+method: POST
+description: Unsubscribe from noise detection events
+
+cases:
+  # Authentication tests
+  - name: unsubscribe_no_cert
+    description: Unsubscribe rejected without client certificate
+    request:
+      client_cert: null
+      body:
+        fcmToken: token123
+    expect:
+      status: 401
+      body:
+        error: unauthenticated
+        message: $nonempty
+
+  - name: unsubscribe_untrusted_cert
+    description: Unsubscribe rejected with untrusted certificate
+    request:
+      client_cert: untrusted
+      body:
+        fcmToken: token123
+    expect:
+      status: 403
+      body:
+        error: untrusted
+        message: $nonempty
+
+  # Required field validation
+  - name: unsubscribe_missing_identifier
+    description: Unsubscribe rejected when neither fcmToken nor subscriptionId provided
+    request:
+      client_cert: trusted
+      body: {}
+    expect:
+      status: 400
+      body:
+        error: missing_identifier
+        message: $nonempty
+
+  - name: unsubscribe_empty_body
+    description: Unsubscribe rejected with completely empty body
+    request:
+      client_cert: trusted
+      body: {}
+    expect:
+      status: 400
+      body:
+        error: missing_identifier
+
+  # Field type validation
+  - name: unsubscribe_invalid_fcm_token_type
+    description: Unsubscribe rejected when fcmToken is not string
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: 12345
+    expect:
+      status: 400
+      body:
+        error: invalid_identifier
+
+  - name: unsubscribe_invalid_subscription_id_type
+    description: Unsubscribe rejected when subscriptionId is not string
+    request:
+      client_cert: trusted
+      body:
+        subscriptionId: 12345
+    expect:
+      status: 400
+      body:
+        error: invalid_identifier
+
+  # Forbidden fields
+  - name: unsubscribe_rejects_device_id_field
+    description: Unsubscribe rejects explicit deviceId
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+        deviceId: spoofed-id
+    expect:
+      status: 400
+      body:
+        error: device_id_forbidden
+
+  - name: unsubscribe_rejects_pairing_id_field
+    description: Unsubscribe rejects explicit pairingId
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+        pairingId: spoofed-pairing
+    expect:
+      status: 400
+      body:
+        error: device_id_forbidden
+
+  # Unknown fields
+  - name: unsubscribe_rejects_unknown_fields
+    description: Unsubscribe rejects unknown fields
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+        unknownField: value
+    expect:
+      status: 400
+      body:
+        error: unknown_fields
+        fields:
+          - unknownField
+
+  # Success cases
+  - name: unsubscribe_by_fcm_token
+    description: Unsubscribe by fcmToken succeeds
+    setup:
+      unsubscribe_handler_returns:
+        removed: true
+        subscriptionId: sub-123
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+    expect:
+      status: 200
+      body:
+        deviceId: $nonempty
+        unsubscribed: true
+
+  - name: unsubscribe_by_subscription_id
+    description: Unsubscribe by subscriptionId succeeds
+    setup:
+      unsubscribe_handler_returns:
+        removed: true
+        subscriptionId: sub-456
+    request:
+      client_cert: trusted
+      body:
+        subscriptionId: sub-456
+    expect:
+      status: 200
+      body:
+        deviceId: $nonempty
+        unsubscribed: true
+        subscriptionId: sub-456
+
+  - name: unsubscribe_both_identifiers
+    description: Unsubscribe with both fcmToken and subscriptionId succeeds
+    setup:
+      unsubscribe_handler_returns:
+        removed: true
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+        subscriptionId: sub-789
+    expect:
+      status: 200
+      body:
+        deviceId: $nonempty
+        unsubscribed: true
+
+  - name: unsubscribe_not_found
+    description: Unsubscribe returns unsubscribed false when not found
+    setup:
+      unsubscribe_handler_returns:
+        removed: false
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: nonexistent-token
+    expect:
+      status: 200
+      body:
+        deviceId: $nonempty
+        unsubscribed: false
+
+  - name: unsubscribe_includes_expires_at
+    description: Unsubscribe response includes expiresAt when available
+    setup:
+      unsubscribe_handler_returns:
+        removed: true
+        expiresAt: "2024-12-31T23:59:59Z"
+    request:
+      client_cert: trusted
+      body:
+        fcmToken: token123
+    expect:
+      status: 200
+      body:
+        deviceId: $nonempty
+        unsubscribed: true
+        expiresAt: $iso8601

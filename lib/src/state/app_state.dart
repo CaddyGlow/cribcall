@@ -348,6 +348,8 @@ final _trustedListenerFingerprintsProvider = Provider<Set<String>?>((ref) {
   return data.map((p) => p.certFingerprint).toSet();
 });
 
+/// @deprecated Use serviceLifecycleProvider from service_registration.dart instead.
+/// This provider is kept for reference but no longer watched.
 final controlServerAutoStartProvider = Provider<void>((ref) {
   final monitoringEnabled = ref.watch(monitoringStatusProvider);
   final identity = ref.watch(identityProvider);
@@ -527,6 +529,14 @@ class AudioCaptureController extends Notifier<AudioCaptureState> {
         inputGain: gainFactor,
         mdnsAdvertisement: mdnsAdvertisement,
       );
+    } else if (!kIsWeb && Platform.isIOS) {
+      _service = IOSAudioCaptureService(
+        settings: settings,
+        onNoise: onNoise,
+        onLevel: _onLevel,
+        inputGain: gainFactor,
+        mdnsAdvertisement: mdnsAdvertisement,
+      );
     } else {
       developer.log(
         'No audio capture available for ${Platform.operatingSystem}',
@@ -625,6 +635,9 @@ final audioCaptureDemandsProvider = Provider<AudioCaptureDemandState>((ref) {
   );
 });
 
+/// @deprecated Use serviceLifecycleProvider from service_registration.dart instead.
+/// This provider is kept for reference but no longer watched.
+///
 /// Auto-starts audio capture when monitoring is enabled on the monitor role
 /// AND there is demand (subscriptions or streams).
 /// On Android, this also handles mDNS advertising via the foreground service.

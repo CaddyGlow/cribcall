@@ -1,0 +1,143 @@
+# JSON Schema for protocol conformance test specifications
+# This defines the structure that all test spec files must follow.
+
+$schema: "http://json-schema.org/draft-07/schema#"
+title: ProtocolTestSpec
+description: Test specification for control server protocol conformance
+
+type: object
+required:
+  - endpoint
+  - method
+  - cases
+
+properties:
+  endpoint:
+    type: string
+    description: HTTP endpoint path
+    pattern: "^/"
+    examples:
+      - /health
+      - /unpair
+      - /noise/subscribe
+
+  method:
+    type: string
+    enum: [GET, POST, PUT, DELETE]
+    description: HTTP method
+
+  description:
+    type: string
+    description: Human-readable description of what this spec tests
+
+  upgrade:
+    type: string
+    enum: [websocket]
+    description: If set, this endpoint performs protocol upgrade
+
+  cases:
+    type: array
+    minItems: 1
+    items:
+      $ref: "#/definitions/TestCase"
+
+definitions:
+  TestCase:
+    type: object
+    required:
+      - name
+      - description
+      - request
+      - expect
+    properties:
+      name:
+        type: string
+        pattern: "^[a-z][a-z0-9_]*$"
+        description: Unique test case identifier (snake_case)
+
+      description:
+        type: string
+        description: What this test case verifies
+
+      setup:
+        $ref: "#/definitions/Setup"
+        description: Server-side setup before running test
+
+      request:
+        $ref: "#/definitions/Request"
+        description: Request to send
+
+      expect:
+        $ref: "#/definitions/Expect"
+        description: Expected response
+
+  Setup:
+    type: object
+    properties:
+      unpair_handler_returns:
+        type: boolean
+        description: What the unpair handler should return
+
+      subscribe_handler_returns:
+        type: object
+        description: What the subscribe handler should return
+
+      unsubscribe_handler_returns:
+        type: object
+        description: What the unsubscribe handler should return
+
+      add_trusted_peer:
+        type: boolean
+        description: Whether to add the client cert as trusted before test
+
+  Request:
+    type: object
+    properties:
+      client_cert:
+        type: [string, "null"]
+        enum: [trusted, untrusted, expired, self_signed_unknown, null]
+        description: Which test certificate to use
+
+      headers:
+        type: object
+        additionalProperties:
+          type: string
+        description: HTTP headers to include
+
+      body:
+        type: object
+        description: JSON request body
+
+  Expect:
+    type: object
+    required:
+      - status
+    properties:
+      status:
+        type: integer
+        minimum: 100
+        maximum: 599
+        description: Expected HTTP status code
+
+      headers:
+        type: object
+        additionalProperties:
+          type: string
+        description: Expected response headers (supports matchers)
+
+      body:
+        type: object
+        description: Expected JSON response body (supports matchers)
+
+      connection_closed:
+        type: boolean
+        description: For WebSocket tests, whether connection should close
+
+  # Matcher types (documented, not enforced by schema)
+  # $nonempty - any non-empty string
+  # $positive_int - integer > 0
+  # $iso8601 - valid ISO 8601 datetime
+  # $uuid - valid UUID
+  # $contains:text - string containing "text"
+  # $regex:pattern - string matching pattern
+  # $any - any value, just check key exists

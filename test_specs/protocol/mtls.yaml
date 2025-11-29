@@ -1,0 +1,171 @@
+endpoint: /*
+method: ANY
+description: mTLS (mutual TLS) validation tests applicable to all protected endpoints
+
+cases:
+  # Certificate validation
+  - name: mtls_expired_cert_rejected
+    description: Expired client certificates are rejected
+    request:
+      client_cert: expired
+      target_endpoint: /health
+    expect:
+      status: 401
+      body:
+        error: certificate_expired
+        message: $nonempty
+
+  - name: mtls_self_signed_unknown_rejected
+    description: Self-signed certificates not in trust store are rejected
+    request:
+      client_cert: self_signed_unknown
+      target_endpoint: /unpair
+      body: {}
+    expect:
+      status: 403
+      body:
+        error: certificate_not_trusted
+
+  # Fingerprint extraction
+  - name: mtls_fingerprint_sha256
+    description: Server extracts SHA-256 fingerprint from client certificate
+    request:
+      client_cert: trusted
+      target_endpoint: /health
+    expect:
+      status: 200
+      body:
+        clientFingerprint: $regex:^[A-F0-9]{64}$
+
+  - name: mtls_fingerprint_matches_cert
+    description: Extracted fingerprint matches actual certificate fingerprint
+    request:
+      client_cert: trusted
+      target_endpoint: /health
+    expect:
+      status: 200
+      body:
+        clientFingerprint: $cert_fingerprint
+
+  # Trust store operations
+  - name: mtls_trust_added_peer
+    description: Newly trusted peer certificate is accepted
+    setup:
+      add_trusted_peer: true
+    request:
+      client_cert: newly_trusted
+      target_endpoint: /unpair
+      body: {}
+    expect:
+      status: 200
+      body:
+        status: ok
+
+  - name: mtls_revoked_peer_rejected
+    description: Previously trusted but now revoked peer is rejected
+    setup:
+      revoke_peer: true
+    request:
+      client_cert: revoked
+      target_endpoint: /unpair
+      body: {}
+    expect:
+      status: 403
+      body:
+        error: certificate_revoked
+
+  # Certificate chain validation
+  - name: mtls_intermediate_ca_valid
+    description: Certificate signed by trusted intermediate CA is accepted
+    setup:
+      add_intermediate_ca: true
+    request:
+      client_cert: signed_by_intermediate
+      target_endpoint: /health
+    expect:
+      status: 200
+      body:
+        trusted: true
+
+  # Device ID derivation
+  - name: mtls_device_id_from_fingerprint
+    description: Device ID is derived from certificate fingerprint
+    request:
+      client_cert: trusted
+      target_endpoint: /health
+    expect:
+      status: 200
+      body:
+        clientFingerprint: $nonempty
+
+  - name: mtls_consistent_device_id
+    description: Same certificate always produces same device ID
+    request:
+      client_cert: trusted
+      target_endpoint: /noise/subscribe
+      body:
+        fcmToken: token123
+        platform: android
+    expect:
+      status: 200
+      body:
+        deviceId: $stable_device_id
+
+  # TLS version and cipher requirements
+  - name: mtls_tls12_minimum
+    description: TLS 1.2 is minimum supported version
+    request:
+      client_cert: trusted
+      tls_version: "1.1"
+      target_endpoint: /health
+    expect:
+      connection_error: protocol_version
+
+  - name: mtls_tls13_supported
+    description: TLS 1.3 is supported
+    request:
+      client_cert: trusted
+      tls_version: "1.3"
+      target_endpoint: /health
+    expect:
+      status: 200
+
+  # Edge cases
+  - name: mtls_no_client_cert_on_health_allowed
+    description: Health endpoint allows no client cert (returns limited info)
+    request:
+      client_cert: null
+      target_endpoint: /health
+    expect:
+      status: 200
+      body:
+        mTLS: false
+        trusted: false
+
+  - name: mtls_no_client_cert_on_protected_rejected
+    description: Protected endpoints require client certificate
+    request:
+      client_cert: null
+      target_endpoint: /unpair
+      body: {}
+    expect:
+      status: 401
+
+  # Certificate attribute extraction
+  - name: mtls_extracts_common_name
+    description: Server can extract Common Name from certificate
+    request:
+      client_cert: trusted
+      target_endpoint: /health
+    expect:
+      status: 200
+      body:
+        trusted: true
+
+  - name: mtls_handles_missing_cn
+    description: Server handles certificates without Common Name
+    request:
+      client_cert: no_cn
+      target_endpoint: /health
+    expect:
+      status: 200

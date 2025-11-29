@@ -22,6 +22,7 @@ import '../utils/canonical_json.dart';
 import '../utils/logger.dart';
 import '../webrtc/monitor_streaming_controller.dart';
 import 'android_control_server.dart';
+import 'ios_control_server.dart';
 import 'control_connection.dart';
 import 'control_messages.dart';
 import 'control_server.dart' as server;
@@ -129,21 +130,24 @@ bool _setEquals<T>(Set<T> a, Set<T> b) {
 // -----------------------------------------------------------------------------
 
 class ControlServerController extends Notifier<ControlServerState> {
-  // Dart-only server (non-Android platforms)
+  // Dart-only server (non-Android/iOS platforms)
   server.ControlServer? _server;
   // Android native server (foreground service)
   AndroidControlServer? _androidServer;
+  // iOS native server
+  IOSControlServer? _iOSServer;
 
   bool _starting = false;
   final Map<String, ControlConnection> _connections = {};
-  // Android connections don't have ControlConnection, track by connectionId->fingerprint
-  final Map<String, String> _androidConnections = {};
+  // Native connections don't have ControlConnection, track by connectionId->fingerprint
+  final Map<String, String> _nativeConnections = {};
   StreamSubscription<server.ControlServerEvent>? _eventSub;
   StreamSubscription<AndroidControlServerEvent>? _androidEventSub;
+  StreamSubscription<IOSControlServerEvent>? _iOSEventSub;
   FcmSender? _fcmSender;
 
-  /// Whether we're using the Android native server.
-  bool get _useAndroidServer => Platform.isAndroid;
+  /// Whether we're using a native server (Android or iOS).
+  bool get _useNativeServer => Platform.isAndroid || Platform.isIOS;
 
   /// Track last noise broadcast timestamp per subscription (for per-listener cooldown).
   final Map<String, int> _lastBroadcastPerSubscription = {};
@@ -181,11 +185,16 @@ class ControlServerController extends Notifier<ControlServerState> {
 
     _starting = true;
 
+    final platformStr = Platform.isAndroid
+        ? 'android-native'
+        : Platform.isIOS
+            ? 'ios-native'
+            : 'dart';
     _log(
       'Starting control server port=$port '
       'trusted=${trustedFingerprints.length} '
       'fingerprint=${shortFingerprint(identity.certFingerprint)} '
-      'platform=${_useAndroidServer ? 'android-native' : 'dart'}',
+      'platform=$platformStr',
     );
 
     state = ControlServerState.starting(
@@ -196,8 +205,14 @@ class ControlServerController extends Notifier<ControlServerState> {
     );
 
     try {
-      if (_useAndroidServer) {
+      if (Platform.isAndroid) {
         await _startAndroidServer(
+          port: port,
+          identity: identity,
+          trustedPeers: trustedPeers,
+        );
+      } else if (Platform.isIOS) {
+        await _startIOSServer(
           port: port,
           identity: identity,
           trustedPeers: trustedPeers,
@@ -215,9 +230,11 @@ class ControlServerController extends Notifier<ControlServerState> {
           .read(monitorStreamingProvider.notifier)
           .setSendCallback(_sendToConnection);
 
-      final actualPort = _useAndroidServer
+      final actualPort = Platform.isAndroid
           ? (_androidServer?.boundPort ?? port)
-          : (_server?.boundPort ?? port);
+          : Platform.isIOS
+              ? (_iOSServer?.boundPort ?? port)
+              : (_server?.boundPort ?? port);
       _log(
         'Control server running on port $actualPort '
         'trusted=${trustedFingerprints.length} '
@@ -286,6 +303,82 @@ class ControlServerController extends Notifier<ControlServerState> {
     _androidEventSub = _androidServer!.events.listen(_handleAndroidServerEvent);
   }
 
+  /// Start the iOS native control server.
+  Future<void> _startIOSServer({
+    required int port,
+    required DeviceIdentity identity,
+    required List<TrustedPeer> trustedPeers,
+  }) async {
+    _iOSServer ??= IOSControlServer();
+
+    await _iOSServer!.start(
+      port: port,
+      identity: identity,
+      trustedPeers: trustedPeers,
+    );
+
+    // Listen for server events
+    _iOSEventSub?.cancel();
+    _iOSEventSub = _iOSServer!.events.listen(_handleIOSServerEvent);
+  }
+
+  /// Handle events from the iOS native control server.
+  void _handleIOSServerEvent(IOSControlServerEvent event) {
+    switch (event) {
+      case IOSServerStarted(:final port):
+        _log('iOS server started on port $port');
+
+      case IOSServerError(:final error):
+        _log('iOS server error: $error');
+        state = ControlServerState.error(
+          error: error,
+          port: state.port,
+          trustedFingerprints: state.trustedFingerprints,
+          fingerprint: state.fingerprint,
+          deviceId: state.deviceId,
+        );
+
+      case IOSClientConnected(
+        :final connectionId,
+        :final fingerprint,
+        :final remoteAddress,
+      ):
+        _log(
+          'iOS client connected: $connectionId '
+          'peer=${shortFingerprint(fingerprint)} remote=$remoteAddress',
+        );
+        _nativeConnections[connectionId] = fingerprint;
+        state = state.copyWithConnectionCount(_nativeConnections.length);
+
+      case IOSClientDisconnected(:final connectionId, :final reason):
+        _log('iOS client disconnected: $connectionId reason=$reason');
+        _nativeConnections.remove(connectionId);
+        // Clean up any streaming sessions for this connection
+        ref
+            .read(monitorStreamingProvider.notifier)
+            .endSessionsForConnection(connectionId);
+        state = state.copyWithConnectionCount(_nativeConnections.length);
+
+      case IOSWsMessage(:final connectionId, :final messageJson):
+        _handleNativeWsMessage(connectionId, messageJson);
+
+      case IOSHttpRequest(
+        :final requestId,
+        :final method,
+        :final path,
+        :final fingerprint,
+        :final bodyJson,
+      ):
+        unawaited(_handleNativeHttpRequest(
+          requestId: requestId,
+          method: method,
+          path: path,
+          fingerprint: fingerprint,
+          bodyJson: bodyJson,
+        ));
+    }
+  }
+
   void _handleServerEvent(server.ControlServerEvent event) {
     switch (event) {
       case server.ClientConnected(:final connection):
@@ -334,20 +427,20 @@ class ControlServerController extends Notifier<ControlServerState> {
           'Android client connected: $connectionId '
           'peer=${shortFingerprint(fingerprint)} remote=$remoteAddress',
         );
-        _androidConnections[connectionId] = fingerprint;
-        state = state.copyWithConnectionCount(_androidConnections.length);
+        _nativeConnections[connectionId] = fingerprint;
+        state = state.copyWithConnectionCount(_nativeConnections.length);
 
       case AndroidClientDisconnected(:final connectionId, :final reason):
         _log('Android client disconnected: $connectionId reason=$reason');
-        _androidConnections.remove(connectionId);
+        _nativeConnections.remove(connectionId);
         // Clean up any streaming sessions for this connection
         ref
             .read(monitorStreamingProvider.notifier)
             .endSessionsForConnection(connectionId);
-        state = state.copyWithConnectionCount(_androidConnections.length);
+        state = state.copyWithConnectionCount(_nativeConnections.length);
 
       case AndroidWsMessage(:final connectionId, :final messageJson):
-        _handleAndroidWsMessage(connectionId, messageJson);
+        _handleNativeWsMessage(connectionId, messageJson);
 
       case AndroidHttpRequest(
         :final requestId,
@@ -356,7 +449,7 @@ class ControlServerController extends Notifier<ControlServerState> {
         :final fingerprint,
         :final bodyJson,
       ):
-        unawaited(_handleAndroidHttpRequest(
+        unawaited(_handleNativeHttpRequest(
           requestId: requestId,
           method: method,
           path: path,
@@ -366,11 +459,11 @@ class ControlServerController extends Notifier<ControlServerState> {
     }
   }
 
-  /// Handle WebSocket messages from Android native server.
-  void _handleAndroidWsMessage(String connectionId, String messageJson) {
-    final fingerprint = _androidConnections[connectionId];
+  /// Handle WebSocket messages from native (Android/iOS) server.
+  void _handleNativeWsMessage(String connectionId, String messageJson) {
+    final fingerprint = _nativeConnections[connectionId];
     if (fingerprint == null) {
-      _log('WS message from unknown Android connection: $connectionId');
+      _log('WS message from unknown native connection: $connectionId');
       return;
     }
 
@@ -378,16 +471,16 @@ class ControlServerController extends Notifier<ControlServerState> {
       final json = jsonDecode(messageJson) as Map<String, dynamic>;
       final message = ControlMessageFactory.fromWireJson(json);
       _log(
-        'Android WS received ${message.type.name} from $connectionId',
+        'Native WS received ${message.type.name} from $connectionId',
       );
-      _handleAndroidMessage(connectionId, fingerprint, message);
+      _handleNativeMessage(connectionId, fingerprint, message);
     } catch (e) {
-      _log('Failed to parse Android WS message: $e');
+      _log('Failed to parse native WS message: $e');
     }
   }
 
-  /// Handle a control message from Android connection.
-  void _handleAndroidMessage(
+  /// Handle a control message from native (Android/iOS) connection.
+  void _handleNativeMessage(
     String connectionId,
     String fingerprint,
     ControlMessage message,
@@ -395,7 +488,7 @@ class ControlServerController extends Notifier<ControlServerState> {
     switch (message) {
       case FcmTokenUpdateMessage(:final fcmToken, :final deviceId):
         unawaited(
-          _handleAndroidFcmTokenUpdate(
+          _handleNativeFcmTokenUpdate(
             connectionId: connectionId,
             fingerprint: fingerprint,
             claimedDeviceId: deviceId,
@@ -422,8 +515,8 @@ class ControlServerController extends Notifier<ControlServerState> {
     }
   }
 
-  /// Handle FCM token update from Android connection.
-  Future<void> _handleAndroidFcmTokenUpdate({
+  /// Handle FCM token update from native (Android/iOS) connection.
+  Future<void> _handleNativeFcmTokenUpdate({
     required String connectionId,
     required String fingerprint,
     required String fcmToken,
@@ -466,63 +559,63 @@ class ControlServerController extends Notifier<ControlServerState> {
         );
   }
 
-  /// Handle HTTP request from Android native server.
-  Future<void> _handleAndroidHttpRequest({
+  /// Handle HTTP request from native (Android/iOS) server.
+  Future<void> _handleNativeHttpRequest({
     required String requestId,
     required String method,
     required String path,
     String? fingerprint,
     String? bodyJson,
   }) async {
-    _log('Android HTTP $method $path requestId=$requestId');
+    _log('Native HTTP $method $path requestId=$requestId');
 
     try {
       switch (path) {
         case '/health':
-          await _respondAndroidHealth(requestId, fingerprint);
+          await _respondNativeHealth(requestId, fingerprint);
 
         case '/test':
-          await _respondAndroidTest(requestId, fingerprint);
+          await _respondNativeTest(requestId, fingerprint);
 
         case '/unpair':
           if (method == 'POST') {
-            await _respondAndroidUnpair(requestId, fingerprint, bodyJson);
+            await _respondNativeUnpair(requestId, fingerprint, bodyJson);
           } else {
-            await _androidServer?.respondHttp(requestId, 405, null);
+            await _respondNativeHttp(requestId, 405, null);
           }
 
         case '/noise/subscribe':
           if (method == 'POST') {
-            await _respondAndroidNoiseSubscribe(
+            await _respondNativeNoiseSubscribe(
               requestId,
               fingerprint,
               bodyJson,
             );
           } else {
-            await _androidServer?.respondHttp(requestId, 405, null);
+            await _respondNativeHttp(requestId, 405, null);
           }
 
         case '/noise/unsubscribe':
           if (method == 'POST') {
-            await _respondAndroidNoiseUnsubscribe(
+            await _respondNativeNoiseUnsubscribe(
               requestId,
               fingerprint,
               bodyJson,
             );
           } else {
-            await _androidServer?.respondHttp(requestId, 405, null);
+            await _respondNativeHttp(requestId, 405, null);
           }
 
         default:
-          await _androidServer?.respondHttp(
+          await _respondNativeHttp(
             requestId,
             404,
             jsonEncode({'error': 'not_found'}),
           );
       }
     } catch (e) {
-      _log('Android HTTP error: $e');
-      await _androidServer?.respondHttp(
+      _log('Native HTTP error: $e');
+      await _respondNativeHttp(
         requestId,
         500,
         jsonEncode({'error': 'internal_error', 'message': '$e'}),
@@ -530,7 +623,20 @@ class ControlServerController extends Notifier<ControlServerState> {
     }
   }
 
-  Future<void> _respondAndroidHealth(
+  /// Send HTTP response via native (Android/iOS) server.
+  Future<void> _respondNativeHttp(
+    String requestId,
+    int statusCode,
+    String? bodyJson,
+  ) async {
+    if (Platform.isAndroid) {
+      await _androidServer?.respondHttp(requestId, statusCode, bodyJson);
+    } else if (Platform.isIOS) {
+      await _iOSServer?.respondHttp(requestId, statusCode, bodyJson);
+    }
+  }
+
+  Future<void> _respondNativeHealth(
     String requestId,
     String? fingerprint,
   ) async {
@@ -538,21 +644,21 @@ class ControlServerController extends Notifier<ControlServerState> {
       'status': 'ok',
       'role': 'monitor',
       'protocol': kTransportHttpWs,
-      'activeConnections': _androidConnections.length,
+      'activeConnections': _nativeConnections.length,
       'mTLS': fingerprint != null,
       'trusted': fingerprint != null,
       if (state.fingerprint != null) 'fingerprint': state.fingerprint,
       if (fingerprint != null) 'clientFingerprint': fingerprint,
     });
-    await _androidServer?.respondHttp(requestId, 200, body);
+    await _respondNativeHttp(requestId, 200, body);
   }
 
-  Future<void> _respondAndroidTest(
+  Future<void> _respondNativeTest(
     String requestId,
     String? fingerprint,
   ) async {
     if (fingerprint == null) {
-      await _androidServer?.respondHttp(
+      await _respondNativeHttp(
         requestId,
         401,
         canonicalizeJson({
@@ -563,7 +669,7 @@ class ControlServerController extends Notifier<ControlServerState> {
       return;
     }
 
-    await _androidServer?.respondHttp(
+    await _respondNativeHttp(
       requestId,
       200,
       canonicalizeJson({
@@ -575,13 +681,13 @@ class ControlServerController extends Notifier<ControlServerState> {
     );
   }
 
-  Future<void> _respondAndroidUnpair(
+  Future<void> _respondNativeUnpair(
     String requestId,
     String? fingerprint,
     String? bodyJson,
   ) async {
     if (fingerprint == null) {
-      await _androidServer?.respondHttp(
+      await _respondNativeHttp(
         requestId,
         401,
         canonicalizeJson({
@@ -600,7 +706,7 @@ class ControlServerController extends Notifier<ControlServerState> {
           deviceId = payload['deviceId'] as String;
         }
       } catch (e) {
-        await _androidServer?.respondHttp(
+        await _respondNativeHttp(
           requestId,
           400,
           canonicalizeJson({
@@ -613,7 +719,7 @@ class ControlServerController extends Notifier<ControlServerState> {
     }
 
     final unpaired = await _handleUnpairRequest(fingerprint, deviceId);
-    await _androidServer?.respondHttp(
+    await _respondNativeHttp(
       requestId,
       200,
       canonicalizeJson({
@@ -625,13 +731,13 @@ class ControlServerController extends Notifier<ControlServerState> {
     );
   }
 
-  Future<void> _respondAndroidNoiseSubscribe(
+  Future<void> _respondNativeNoiseSubscribe(
     String requestId,
     String? fingerprint,
     String? bodyJson,
   ) async {
     if (fingerprint == null) {
-      await _androidServer?.respondHttp(
+      await _respondNativeHttp(
         requestId,
         401,
         canonicalizeJson({
@@ -643,7 +749,7 @@ class ControlServerController extends Notifier<ControlServerState> {
     }
 
     if (bodyJson == null || bodyJson.isEmpty) {
-      await _androidServer?.respondHttp(
+      await _respondNativeHttp(
         requestId,
         400,
         canonicalizeJson({'error': 'invalid_json', 'message': 'Body required'}),
@@ -655,7 +761,7 @@ class ControlServerController extends Notifier<ControlServerState> {
     try {
       body = jsonDecode(bodyJson) as Map<String, dynamic>;
     } catch (e) {
-      await _androidServer?.respondHttp(
+      await _respondNativeHttp(
         requestId,
         400,
         canonicalizeJson({'error': 'invalid_json', 'message': '$e'}),
@@ -672,7 +778,7 @@ class ControlServerController extends Notifier<ControlServerState> {
     final autoStreamDurationSec = body['autoStreamDurationSec'];
 
     if (fcmToken is! String || fcmToken.isEmpty) {
-      await _androidServer?.respondHttp(
+      await _respondNativeHttp(
         requestId,
         400,
         canonicalizeJson({
@@ -684,7 +790,7 @@ class ControlServerController extends Notifier<ControlServerState> {
     }
 
     if (platform is! String || platform.isEmpty) {
-      await _androidServer?.respondHttp(
+      await _respondNativeHttp(
         requestId,
         400,
         canonicalizeJson({
@@ -700,7 +806,7 @@ class ControlServerController extends Notifier<ControlServerState> {
       try {
         autoStreamType = AutoStreamType.values.byName(autoStreamTypeName);
       } catch (_) {
-        await _androidServer?.respondHttp(
+        await _respondNativeHttp(
           requestId,
           400,
           canonicalizeJson({
@@ -718,14 +824,14 @@ class ControlServerController extends Notifier<ControlServerState> {
         fcmToken: fcmToken,
         platform: platform,
         leaseSeconds: leaseSeconds as int?,
-        remoteAddress: 'android-native',
+        remoteAddress: 'native',
         threshold: threshold as int?,
         cooldownSeconds: cooldownSeconds as int?,
         autoStreamType: autoStreamType,
         autoStreamDurationSec: autoStreamDurationSec as int?,
       );
 
-      await _androidServer?.respondHttp(
+      await _respondNativeHttp(
         requestId,
         200,
         canonicalizeJson({
@@ -736,8 +842,8 @@ class ControlServerController extends Notifier<ControlServerState> {
         }),
       );
     } catch (e) {
-      _log('Android noise subscribe error: $e');
-      await _androidServer?.respondHttp(
+      _log('Native noise subscribe error: $e');
+      await _respondNativeHttp(
         requestId,
         500,
         canonicalizeJson({'error': 'internal_error', 'message': '$e'}),
@@ -745,13 +851,13 @@ class ControlServerController extends Notifier<ControlServerState> {
     }
   }
 
-  Future<void> _respondAndroidNoiseUnsubscribe(
+  Future<void> _respondNativeNoiseUnsubscribe(
     String requestId,
     String? fingerprint,
     String? bodyJson,
   ) async {
     if (fingerprint == null) {
-      await _androidServer?.respondHttp(
+      await _respondNativeHttp(
         requestId,
         401,
         canonicalizeJson({
@@ -763,7 +869,7 @@ class ControlServerController extends Notifier<ControlServerState> {
     }
 
     if (bodyJson == null || bodyJson.isEmpty) {
-      await _androidServer?.respondHttp(
+      await _respondNativeHttp(
         requestId,
         400,
         canonicalizeJson({'error': 'invalid_json', 'message': 'Body required'}),
@@ -775,7 +881,7 @@ class ControlServerController extends Notifier<ControlServerState> {
     try {
       body = jsonDecode(bodyJson) as Map<String, dynamic>;
     } catch (e) {
-      await _androidServer?.respondHttp(
+      await _respondNativeHttp(
         requestId,
         400,
         canonicalizeJson({'error': 'invalid_json', 'message': '$e'}),
@@ -787,7 +893,7 @@ class ControlServerController extends Notifier<ControlServerState> {
     final subscriptionId = body['subscriptionId'] as String?;
 
     if (fcmToken == null && subscriptionId == null) {
-      await _androidServer?.respondHttp(
+      await _respondNativeHttp(
         requestId,
         400,
         canonicalizeJson({
@@ -803,10 +909,10 @@ class ControlServerController extends Notifier<ControlServerState> {
         fingerprint: fingerprint,
         fcmToken: fcmToken,
         subscriptionId: subscriptionId,
-        remoteAddress: 'android-native',
+        remoteAddress: 'native',
       );
 
-      await _androidServer?.respondHttp(
+      await _respondNativeHttp(
         requestId,
         200,
         canonicalizeJson({
@@ -819,8 +925,8 @@ class ControlServerController extends Notifier<ControlServerState> {
         }),
       );
     } catch (e) {
-      _log('Android noise unsubscribe error: $e');
-      await _androidServer?.respondHttp(
+      _log('Native noise unsubscribe error: $e');
+      await _respondNativeHttp(
         requestId,
         500,
         canonicalizeJson({'error': 'internal_error', 'message': '$e'}),
@@ -833,11 +939,15 @@ class ControlServerController extends Notifier<ControlServerState> {
     String connectionId,
     ControlMessage message,
   ) async {
-    if (_useAndroidServer) {
-      // Android: send via platform channel (toWireJson includes 'type' field)
+    if (_useNativeServer) {
+      // Native: send via platform channel (toWireJson includes 'type' field)
       final messageJson = jsonEncode(message.toWireJson());
-      _log('Sending ${message.type.name} to Android $connectionId');
-      await _androidServer?.sendTo(connectionId, messageJson);
+      _log('Sending ${message.type.name} to native $connectionId');
+      if (Platform.isAndroid) {
+        await _androidServer?.sendTo(connectionId, messageJson);
+      } else if (Platform.isIOS) {
+        await _iOSServer?.sendTo(connectionId, messageJson);
+      }
     } else {
       // Dart: send via WebSocket connection
       final connection = _connections[connectionId];
@@ -1105,10 +1215,12 @@ class ControlServerController extends Notifier<ControlServerState> {
       'fingerprint=${shortFingerprint(peer.certFingerprint)}',
     );
 
-    if (_useAndroidServer) {
-      final androidSrv = _androidServer;
-      if (androidSrv == null) return;
-      await androidSrv.addTrustedPeer(peer);
+    if (_useNativeServer) {
+      if (Platform.isAndroid) {
+        await _androidServer?.addTrustedPeer(peer);
+      } else if (Platform.isIOS) {
+        await _iOSServer?.addTrustedPeer(peer);
+      }
     } else {
       final srv = _server;
       if (srv == null) return;
@@ -1134,10 +1246,12 @@ class ControlServerController extends Notifier<ControlServerState> {
       'Removing trusted peer: fingerprint=${shortFingerprint(fingerprint)}',
     );
 
-    if (_useAndroidServer) {
-      final androidSrv = _androidServer;
-      if (androidSrv == null) return;
-      await androidSrv.removeTrustedPeer(fingerprint);
+    if (_useNativeServer) {
+      if (Platform.isAndroid) {
+        await _androidServer?.removeTrustedPeer(fingerprint);
+      } else if (Platform.isIOS) {
+        await _iOSServer?.removeTrustedPeer(fingerprint);
+      }
     } else {
       final srv = _server;
       if (srv == null) return;
@@ -1162,12 +1276,16 @@ class ControlServerController extends Notifier<ControlServerState> {
 
   /// Broadcast a message to all connected clients.
   Future<void> broadcast(ControlMessage message) async {
-    if (_useAndroidServer) {
-      final count = _androidConnections.length;
-      _log('Broadcasting ${message.type.name} to $count Android clients');
+    if (_useNativeServer) {
+      final count = _nativeConnections.length;
+      _log('Broadcasting ${message.type.name} to $count native clients');
       // toWireJson includes 'type' field required for deserialization
       final messageJson = jsonEncode(message.toWireJson());
-      await _androidServer?.broadcast(messageJson);
+      if (Platform.isAndroid) {
+        await _androidServer?.broadcast(messageJson);
+      } else if (Platform.isIOS) {
+        await _iOSServer?.broadcast(messageJson);
+      }
     } else {
       _log(
         'Broadcasting ${message.type.name} to ${_connections.length} clients',
@@ -1184,10 +1302,14 @@ class ControlServerController extends Notifier<ControlServerState> {
 
   /// Send a message to a specific connection.
   Future<void> sendTo(String connectionId, ControlMessage message) async {
-    if (_useAndroidServer) {
+    if (_useNativeServer) {
       // toWireJson includes 'type' field required for deserialization
       final messageJson = jsonEncode(message.toWireJson());
-      await _androidServer?.sendTo(connectionId, messageJson);
+      if (Platform.isAndroid) {
+        await _androidServer?.sendTo(connectionId, messageJson);
+      } else if (Platform.isIOS) {
+        await _iOSServer?.sendTo(connectionId, messageJson);
+      }
     } else {
       final conn = _connections[connectionId];
       if (conn == null) {
@@ -1255,16 +1377,20 @@ class ControlServerController extends Notifier<ControlServerState> {
         .map((s) => s.certFingerprint)
         .toSet();
 
-    if (_useAndroidServer) {
-      // Android: send to eligible connections via platform channel
+    if (_useNativeServer) {
+      // Native: send to eligible connections via platform channel
       // toWireJson includes 'type' field required for deserialization
       final messageJson = jsonEncode(message.toWireJson());
-      for (final entry in _androidConnections.entries) {
+      for (final entry in _nativeConnections.entries) {
         if (eligibleFingerprints.contains(entry.value)) {
           try {
-            await _androidServer?.sendTo(entry.key, messageJson);
+            if (Platform.isAndroid) {
+              await _androidServer?.sendTo(entry.key, messageJson);
+            } else if (Platform.isIOS) {
+              await _iOSServer?.sendTo(entry.key, messageJson);
+            }
           } catch (e) {
-            _log('Failed to send to Android ${entry.key}: $e');
+            _log('Failed to send to native ${entry.key}: $e');
           }
         }
       }
@@ -1299,8 +1425,8 @@ class ControlServerController extends Notifier<ControlServerState> {
     required List<NoiseSubscription> eligibleSubs,
   }) async {
     // Filter out subscriptions that have active WebSocket connections
-    final connectedFingerprints = _useAndroidServer
-        ? _androidConnections.values.toSet()
+    final connectedFingerprints = _useNativeServer
+        ? _nativeConnections.values.toSet()
         : _connections.values.map((c) => c.peerFingerprint).toSet();
     final subsWithoutWebSocket = eligibleSubs
         .where((s) => !connectedFingerprints.contains(s.certFingerprint))
@@ -1384,8 +1510,10 @@ class ControlServerController extends Notifier<ControlServerState> {
     _eventSub = null;
     _androidEventSub?.cancel();
     _androidEventSub = null;
+    _iOSEventSub?.cancel();
+    _iOSEventSub = null;
     _connections.clear();
-    _androidConnections.clear();
+    _nativeConnections.clear();
     _fcmSender?.dispose();
     _fcmSender = null;
 
@@ -1400,6 +1528,12 @@ class ControlServerController extends Notifier<ControlServerState> {
       _androidServer?.dispose();
     } catch (_) {}
     _androidServer = null;
+
+    try {
+      await _iOSServer?.stop();
+      _iOSServer?.dispose();
+    } catch (_) {}
+    _iOSServer = null;
 
     if (state.status != ControlServerStatus.stopped) {
       state = const ControlServerState.stopped();

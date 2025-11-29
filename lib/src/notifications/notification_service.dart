@@ -3,19 +3,19 @@ import 'dart:developer' as developer;
 
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+import '../lifecycle/service_lifecycle.dart';
+
 /// Callback type for notification responses.
 typedef NotificationResponseCallback = void Function(NotificationResponse);
 
 /// Singleton service for showing local notifications.
-class NotificationService {
-  NotificationService._();
+class NotificationService extends BaseManagedService {
+  NotificationService._() : super('notifications', 'Notification Service');
 
   static final instance = NotificationService._();
 
   final FlutterLocalNotificationsPlugin _plugin =
       FlutterLocalNotificationsPlugin();
-
-  bool _initialized = false;
 
   /// Callback for handling notification responses (taps and actions).
   /// Set this to handle navigation and pairing actions from notifications.
@@ -40,11 +40,8 @@ class NotificationService {
   // Notification IDs
   static const pairingNotificationId = 1001;
 
-  /// Initialize the notification plugin.
-  /// Call this early in app startup.
-  Future<void> initialize() async {
-    if (_initialized) return;
-
+  @override
+  Future<void> onStart() async {
     const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
     const linuxSettings = LinuxInitializationSettings(
       defaultActionName: _linuxDefaultActionName,
@@ -88,8 +85,21 @@ class NotificationService {
       );
     }
 
-    _initialized = true;
     _log('Notification service initialized');
+  }
+
+  @override
+  Future<void> onStop() async {
+    // Cancel all notifications on shutdown
+    await _plugin.cancelAll();
+    _log('Notification service stopped');
+  }
+
+  /// Initialize the notification plugin.
+  /// @deprecated Use start() instead via ServiceCoordinator.
+  Future<void> initialize() async {
+    if (state == ServiceLifecycleState.running) return;
+    await start();
   }
 
   /// Show a noise alert notification.
@@ -97,8 +107,8 @@ class NotificationService {
     required String monitorName,
     required int peakLevel,
   }) async {
-    if (!_initialized) {
-      await initialize();
+    if (state != ServiceLifecycleState.running) {
+      await start();
     }
 
     const androidDetails = AndroidNotificationDetails(
@@ -145,8 +155,8 @@ class NotificationService {
     required String comparisonCode,
     required String sessionId,
   }) async {
-    if (!_initialized) {
-      await initialize();
+    if (state != ServiceLifecycleState.running) {
+      await start();
     }
 
     // Encode session info in payload for action handling

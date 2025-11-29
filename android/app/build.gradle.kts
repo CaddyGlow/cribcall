@@ -57,4 +57,13 @@ dependencies {
     // BouncyCastle for P-256 ECDSA mTLS in MonitorService
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
     implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
+
+    // Test dependencies for protocol conformance testing
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.yaml:snakeyaml:2.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    testImplementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+    testImplementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("androidx.test:runner:1.5.2")
 }

@@ -45,5 +45,17 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>CribCall needs microphone access to monitor sounds</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>CribCall uses the local network to connect monitors and listeners</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_baby-monitor._tcp</string>
+	</array>
 </dict>
 </plist>
