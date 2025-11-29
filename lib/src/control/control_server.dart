@@ -541,7 +541,11 @@ class ControlServer {
   }
 
   Future<void> _handleNoiseSubscribe(HttpRequest request) async {
+    final remote = request.connectionInfo?.remoteAddress.address ?? 'unknown';
+    _log('Noise subscribe request from $remote');
+
     if (onNoiseSubscribe == null) {
+      _log('Noise subscribe rejected: handler not configured');
       _writeCanonicalJson(request.response, HttpStatus.serviceUnavailable, {
         'error': 'noise_subscribe_not_supported',
         'message': 'Noise subscribe handler not configured on server',
@@ -549,7 +553,6 @@ class ControlServer {
       return;
     }
 
-    final remote = request.connectionInfo?.remoteAddress.address ?? 'unknown';
     final clientCert = request.certificate;
     if (clientCert == null) {
       _log('Noise subscribe rejected: no client certificate');

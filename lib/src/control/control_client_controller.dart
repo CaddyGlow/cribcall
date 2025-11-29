@@ -19,6 +19,7 @@ import '../state/app_state.dart';
 import '../state/per_monitor_settings.dart';
 import '../util/format_utils.dart';
 import '../utils/logger.dart';
+import '../webhook/webhook_server.dart';
 import 'control_client.dart' as client;
 import 'control_connection.dart';
 import 'control_messages.dart';
@@ -105,6 +106,11 @@ class ControlClientController extends Notifier<ControlClientState> {
   String? _lastSubscribedToken;
   Timer? _leaseRenewTimer;
   String? _listenerDeviceId;
+
+  // Webhook server for Linux (receives noise events via HTTP POST)
+  WebhookServer? _webhookServer;
+  StreamSubscription<WebhookNoiseEvent>? _webhookEventSub;
+  String? _webhookUrl;
 
   /// Stream controller for noise events - UI can subscribe to receive alerts.
   final _noiseEventController = StreamController<NoiseEventData>.broadcast();
@@ -217,6 +223,9 @@ class ControlClientController extends Notifier<ControlClientState> {
       // Start foreground service to keep connection alive
       _listenerService ??= createListenerServiceManager();
       await _listenerService!.startListening(monitorName: monitor.monitorName);
+
+      // Start webhook server for Linux (must happen before subscribe)
+      await _startWebhookServerIfNeeded(identity);
 
       // Send FCM token to monitor (if available)
       await _sendFcmTokenToMonitor(identity.deviceId);
@@ -349,6 +358,126 @@ class ControlClientController extends Notifier<ControlClientState> {
     unawaited(_subscribeNoiseLease(force: true));
   }
 
+  /// Start webhook server for Linux to receive noise events via HTTP POST.
+  Future<void> _startWebhookServerIfNeeded(DeviceIdentity identity) async {
+    if (!Platform.isLinux) {
+      _log('Webhook server: skipped (not Linux)');
+      return;
+    }
+    if (_webhookServer?.isRunning == true) {
+      _log('Webhook server: already running');
+      return;
+    }
+
+    _log('Starting webhook server for Linux listener...');
+
+    // Get trusted monitors to allow their certificates
+    final monitors = ref.read(trustedMonitorsProvider).asData?.value ?? [];
+    _log('Webhook server: ${monitors.length} trusted monitors');
+
+    try {
+      _webhookServer = WebhookServer();
+      await _webhookServer!.start(
+        port: kWebhookDefaultPort,
+        identity: identity,
+        trustedMonitors: monitors,
+      );
+
+      // Subscribe to webhook events
+      _webhookEventSub =
+          _webhookServer!.events.listen(_handleWebhookNoiseEvent);
+
+      // Determine webhook URL from local IP (use monitor's IP as hint)
+      final localIp = await _getLocalIpForMonitor(_currentHost);
+      if (localIp != null) {
+        _webhookUrl =
+            'https://$localIp:${_webhookServer!.boundPort}/api/noise-event';
+        _log('Webhook server ready: $_webhookUrl');
+      } else {
+        _log('Warning: Could not determine local IP for webhook URL');
+      }
+    } catch (e, stack) {
+      _log('Failed to start webhook server: $e');
+      _log('Stack: $stack');
+      // Don't fail connection - fall back to ws-only mode
+      _webhookServer = null;
+      _webhookUrl = null;
+    }
+  }
+
+  /// Get local IP address that can reach the monitor.
+  Future<String?> _getLocalIpForMonitor(String? monitorHost) async {
+    if (monitorHost == null) return null;
+
+    try {
+      // Connect to monitor to determine which interface we're using
+      final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      try {
+        // Parse the monitor host address
+        final addresses = await InternetAddress.lookup(monitorHost);
+        if (addresses.isEmpty) return null;
+
+        // Connect to determine local address (doesn't actually send anything)
+        socket.send([], addresses.first, 9999);
+
+        // Get local address
+        final localAddress = socket.address.address;
+        if (localAddress != '0.0.0.0') {
+          return localAddress;
+        }
+      } finally {
+        socket.close();
+      }
+
+      // Fallback: enumerate network interfaces
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+      );
+      for (final iface in interfaces) {
+        for (final addr in iface.addresses) {
+          if (!addr.isLoopback) {
+            return addr.address;
+          }
+        }
+      }
+    } catch (e) {
+      _log('Failed to determine local IP: $e');
+    }
+    return null;
+  }
+
+  /// Handle noise event received via webhook.
+  void _handleWebhookNoiseEvent(WebhookNoiseEvent event) {
+    _log(
+      'Webhook noise event: remoteDeviceId=${event.remoteDeviceId} '
+      'peakLevel=${event.peakLevel}',
+    );
+
+    final noiseEvent = NoiseEventData(
+      remoteDeviceId: event.remoteDeviceId,
+      monitorName: event.monitorName,
+      timestamp: event.timestamp,
+      peakLevel: event.peakLevel,
+    );
+
+    // Check for duplicates (may also arrive via WebSocket)
+    final dedup = ref.read(noiseEventDeduplicationProvider.notifier);
+    if (!dedup.processEvent(noiseEvent)) {
+      _log('Duplicate noise event ignored (already received via WebSocket)');
+      return;
+    }
+
+    _processNewNoiseEvent(noiseEvent);
+  }
+
+  Future<void> _stopWebhookServer() async {
+    _webhookEventSub?.cancel();
+    _webhookEventSub = null;
+    await _webhookServer?.stop();
+    _webhookServer = null;
+    _webhookUrl = null;
+  }
+
   Future<void> _subscribeNoiseLease({bool force = false}) async {
     if (_currentHost == null ||
         _currentPort == null ||
@@ -356,30 +485,41 @@ class ControlClientController extends Notifier<ControlClientState> {
       _log('Noise subscribe skipped: missing monitor address');
       return;
     }
-    final token = _resolveNoiseToken();
-    if (token == null || token.isEmpty) {
-      _log('Noise subscribe skipped: no push token');
-      return;
-    }
-    final usingWebsocketOnly = isWebsocketOnlyNoiseToken(token);
     if (_client == null) {
       _log('Noise subscribe skipped: client not initialized');
       return;
     }
+
+    final platform = _platformLabel();
+    final useWebhook = Platform.isLinux && _webhookUrl != null;
+    _log(
+      'Noise subscribe: platform=$platform isLinux=${Platform.isLinux} '
+      'webhookUrl=$_webhookUrl useWebhook=$useWebhook',
+    );
+
+    // For webhook, check URL; for FCM, check token
+    String? token;
+    if (!useWebhook) {
+      token = _resolveNoiseToken();
+      if (token == null || token.isEmpty) {
+        _log('Noise subscribe skipped: no push token');
+        return;
+      }
+    }
+
+    final cacheKey = useWebhook ? _webhookUrl : token;
     final now = DateTime.now().toUtc();
     if (!force &&
         _activeSubscriptionExpiry != null &&
         _activeSubscriptionExpiry!.isAfter(
           now.add(const Duration(minutes: 5)),
         ) &&
-        _lastSubscribedToken == token) {
+        _lastSubscribedToken == cacheKey) {
       _log('Noise subscription still valid, skipping renew');
       return;
     }
 
     try {
-      final platform = _platformLabel();
-
       // Get listener's noise preferences
       final listenerSettings = await ref.read(listenerSettingsProvider.future);
       final globalPrefs = listenerSettings.noisePreferences;
@@ -410,7 +550,9 @@ class ControlClientController extends Notifier<ControlClientState> {
         host: _currentHost!,
         port: _currentPort!,
         expectedFingerprint: _expectedFingerprint!,
-        fcmToken: token,
+        notificationType: useWebhook ? 'webhook' : null,
+        fcmToken: useWebhook ? null : token,
+        webhookUrl: useWebhook ? _webhookUrl : null,
         platform: platform,
         leaseSeconds: null,
         threshold: effectiveThreshold,
@@ -420,7 +562,7 @@ class ControlClientController extends Notifier<ControlClientState> {
       );
       _activeSubscriptionId = response.subscriptionId;
       _activeSubscriptionExpiry = response.expiresAt;
-      _lastSubscribedToken = token;
+      _lastSubscribedToken = cacheKey;
       _scheduleLeaseRenewal(response.expiresAt);
       _log(
         'Noise subscription updated: subId=${response.subscriptionId} '
@@ -428,7 +570,7 @@ class ControlClientController extends Notifier<ControlClientState> {
         'lease=${response.acceptedLeaseSeconds}s '
         'threshold=$effectiveThreshold cooldown=$effectiveCooldown '
         'autoStream=${effectiveAutoStreamType.name} '
-        'delivery=${usingWebsocketOnly ? 'ws-only' : 'fcm'}',
+        'delivery=${useWebhook ? 'webhook' : (isWebsocketOnlyNoiseToken(token ?? '') ? 'ws-only' : 'fcm')}',
       );
     } catch (e) {
       _log('Noise subscribe failed: $e');
@@ -490,7 +632,7 @@ class ControlClientController extends Notifier<ControlClientState> {
     if (Platform.isLinux) {
       final deviceId =
           _listenerDeviceId ??
-          ref.read(identityProvider).asData?.value?.deviceId;
+          ref.read(identityProvider).asData?.value.deviceId;
       if (deviceId != null && deviceId.isNotEmpty) {
         return websocketOnlyNoiseToken(deviceId);
       }
@@ -683,6 +825,11 @@ class ControlClientController extends Notifier<ControlClientState> {
     // Stop foreground service
     try {
       await _listenerService?.stopListening();
+    } catch (_) {}
+
+    // Stop webhook server (Linux)
+    try {
+      await _stopWebhookServer();
     } catch (_) {}
 
     try {

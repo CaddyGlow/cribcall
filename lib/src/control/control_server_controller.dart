@@ -778,17 +778,123 @@ class ControlServerController extends Notifier<ControlServerState> {
     final cooldownSeconds = body['cooldownSeconds'];
     final autoStreamTypeName = body['autoStreamType'];
     final autoStreamDurationSec = body['autoStreamDurationSec'];
+    final notificationTypeName = body['notificationType'];
+    final webhookUrl = body['webhookUrl'];
 
-    if (fcmToken is! String || fcmToken.isEmpty) {
+    final allowedKeys = {
+      'fcmToken',
+      'platform',
+      'leaseSeconds',
+      'deviceId',
+      'pairingId',
+      'subscriptionId',
+      'threshold',
+      'cooldownSeconds',
+      'autoStreamType',
+      'autoStreamDurationSec',
+      'notificationType',
+      'webhookUrl',
+    };
+    final unknown = body.keys.where((k) => !allowedKeys.contains(k)).toList();
+    if (unknown.isNotEmpty) {
       await _respondNativeHttp(
         requestId,
         400,
         canonicalizeJson({
-          'error': 'invalid_fcm_token',
-          'message': 'fcmToken is required',
+          'error': 'unknown_fields',
+          'fields': unknown,
         }),
       );
       return;
+    }
+
+    if (body.containsKey('deviceId') || body.containsKey('pairingId')) {
+      await _respondNativeHttp(
+        requestId,
+        400,
+        canonicalizeJson({
+          'error': 'device_id_forbidden',
+          'message': 'Server derives deviceId from certificate',
+        }),
+      );
+      return;
+    }
+
+    NotificationType notificationType = NotificationType.fcm;
+    if (notificationTypeName != null) {
+      if (notificationTypeName is! String) {
+        await _respondNativeHttp(
+          requestId,
+          400,
+          canonicalizeJson({
+            'error': 'invalid_notification_type',
+            'message': 'notificationType must be a string',
+          }),
+        );
+        return;
+      }
+      try {
+        notificationType = NotificationType.values.byName(notificationTypeName);
+      } catch (_) {
+        await _respondNativeHttp(
+          requestId,
+          400,
+          canonicalizeJson({
+            'error': 'invalid_notification_type',
+            'message': 'notificationType must be one of: fcm, webhook, apns',
+          }),
+        );
+        return;
+      }
+    }
+
+    switch (notificationType) {
+      case NotificationType.fcm:
+        if (fcmToken is! String || fcmToken.isEmpty) {
+          await _respondNativeHttp(
+            requestId,
+            400,
+            canonicalizeJson({
+              'error': 'invalid_fcm_token',
+              'message': 'fcmToken is required for FCM notifications',
+            }),
+          );
+          return;
+        }
+      case NotificationType.webhook:
+        if (webhookUrl is! String || webhookUrl.isEmpty) {
+          await _respondNativeHttp(
+            requestId,
+            400,
+            canonicalizeJson({
+              'error': 'invalid_webhook_url',
+              'message': 'webhookUrl is required for webhook notifications',
+            }),
+          );
+          return;
+        }
+        final validationError = validateWebhookUrl(webhookUrl);
+        if (validationError != null) {
+          await _respondNativeHttp(
+            requestId,
+            400,
+            canonicalizeJson({
+              'error': 'invalid_webhook_url',
+              'message': validationError,
+            }),
+          );
+          return;
+        }
+      case NotificationType.apns:
+        await _respondNativeHttp(
+          requestId,
+          400,
+          canonicalizeJson({
+            'error': 'unsupported_notification_type',
+            'message': 'APNS notifications not yet supported',
+          }),
+        );
+        return;
     }
 
     if (platform is! String || platform.isEmpty) {
@@ -803,8 +909,31 @@ class ControlServerController extends Notifier<ControlServerState> {
       return;
     }
 
+    if (leaseSeconds != null && leaseSeconds is! int) {
+      await _respondNativeHttp(
+        requestId,
+        400,
+        canonicalizeJson({
+          'error': 'invalid_lease',
+          'message': 'leaseSeconds must be an integer if provided',
+        }),
+      );
+      return;
+    }
+
     AutoStreamType? autoStreamType;
-    if (autoStreamTypeName is String) {
+    if (autoStreamTypeName != null) {
+      if (autoStreamTypeName is! String) {
+        await _respondNativeHttp(
+          requestId,
+          400,
+          canonicalizeJson({
+            'error': 'invalid_auto_stream_type',
+            'message': 'autoStreamType must be a string if provided',
+          }),
+        );
+        return;
+      }
       try {
         autoStreamType = AutoStreamType.values.byName(autoStreamTypeName);
       } catch (_) {
@@ -820,15 +949,55 @@ class ControlServerController extends Notifier<ControlServerState> {
       }
     }
 
+    if (threshold != null && threshold is! int) {
+      await _respondNativeHttp(
+        requestId,
+        400,
+        canonicalizeJson({
+          'error': 'invalid_threshold',
+          'message': 'threshold must be an integer if provided',
+        }),
+      );
+      return;
+    }
+
+    if (cooldownSeconds != null && cooldownSeconds is! int) {
+      await _respondNativeHttp(
+        requestId,
+        400,
+        canonicalizeJson({
+          'error': 'invalid_cooldown',
+          'message': 'cooldownSeconds must be an integer if provided',
+        }),
+      );
+      return;
+    }
+
+    if (autoStreamDurationSec != null && autoStreamDurationSec is! int) {
+      await _respondNativeHttp(
+        requestId,
+        400,
+        canonicalizeJson({
+          'error': 'invalid_auto_stream_duration',
+          'message': 'autoStreamDurationSec must be an integer if provided',
+        }),
+      );
+      return;
+    }
+
     try {
       final result = await _handleNoiseSubscribeRequest(
         fingerprint: fingerprint,
-        fcmToken: fcmToken,
+        fcmToken: notificationType == NotificationType.webhook
+            ? null
+            : fcmToken as String?,
         platform: platform,
         leaseSeconds: leaseSeconds as int?,
         remoteAddress: 'native',
+        notificationType: notificationType,
         threshold: threshold as int?,
         cooldownSeconds: cooldownSeconds as int?,
+        webhookUrl: webhookUrl as String?,
         autoStreamType: autoStreamType,
         autoStreamDurationSec: autoStreamDurationSec as int?,
       );

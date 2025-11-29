@@ -294,3 +294,119 @@ cases:
       body:
         subscriptionId: $nonempty
         deviceId: $nonempty
+
+  # Webhook notification type tests
+  - name: subscribe_webhook_success
+    description: Subscribe succeeds with webhook notification type
+    request:
+      client_cert: trusted
+      body:
+        notificationType: webhook
+        webhookUrl: "https://listener.example.com/api/noise-event"
+        platform: linux
+    expect:
+      status: 200
+      body:
+        subscriptionId: $nonempty
+        deviceId: $nonempty
+        expiresAt: $iso8601
+        acceptedLeaseSeconds: $positive_int
+
+  - name: subscribe_webhook_missing_url
+    description: Subscribe webhook rejected without webhookUrl
+    request:
+      client_cert: trusted
+      body:
+        notificationType: webhook
+        platform: linux
+    expect:
+      status: 400
+      body:
+        error: invalid_webhook_url
+        message: $contains:required
+
+  - name: subscribe_webhook_http_rejected
+    description: Subscribe webhook rejected with HTTP URL (must be HTTPS)
+    request:
+      client_cert: trusted
+      body:
+        notificationType: webhook
+        webhookUrl: "http://listener.example.com/callback"
+        platform: linux
+    expect:
+      status: 400
+      body:
+        error: invalid_webhook_url
+        message: $contains:HTTPS
+
+  - name: subscribe_webhook_invalid_url
+    description: Subscribe webhook rejected with invalid URL
+    request:
+      client_cert: trusted
+      body:
+        notificationType: webhook
+        webhookUrl: "not-a-valid-url"
+        platform: linux
+    expect:
+      status: 400
+      body:
+        error: invalid_webhook_url
+
+  - name: subscribe_fcm_explicit
+    description: Subscribe succeeds with explicit FCM notification type
+    request:
+      client_cert: trusted
+      body:
+        notificationType: fcm
+        fcmToken: token123
+        platform: android
+    expect:
+      status: 200
+      body:
+        subscriptionId: $nonempty
+
+  - name: subscribe_invalid_notification_type
+    description: Subscribe rejected with invalid notification type
+    request:
+      client_cert: trusted
+      body:
+        notificationType: invalid_type
+        fcmToken: token123
+        platform: android
+    expect:
+      status: 400
+      body:
+        error: invalid_notification_type
+
+  - name: subscribe_apns_unsupported
+    description: Subscribe rejected with APNS notification type (not yet supported)
+    request:
+      client_cert: trusted
+      body:
+        notificationType: apns
+        fcmToken: apns-token
+        platform: ios
+    expect:
+      status: 400
+      body:
+        error: unsupported_notification_type
+
+  - name: subscribe_webhook_with_options
+    description: Subscribe webhook succeeds with all options
+    request:
+      client_cert: trusted
+      body:
+        notificationType: webhook
+        webhookUrl: "https://listener.example.com/api/noise-event"
+        platform: linux
+        leaseSeconds: 7200
+        threshold: 60
+        cooldownSeconds: 15
+        autoStreamType: audio
+        autoStreamDurationSec: 30
+    expect:
+      status: 200
+      body:
+        subscriptionId: $nonempty
+        deviceId: $nonempty
+        acceptedLeaseSeconds: 7200

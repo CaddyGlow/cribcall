@@ -177,7 +177,14 @@ class ControlWebSocketServer {
             return
         }
 
-        let lines = requestString.components(separatedBy: "\r\n")
+        // Find the end of headers (double CRLF)
+        guard let headerEndRange = requestString.range(of: "\r\n\r\n") else {
+            sendHttpError(connection: connection, statusCode: 400, message: "Malformed request")
+            return
+        }
+
+        let headersSection = String(requestString[..<headerEndRange.lowerBound])
+        let lines = headersSection.components(separatedBy: "\r\n")
         guard !lines.isEmpty else {
             sendHttpError(connection: connection, statusCode: 400, message: "Empty request")
             return
@@ -195,13 +202,8 @@ class ControlWebSocketServer {
 
         // Parse headers
         var headers: [String: String] = [:]
-        var headerEndIndex = 1
         for i in 1..<lines.count {
             let line = lines[i]
-            if line.isEmpty {
-                headerEndIndex = i + 1
-                break
-            }
             if let colonIndex = line.firstIndex(of: ":") {
                 let key = String(line[..<colonIndex]).trimmingCharacters(in: .whitespaces).lowercased()
                 let value = String(line[line.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
@@ -222,23 +224,88 @@ class ControlWebSocketServer {
             fingerprint?.prefix(12).description ?? "none"
         )
 
-        // Parse body if present
+        // Calculate how much body we already have vs how much we need
         let contentLength = Int(headers["content-length"] ?? "0") ?? 0
-        var body: String? = nil
-        if contentLength > 0 && headerEndIndex < lines.count {
-            body = lines[headerEndIndex...].joined(separator: "\r\n")
-        }
+        let bodyStartIndex = requestString.index(headerEndRange.upperBound, offsetBy: 0)
+        let bodyAlreadyReceived = String(requestString[bodyStartIndex...])
+        let bodyBytesReceived = bodyAlreadyReceived.utf8.count
 
-        // Route request
-        routeRequest(
-            connection: connection,
-            method: method,
-            path: path,
-            headers: headers,
-            fingerprint: fingerprint,
-            body: body,
-            remoteAddr: remoteAddr
+        os_log(
+            "Content-Length: %{public}d, body received: %{public}d",
+            log: log,
+            type: .debug,
+            contentLength,
+            bodyBytesReceived
         )
+
+        if contentLength > 0 && bodyBytesReceived < contentLength {
+            // Need to read more body data
+            let remaining = contentLength - bodyBytesReceived
+            os_log("Reading remaining body: %{public}d bytes", log: log, type: .debug, remaining)
+
+            readRemainingBody(
+                connection: connection,
+                method: method,
+                path: path,
+                headers: headers,
+                fingerprint: fingerprint,
+                bodyPrefix: bodyAlreadyReceived,
+                remaining: remaining,
+                remoteAddr: remoteAddr
+            )
+        } else {
+            // Body complete (or no body)
+            let body: String? = contentLength > 0 ? bodyAlreadyReceived : nil
+
+            // Route request
+            routeRequest(
+                connection: connection,
+                method: method,
+                path: path,
+                headers: headers,
+                fingerprint: fingerprint,
+                body: body,
+                remoteAddr: remoteAddr
+            )
+        }
+    }
+
+    private func readRemainingBody(
+        connection: NWConnection,
+        method: String,
+        path: String,
+        headers: [String: String],
+        fingerprint: String?,
+        bodyPrefix: String,
+        remaining: Int,
+        remoteAddr: String
+    ) {
+        connection.receive(minimumIncompleteLength: remaining, maximumLength: remaining) { [weak self] data, _, _, error in
+            guard let self = self else { return }
+
+            if let error = error {
+                os_log("Error reading body: %{public}@", log: self.log, type: .error, error.localizedDescription)
+                self.sendHttpError(connection: connection, statusCode: 400, message: "Failed to read body")
+                return
+            }
+
+            var fullBody = bodyPrefix
+            if let data = data, let chunk = String(data: data, encoding: .utf8) {
+                fullBody += chunk
+            }
+
+            os_log("Full body received: %{public}d bytes", log: self.log, type: .debug, fullBody.utf8.count)
+
+            self.routeRequest(
+                connection: connection,
+                method: method,
+                path: path,
+                headers: headers,
+                fingerprint: fingerprint,
+                body: fullBody,
+                remoteAddr: remoteAddr
+            )
+        }
     }
 
     private func getClientFingerprint(connection: NWConnection) -> String? {

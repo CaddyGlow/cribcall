@@ -429,27 +429,37 @@ class ControlClient {
 
   /// Subscribe a noise fallback token via local HTTPS endpoint.
   /// Optionally includes listener's noise detection preferences.
+  ///
+  /// [notificationType] - Delivery method: 'fcm', 'webhook', or 'apns'.
+  /// [fcmToken] - Required for FCM; optional for webhook.
+  /// [webhookUrl] - Required when notificationType is 'webhook'.
   Future<NoiseSubscribeResponse> subscribeNoise({
     required String host,
     required int port,
     required String expectedFingerprint,
-    required String fcmToken,
+    String? fcmToken,
     required String platform,
+    String? notificationType,
+    String? webhookUrl,
     int? leaseSeconds,
     int? threshold,
     int? cooldownSeconds,
     String? autoStreamType,
     int? autoStreamDurationSec,
   }) async {
+    _log('subscribeNoise: host=$host port=$port type=$notificationType');
     HttpClient? client;
     try {
       client = await _buildHttpClient(expectedFingerprint);
       final uri = Uri.https('${_formatHost(host)}:$port', '/noise/subscribe');
+      _log('subscribeNoise: POST $uri');
       final request = await client.postUrl(uri);
       request.headers.contentType = ContentType.json;
       final payload = <String, dynamic>{
-        'fcmToken': fcmToken,
         'platform': platform,
+        if (notificationType != null) 'notificationType': notificationType,
+        if (fcmToken != null) 'fcmToken': fcmToken,
+        if (webhookUrl != null) 'webhookUrl': webhookUrl,
         if (leaseSeconds != null) 'leaseSeconds': leaseSeconds,
         if (threshold != null) 'threshold': threshold,
         if (cooldownSeconds != null) 'cooldownSeconds': cooldownSeconds,
@@ -460,10 +470,12 @@ class ControlClient {
       final bodyBytes = utf8.encode(canonicalizeJson(payload));
       request.contentLength = bodyBytes.length;
       request.add(bodyBytes);
+      _log('subscribeNoise: sending ${bodyBytes.length} bytes...');
 
       final response = await request.close().timeout(
         const Duration(seconds: 5),
       );
+      _log('subscribeNoise: response status=${response.statusCode}');
       final body = await utf8.decodeStream(response);
 
       if (response.statusCode != HttpStatus.ok) {
