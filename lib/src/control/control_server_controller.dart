@@ -15,6 +15,7 @@ import '../config/build_flags.dart';
 import '../domain/models.dart';
 import '../domain/noise_subscription.dart';
 import '../fcm/fcm_sender.dart';
+import '../fcm/webhook_sender.dart';
 import '../identity/device_identity.dart';
 import '../state/app_state.dart';
 import '../util/format_utils.dart';
@@ -145,6 +146,7 @@ class ControlServerController extends Notifier<ControlServerState> {
   StreamSubscription<AndroidControlServerEvent>? _androidEventSub;
   StreamSubscription<IOSControlServerEvent>? _iOSEventSub;
   FcmSender? _fcmSender;
+  WebhookSender? _webhookSender;
 
   /// Whether we're using a native server (Android or iOS).
   bool get _useNativeServer => Platform.isAndroid || Platform.isIOS;
@@ -1116,10 +1118,12 @@ class ControlServerController extends Notifier<ControlServerState> {
 
   Future<server.NoiseSubscribeResult> _handleNoiseSubscribeRequest({
     required String fingerprint,
-    required String fcmToken,
     required String platform,
     required int? leaseSeconds,
     required String remoteAddress,
+    NotificationType? notificationType,
+    String? fcmToken,
+    String? webhookUrl,
     int? threshold,
     int? cooldownSeconds,
     AutoStreamType? autoStreamType,
@@ -1137,18 +1141,24 @@ class ControlServerController extends Notifier<ControlServerState> {
         .read(noiseSubscriptionsProvider.notifier)
         .upsert(
           peer: peer,
-          fcmToken: fcmToken,
           platform: platform,
           leaseSeconds: leaseSeconds,
+          notificationType: notificationType,
+          fcmToken: fcmToken,
+          webhookUrl: webhookUrl,
           threshold: threshold,
           cooldownSeconds: cooldownSeconds,
           autoStreamType: autoStreamType,
           autoStreamDurationSec: autoStreamDurationSec,
         );
 
-    final deliveryMode = isWebsocketOnlyNoiseToken(fcmToken)
-        ? 'ws-only'
-        : platform;
+    final effectiveType = notificationType ?? NotificationType.fcm;
+    final deliveryMode = switch (effectiveType) {
+      NotificationType.webhook => 'webhook',
+      NotificationType.fcm when fcmToken != null && isWebsocketOnlyNoiseToken(fcmToken) => 'ws-only',
+      NotificationType.fcm => 'fcm',
+      NotificationType.apns => 'apns',
+    };
     _log(
       'Noise subscribe: device=${peer.remoteDeviceId} remote=$remoteAddress '
       'expiresAt=${DateTime.fromMillisecondsSinceEpoch(result.subscription.expiresAtEpochSec * 1000, isUtc: true)} '
@@ -1407,8 +1417,8 @@ class ControlServerController extends Notifier<ControlServerState> {
       }
     }
 
-    // Path 2: FCM push to eligible listeners (only if no WebSocket connection)
-    await _sendNoiseEventViaFcmFiltered(
+    // Path 2: Push notifications to eligible listeners (only if no WebSocket connection)
+    await _sendNoiseEventViaPush(
       deviceId: deviceId,
       timestamp: timestampMs,
       peakLevel: peakLevel,
@@ -1416,9 +1426,10 @@ class ControlServerController extends Notifier<ControlServerState> {
     );
   }
 
-  /// Send noise event via FCM to pre-filtered eligible subscriptions.
+  /// Send noise event via push to pre-filtered eligible subscriptions.
+  /// Routes to FCM or webhook based on notification type.
   /// Only sends to subscriptions that don't have an active WebSocket connection.
-  Future<void> _sendNoiseEventViaFcmFiltered({
+  Future<void> _sendNoiseEventViaPush({
     required String deviceId,
     required int timestamp,
     required int peakLevel,
@@ -1436,35 +1447,83 @@ class ControlServerController extends Notifier<ControlServerState> {
         .where((s) => s.isWebsocketOnly)
         .length;
     _log(
-      'Noise FCM filter: eligible=${eligibleSubs.length} '
+      'Noise push filter: eligible=${eligibleSubs.length} '
       'noWs=${subsWithoutWebSocket.length} wsOnly=$wsOnlyCount '
       'connectedWs=${connectedFingerprints.length}',
     );
 
     if (subsWithoutWebSocket.isEmpty) {
-      _log('All eligible subs have WebSocket, skipping FCM');
+      _log('All eligible subs have WebSocket, skipping push');
       return;
     }
 
-    final subsNeedingFcm = subsWithoutWebSocket
+    // Filter out ws-only subscriptions
+    final subsNeedingPush = subsWithoutWebSocket
         .where((s) => !s.isWebsocketOnly)
         .toList();
 
-    if (subsNeedingFcm.isEmpty) {
-      _log('Eligible subs without WebSocket are ws-only, skipping FCM');
+    if (subsNeedingPush.isEmpty) {
+      _log('Eligible subs without WebSocket are ws-only, skipping push');
       return;
     }
 
-    final fcmTokens = subsNeedingFcm.map((s) => s.fcmToken).toSet().toList();
+    // Split by notification type
+    final fcmSubs = subsNeedingPush
+        .where((s) => s.effectiveNotificationType == NotificationType.fcm)
+        .toList();
+    final webhookSubs = subsNeedingPush
+        .where((s) => s.effectiveNotificationType == NotificationType.webhook)
+        .toList();
 
-    if (fcmTokens.isEmpty) {
-      _log('No FCM tokens available, skipping push');
-      return;
-    }
+    _log(
+      'Push routing: fcm=${fcmSubs.length} webhook=${webhookSubs.length}',
+    );
 
     // Get monitor name for notification
     final appSession = ref.read(appSessionProvider).asData?.value;
     final monitorName = appSession?.deviceName ?? 'Monitor';
+
+    // Send FCM notifications
+    if (fcmSubs.isNotEmpty) {
+      await _sendNoiseEventViaFcm(
+        deviceId: deviceId,
+        monitorName: monitorName,
+        timestamp: timestamp,
+        peakLevel: peakLevel,
+        subscriptions: fcmSubs,
+      );
+    }
+
+    // Send webhook notifications
+    if (webhookSubs.isNotEmpty) {
+      await _sendNoiseEventViaWebhook(
+        deviceId: deviceId,
+        monitorName: monitorName,
+        timestamp: timestamp,
+        peakLevel: peakLevel,
+        subscriptions: webhookSubs,
+      );
+    }
+  }
+
+  /// Send noise event via FCM to subscriptions.
+  Future<void> _sendNoiseEventViaFcm({
+    required String deviceId,
+    required String monitorName,
+    required int timestamp,
+    required int peakLevel,
+    required List<NoiseSubscription> subscriptions,
+  }) async {
+    final fcmTokens = subscriptions
+        .map((s) => s.fcmToken)
+        .where((t) => t.isNotEmpty)
+        .toSet()
+        .toList();
+
+    if (fcmTokens.isEmpty) {
+      _log('No FCM tokens available, skipping FCM push');
+      return;
+    }
 
     try {
       _fcmSender ??= FcmSender();
@@ -1502,6 +1561,58 @@ class ControlServerController extends Notifier<ControlServerState> {
     }
   }
 
+  /// Send noise event via webhook to subscriptions.
+  Future<void> _sendNoiseEventViaWebhook({
+    required String deviceId,
+    required String monitorName,
+    required int timestamp,
+    required int peakLevel,
+    required List<NoiseSubscription> subscriptions,
+  }) async {
+    if (subscriptions.isEmpty) return;
+
+    // Lazily initialize webhook sender with monitor identity
+    if (_webhookSender == null) {
+      final identity = ref.read(identityProvider).asData?.value;
+      if (identity == null) {
+        _log('Cannot send webhooks: identity not available');
+        return;
+      }
+      _webhookSender = WebhookSender(identity: identity);
+    }
+
+    _log('Sending webhook noise to ${subscriptions.length} subscribers');
+
+    // Send to each webhook in parallel with individual error handling
+    final results = await Future.wait(
+      subscriptions.map((sub) async {
+        if (sub.webhookUrl == null || sub.webhookUrl!.isEmpty) {
+          _log('Skipping webhook for ${sub.subscriptionId}: no URL');
+          return null;
+        }
+
+        try {
+          return await _webhookSender!.sendNoiseEvent(
+            webhookUrl: sub.webhookUrl!,
+            remoteDeviceId: deviceId,
+            monitorName: monitorName,
+            timestamp: timestamp,
+            peakLevel: peakLevel,
+            subscriptionId: sub.subscriptionId,
+          );
+        } catch (e) {
+          _log('Webhook send error for ${sub.subscriptionId}: $e');
+          return null;
+        }
+      }),
+    );
+
+    // Log results
+    final successCount = results.where((r) => r?.success == true).length;
+    final failureCount = results.length - successCount;
+    _log('Webhook results: success=$successCount failure=$failureCount');
+  }
+
   Future<void> stop() => _shutdown();
 
   Future<void> _shutdown() async {
@@ -1516,6 +1627,8 @@ class ControlServerController extends Notifier<ControlServerState> {
     _nativeConnections.clear();
     _fcmSender?.dispose();
     _fcmSender = null;
+    _webhookSender?.dispose();
+    _webhookSender = null;
 
     // Stop platform-specific server
     try {

@@ -743,9 +743,11 @@ class NoiseSubscriptionsController
 
   Future<({NoiseSubscription subscription, int acceptedLeaseSeconds})> upsert({
     required TrustedPeer peer,
-    required String fcmToken,
     required String platform,
     int? leaseSeconds,
+    NotificationType? notificationType,
+    String? fcmToken,
+    String? webhookUrl,
     int? threshold,
     int? cooldownSeconds,
     AutoStreamType? autoStreamType,
@@ -756,14 +758,24 @@ class NoiseSubscriptionsController
     final accepted = _clampLeaseSeconds(leaseSeconds);
     final expiresAt = now.add(Duration(seconds: accepted));
 
+    // Determine the identifier for subscription ID generation
+    final effectiveType = notificationType ?? NotificationType.fcm;
+    final identifier = switch (effectiveType) {
+      NotificationType.fcm => fcmToken ?? '',
+      NotificationType.webhook => webhookUrl ?? '',
+      NotificationType.apns => fcmToken ?? '',
+    };
+
     final subscription = NoiseSubscription(
       deviceId: peer.remoteDeviceId,
       certFingerprint: peer.certFingerprint,
-      fcmToken: fcmToken,
+      fcmToken: fcmToken ?? '',
       platform: platform,
       expiresAtEpochSec: expiresAt.millisecondsSinceEpoch ~/ 1000,
       createdAtEpochSec: now.millisecondsSinceEpoch ~/ 1000,
-      subscriptionId: noiseSubscriptionId(peer.remoteDeviceId, fcmToken),
+      subscriptionId: noiseSubscriptionId(peer.remoteDeviceId, identifier),
+      notificationType: notificationType,
+      webhookUrl: webhookUrl,
       threshold: threshold,
       cooldownSeconds: cooldownSeconds,
       autoStreamType: autoStreamType,

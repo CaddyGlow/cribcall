@@ -6,6 +6,7 @@ import 'package:cryptography/cryptography.dart';
 
 import '../config/build_flags.dart';
 import '../domain/models.dart';
+import '../domain/noise_subscription.dart';
 import '../identity/device_identity.dart';
 import '../identity/pem.dart';
 import '../identity/pkcs8.dart';
@@ -32,10 +33,12 @@ typedef NoiseUnsubscribeResult = ({
 typedef NoiseSubscribeHandler =
     Future<NoiseSubscribeResult> Function({
       required String fingerprint,
-      required String fcmToken,
       required String platform,
       required int? leaseSeconds,
       required String remoteAddress,
+      NotificationType? notificationType,
+      String? fcmToken,
+      String? webhookUrl,
       int? threshold,
       int? cooldownSeconds,
       AutoStreamType? autoStreamType,
@@ -592,6 +595,8 @@ class ControlServer {
       'cooldownSeconds',
       'autoStreamType',
       'autoStreamDurationSec',
+      'notificationType',
+      'webhookUrl',
     };
     final unknown = body.keys.where((k) => !allowedKeys.contains(k)).toList();
     if (unknown.isNotEmpty) {
@@ -617,13 +622,62 @@ class ControlServer {
     final cooldownSeconds = body['cooldownSeconds'];
     final autoStreamTypeName = body['autoStreamType'];
     final autoStreamDurationSec = body['autoStreamDurationSec'];
+    final notificationTypeName = body['notificationType'];
+    final webhookUrl = body['webhookUrl'];
 
-    if (fcmToken is! String || fcmToken.isEmpty) {
-      _writeCanonicalJson(request.response, HttpStatus.badRequest, {
-        'error': 'invalid_fcm_token',
-        'message': 'fcmToken is required',
-      });
-      return;
+    // Parse notification type (default to fcm for backward compatibility)
+    NotificationType notificationType = NotificationType.fcm;
+    if (notificationTypeName != null) {
+      if (notificationTypeName is! String) {
+        _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+          'error': 'invalid_notification_type',
+          'message': 'notificationType must be a string',
+        });
+        return;
+      }
+      try {
+        notificationType = NotificationType.values.byName(notificationTypeName);
+      } catch (_) {
+        _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+          'error': 'invalid_notification_type',
+          'message': 'notificationType must be one of: fcm, webhook, apns',
+        });
+        return;
+      }
+    }
+
+    // Validate based on notification type
+    switch (notificationType) {
+      case NotificationType.fcm:
+        if (fcmToken is! String || fcmToken.isEmpty) {
+          _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+            'error': 'invalid_fcm_token',
+            'message': 'fcmToken is required for FCM notifications',
+          });
+          return;
+        }
+      case NotificationType.webhook:
+        if (webhookUrl is! String || webhookUrl.isEmpty) {
+          _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+            'error': 'invalid_webhook_url',
+            'message': 'webhookUrl is required for webhook notifications',
+          });
+          return;
+        }
+        final validationError = validateWebhookUrl(webhookUrl);
+        if (validationError != null) {
+          _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+            'error': 'invalid_webhook_url',
+            'message': validationError,
+          });
+          return;
+        }
+      case NotificationType.apns:
+        _writeCanonicalJson(request.response, HttpStatus.badRequest, {
+          'error': 'unsupported_notification_type',
+          'message': 'APNS notifications not yet supported',
+        });
+        return;
     }
 
     if (platform is! String || platform.isEmpty) {
@@ -689,10 +743,12 @@ class ControlServer {
     try {
       final result = await onNoiseSubscribe!(
         fingerprint: fp,
-        fcmToken: fcmToken,
         platform: platform,
         leaseSeconds: leaseSeconds as int?,
         remoteAddress: remote,
+        notificationType: notificationType,
+        fcmToken: fcmToken as String?,
+        webhookUrl: webhookUrl as String?,
         threshold: threshold as int?,
         cooldownSeconds: cooldownSeconds as int?,
         autoStreamType: autoStreamType,
