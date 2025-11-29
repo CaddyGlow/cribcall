@@ -67,27 +67,36 @@
         };
         androidSdk = androidComposition.androidsdk;
 
+        isDarwin = pkgs.stdenv.isDarwin;
+        isLinux = pkgs.stdenv.isLinux;
+
         rustToolchain = builtins.fromTOML (builtins.readFile (self + "/rust-toolchain.toml"));
         rustcChannel = rustToolchain.toolchain.channel;
+        hostTriple = pkgs.stdenv.hostPlatform.config;
 
-        libPath = pkgs.lib.makeLibraryPath [
-          pkgs.alsa-lib
-          pkgs.pulseaudio
-          pkgs.glib
-          pkgs.gtk3
-          pkgs.libsecret
-          pkgs.libGL
-          pkgs.libdrm
-          pkgs.libgbm
-        ];
+        libPath =
+          pkgs.lib.makeLibraryPath (
+            [
+              pkgs.glib
+              pkgs.gtk3
+              pkgs.libsecret
+            ]
+            ++ pkgs.lib.optionals isLinux [
+              pkgs.alsa-lib
+              pkgs.pulseaudio
+              pkgs.libGL
+              pkgs.libdrm
+              pkgs.libgbm
+            ]
+          );
 
         bindgenIncludePath = [
           ''-I"${pkgs.llvmPackages_latest.libclang.lib}/lib/clang/${pkgs.llvmPackages_latest.libclang.version}/include"''
           ''-I"${pkgs.glib.dev}/include/glib-2.0"''
           ''-I${pkgs.glib.out}/lib/glib-2.0/include/''
+        ] ++ pkgs.lib.optionals isLinux [
+          ''-I"${pkgs.glibc.dev}/include"''
         ];
-
-        flutter = pkgs.flutter;
       in
       {
         devShells.default = pkgs.mkShell rec {
@@ -99,25 +108,27 @@
 
           buildInputs = [
             androidSdk
-            flutter
-            pkgs.alsa-lib
             pkgs.clang
-            pkgs.dart
             pkgs.glib
             pkgs.gtk3
-            pkgs.libdrm
-            pkgs.libgbm
-            pkgs.libGL
             pkgs.libsecret
             pkgs.llvmPackages.bintools
             pkgs.openjdk
             pkgs.openssl
             pkgs.protobuf
-            pkgs.pulseaudio
             pkgs.rustup
-            pkgs.sysprof
             pkgs.lua54Packages.lua
             pkgs.google-cloud-sdk
+          ] ++ pkgs.lib.optionals (!isDarwin) [
+            pkgs.flutter
+            pkgs.dart
+          ] ++ pkgs.lib.optionals isLinux [
+            pkgs.alsa-lib
+            pkgs.sysprof
+            pkgs.pulseaudio
+            pkgs.libdrm
+            pkgs.libgbm
+            pkgs.libGL
           ];
 
           RUSTC_VERSION = rustcChannel;
@@ -125,9 +136,11 @@
           LIBCLANG_PATH = pkgs.lib.makeLibraryPath [ pkgs.llvmPackages_latest.libclang.lib ];
 
           BINDGEN_EXTRA_CLANG_ARGS =
-            (builtins.map (a: ''-I"${a}/include"'') [
-              pkgs.glibc.dev
-            ])
+            pkgs.lib.optionals isLinux (
+              builtins.map (a: ''-I"${a}/include"'') [
+                pkgs.glibc.dev
+              ]
+            )
             ++ bindgenIncludePath;
 
           RUSTFLAGS = builtins.map (a: ''-L ${a}/lib'') [
@@ -139,10 +152,12 @@
           LIBRARY_PATH = libPath;
 
           shellHook = ''
-            export FLUTTER_ROOT=${flutter}
-            export PATH="$FLUTTER_ROOT/bin:$FLUTTER_ROOT/bin/cache/dart-sdk/bin:$PATH"
+            ${pkgs.lib.optionalString (!isDarwin) ''
+              export FLUTTER_ROOT=${pkgs.flutter}
+              export PATH="$FLUTTER_ROOT/bin:$FLUTTER_ROOT/bin/cache/dart-sdk/bin:$PATH"
+            ''}
             export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
-            export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/$RUSTC_VERSION-x86_64-unknown-linux-gnu/bin/
+            export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/$RUSTC_VERSION-${hostTriple}/bin/
             export ANDROID_SDK_ROOT="${androidSdk}/libexec/android-sdk"
             export ANDROID_HOME=$ANDROID_SDK_ROOT
             export ANDROID_AVD_HOME="$HOME/.config/.android/avd"
