@@ -215,9 +215,10 @@ class ControlWebSocketServer(
             // Read headers
             val headers = readHeaders(reader)
 
-            // Read body if present
+            // Read body if present (must read from BufferedReader, not raw input,
+            // because BufferedReader may have already consumed body bytes)
             val contentLength = headers["content-length"]?.toIntOrNull() ?: 0
-            val body = readBody(input, contentLength)
+            val body = readBody(reader, contentLength)
 
             // Route request
             routeRequest(socket, input, output, method, path, headers, fingerprint, body, remoteAddr)
@@ -243,17 +244,17 @@ class ControlWebSocketServer(
         return headers
     }
 
-    private fun readBody(input: java.io.InputStream, contentLength: Int): String? {
+    private fun readBody(reader: BufferedReader, contentLength: Int): String? {
         if (contentLength <= 0) return null
 
-        val bodyBytes = ByteArray(contentLength)
+        val bodyChars = CharArray(contentLength)
         var read = 0
         while (read < contentLength) {
-            val n = input.read(bodyBytes, read, contentLength - read)
+            val n = reader.read(bodyChars, read, contentLength - read)
             if (n < 0) break
             read += n
         }
-        return String(bodyBytes, Charsets.UTF_8)
+        return String(bodyChars, 0, read)
     }
 
     private fun routeRequest(

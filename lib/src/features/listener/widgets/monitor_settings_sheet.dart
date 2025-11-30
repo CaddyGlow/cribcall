@@ -5,6 +5,9 @@ import '../../../domain/models.dart';
 import '../../../state/app_state.dart';
 import '../../../state/connected_monitor_settings.dart';
 import '../../../theme.dart';
+import '../../shared/widgets/cc_info_box.dart';
+import '../../shared/widgets/cc_settings_slider.dart';
+import '../../shared/widgets/cc_settings_tile.dart';
 
 /// Shows the per-monitor settings bottom sheet.
 void showMonitorSettingsSheet(
@@ -100,7 +103,7 @@ class MonitorSettingsSheet extends ConsumerWidget {
               const SizedBox(height: 24),
 
               // Notifications toggle
-              _SettingsCard(
+              CcSettingsTile(
                 title: 'Notifications',
                 subtitle: 'Receive alerts when noise is detected',
                 trailing: Switch(
@@ -116,7 +119,7 @@ class MonitorSettingsSheet extends ConsumerWidget {
               const SizedBox(height: 12),
 
               // Auto-play toggle
-              _SettingsCard(
+              CcSettingsTile(
                 title: 'Auto-play on noise',
                 subtitle:
                     'Automatically start streaming when noise is detected',
@@ -133,7 +136,7 @@ class MonitorSettingsSheet extends ConsumerWidget {
               // Auto-play duration (only shown if auto-play is enabled)
               if (settings.autoPlayOnNoise) ...[
                 const SizedBox(height: 12),
-                _SettingsCard(
+                CcSettingsTile(
                   title: 'Auto-play duration',
                   subtitle: 'How long to stream after noise event',
                   trailing: DropdownButton<int>(
@@ -175,19 +178,30 @@ class MonitorSettingsSheet extends ConsumerWidget {
               const SizedBox(height: 12),
 
               // Threshold override
-              _buildNoisePreferenceOverride(
-                context,
-                ref,
-                title: 'Sensitivity',
-                subtitle: 'Noise threshold for this monitor',
-                baseValue: settings.baseThreshold,
-                currentOverride: settings.customThreshold,
-                options: const [20, 30, 40, 50, 60, 70, 80, 90],
-                formatValue: (v) => '$v%',
+              CcSettingsSlider.withOverride(
+                label: 'Sensitivity',
+                value: (settings.customThreshold ?? settings.baseThreshold)
+                    .toDouble(),
+                min: 10,
+                max: 100,
+                divisions: 18,
+                displayValue:
+                    '${settings.customThreshold ?? settings.baseThreshold}%',
+                baseValue: settings.baseThreshold.toDouble(),
+                baseDisplayValue: '${settings.baseThreshold}%',
+                hasOverride: settings.customThreshold != null,
                 onChanged: (value) async {
                   await ref
                       .read(connectedMonitorSettingsProvider.notifier)
-                      .setCustomThreshold(remoteDeviceId, value);
+                      .setCustomThreshold(remoteDeviceId, value.round());
+                  await ref
+                      .read(controlClientProvider.notifier)
+                      .refreshNoiseSubscription();
+                },
+                onClear: () async {
+                  await ref
+                      .read(connectedMonitorSettingsProvider.notifier)
+                      .setCustomThreshold(remoteDeviceId, null);
                   await ref
                       .read(controlClientProvider.notifier)
                       .refreshNoiseSubscription();
@@ -197,19 +211,31 @@ class MonitorSettingsSheet extends ConsumerWidget {
               const SizedBox(height: 12),
 
               // Cooldown override
-              _buildNoisePreferenceOverride(
-                context,
-                ref,
-                title: 'Cooldown',
-                subtitle: 'Seconds between alerts',
-                baseValue: settings.baseCooldownSeconds,
-                currentOverride: settings.customCooldownSeconds,
-                options: const [3, 5, 8, 10, 15, 30],
-                formatValue: (v) => '${v}s',
+              CcSettingsSlider.withOverride(
+                label: 'Cooldown',
+                value: (settings.customCooldownSeconds ??
+                        settings.baseCooldownSeconds)
+                    .toDouble(),
+                min: 1,
+                max: 30,
+                divisions: 29,
+                displayValue:
+                    '${settings.customCooldownSeconds ?? settings.baseCooldownSeconds}s',
+                baseValue: settings.baseCooldownSeconds.toDouble(),
+                baseDisplayValue: '${settings.baseCooldownSeconds}s',
+                hasOverride: settings.customCooldownSeconds != null,
                 onChanged: (value) async {
                   await ref
                       .read(connectedMonitorSettingsProvider.notifier)
-                      .setCustomCooldownSeconds(remoteDeviceId, value);
+                      .setCustomCooldownSeconds(remoteDeviceId, value.round());
+                  await ref
+                      .read(controlClientProvider.notifier)
+                      .refreshNoiseSubscription();
+                },
+                onClear: () async {
+                  await ref
+                      .read(connectedMonitorSettingsProvider.notifier)
+                      .setCustomCooldownSeconds(remoteDeviceId, null);
                   await ref
                       .read(controlClientProvider.notifier)
                       .refreshNoiseSubscription();
@@ -229,33 +255,9 @@ class MonitorSettingsSheet extends ConsumerWidget {
               const SizedBox(height: 24),
 
               // Info text
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: AppColors.primary.withValues(alpha: 0.05),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: AppColors.primary.withValues(alpha: 0.1),
-                  ),
-                ),
-                child: Row(
-                  children: [
-                    Icon(
-                      Icons.info_outline,
-                      size: 18,
-                      color: AppColors.primary.withValues(alpha: 0.7),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        'Overrides are stored per monitor. If the monitor changes its defaults, refresh to sync and your overrides will be re-applied.',
-                        style: Theme.of(
-                          context,
-                        ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-                      ),
-                    ),
-                  ],
-                ),
+              const CcInfoBox(
+                text:
+                    'Overrides are stored per monitor. If the monitor changes its defaults, refresh to sync and your overrides will be re-applied.',
               ),
 
               const SizedBox(height: 16),
@@ -272,58 +274,6 @@ class MonitorSettingsSheet extends ConsumerWidget {
           ),
         );
       },
-    );
-  }
-
-  Widget _buildNoisePreferenceOverride(
-    BuildContext context,
-    WidgetRef ref, {
-    required String title,
-    required String subtitle,
-    required int baseValue,
-    required int? currentOverride,
-    required List<int> options,
-    required String Function(int) formatValue,
-    required Future<void> Function(int?) onChanged,
-  }) {
-    final hasOverride = currentOverride != null;
-    final displayValue = currentOverride ?? baseValue;
-
-    return _SettingsCard(
-      title: title,
-      subtitle: hasOverride
-          ? '$subtitle (override: ${formatValue(displayValue)})'
-          : '$subtitle (monitor default: ${formatValue(baseValue)})',
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (hasOverride)
-            IconButton(
-              icon: const Icon(Icons.close, size: 18),
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(),
-              onPressed: () {
-                onChanged(null);
-              },
-              tooltip: 'Clear override',
-            ),
-          DropdownButton<int>(
-            value: displayValue,
-            underline: const SizedBox.shrink(),
-            onChanged: (value) {
-              if (value != null) {
-                onChanged(value);
-              }
-            },
-            items: options
-                .map(
-                  (v) =>
-                      DropdownMenuItem(value: v, child: Text(formatValue(v))),
-                )
-                .toList(),
-          ),
-        ],
-      ),
     );
   }
 
@@ -348,7 +298,7 @@ class MonitorSettingsSheet extends ConsumerWidget {
       }
     }
 
-    return _SettingsCard(
+    return CcSettingsTile(
       title: 'Auto-stream on noise',
       subtitle: hasOverride
           ? 'Override: ${formatType(displayValue)}'
@@ -402,51 +352,3 @@ class MonitorSettingsSheet extends ConsumerWidget {
   }
 }
 
-class _SettingsCard extends StatelessWidget {
-  const _SettingsCard({
-    required this.title,
-    required this.subtitle,
-    required this.trailing,
-  });
-
-  final String title;
-  final String subtitle;
-  final Widget trailing;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.grey.shade200),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: Theme.of(
-                    context,
-                  ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  subtitle,
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-                ),
-              ],
-            ),
-          ),
-          trailing,
-        ],
-      ),
-    );
-  }
-}

@@ -8,6 +8,7 @@ import '../../pairing/pin_pairing_controller.dart';
 import '../../state/app_state.dart';
 import '../../theme.dart';
 import '../../util/format_utils.dart';
+import '../shared/widgets/cc_pairing_code_box.dart';
 
 void _logPairingPage(String message) {
   developer.log(message, name: 'listener_pairing_page');
@@ -193,42 +194,11 @@ class _ListenerPinPageState extends ConsumerState<ListenerPinPage> {
             ),
             const SizedBox(height: 12),
           ] else if (hasSession) ...[
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: AppColors.primary.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: AppColors.primary.withValues(alpha: 0.3)),
-              ),
-              child: Column(
-                children: [
-                  Text(
-                    'Verify this code matches the monitor:',
-                    style: Theme.of(context)
-                        .textTheme
-                        .bodyMedium
-                        ?.copyWith(color: AppColors.muted),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    session.comparisonCode,
-                    style: Theme.of(context).textTheme.displaySmall?.copyWith(
-                          letterSpacing: 8,
-                          fontWeight: FontWeight.w900,
-                          fontFamily: 'monospace',
-                        ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Expires in ${session.expiresAt.difference(DateTime.now()).inSeconds}s',
-                    style: Theme.of(context)
-                        .textTheme
-                        .bodySmall
-                        ?.copyWith(color: AppColors.muted),
-                  ),
-                ],
-              ),
+            CcPairingCodeBox(
+              comparisonCode: session.comparisonCode,
+              remainingSeconds:
+                  session.expiresAt.difference(DateTime.now()).inSeconds,
+              helperText: 'Verify this code matches the monitor',
             ),
             const SizedBox(height: 16),
             if (_confirming)

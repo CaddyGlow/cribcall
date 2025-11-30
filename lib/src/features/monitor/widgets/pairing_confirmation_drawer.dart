@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../control/control_service.dart';
 import '../../../state/app_state.dart';
 import '../../../theme.dart';
+import '../../shared/widgets/cc_pairing_code_box.dart';
 
 /// Shows a modal bottom sheet for pairing confirmation.
 ///
@@ -190,66 +191,9 @@ class _PairingConfirmationSheetState
               const SizedBox(height: 24),
 
               // Comparison code container
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 24,
-                  vertical: 20,
-                ),
-                decoration: BoxDecoration(
-                  color: AppColors.primary.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(
-                    color: AppColors.primary.withValues(alpha: 0.2),
-                  ),
-                ),
-                child: Column(
-                  children: [
-                    Text(
-                      'Verify this code matches',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: AppColors.muted,
-                          ),
-                    ),
-                    const SizedBox(height: 12),
-                    Text(
-                      widget.session.comparisonCode,
-                      style:
-                          Theme.of(context).textTheme.displaySmall?.copyWith(
-                                letterSpacing: 8,
-                                fontWeight: FontWeight.w900,
-                                fontFamily: 'monospace',
-                                color: AppColors.textPrimary,
-                              ),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          Icons.timer_outlined,
-                          size: 16,
-                          color: _remainingSeconds <= 10
-                              ? AppColors.warning
-                              : AppColors.muted,
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          'Expires in ${_remainingSeconds}s',
-                          style:
-                              Theme.of(context).textTheme.bodySmall?.copyWith(
-                                    color: _remainingSeconds <= 10
-                                        ? AppColors.warning
-                                        : AppColors.muted,
-                                    fontWeight: _remainingSeconds <= 10
-                                        ? FontWeight.w600
-                                        : FontWeight.normal,
-                                  ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
+              CcPairingCodeBox(
+                comparisonCode: widget.session.comparisonCode,
+                remainingSeconds: _remainingSeconds,
               ),
               const SizedBox(height: 12),
 

@@ -229,12 +229,14 @@ class MainActivity : FlutterActivity() {
     private fun setupAudioEventsChannel(messenger: io.flutter.plugin.common.BinaryMessenger) {
         EventChannel(messenger, audioEvents).setStreamHandler(object : EventChannel.StreamHandler {
             override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                Log.i(audioLogTag, "Audio event channel onListen: sink=${events != null}")
                 audioEventSink = events
                 audioCaptureService?.onAudioData = { bytes ->
                     audioEventSink?.success(bytes)
                 }
             }
             override fun onCancel(arguments: Any?) {
+                Log.i(audioLogTag, "Audio event channel onCancel")
                 audioEventSink = null
             }
         })

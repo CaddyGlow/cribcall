@@ -1265,6 +1265,32 @@ class ControlServerController extends Notifier<ControlServerState> {
     await _sendToConnection(connectionId, message);
   }
 
+  /// Broadcast updated monitor settings to all connected listeners.
+  /// Call this when default monitor settings change so listeners using
+  /// default values receive the updates.
+  Future<void> broadcastMonitorSettings() async {
+    if (!state.isRunning) return;
+
+    final settingsAsync = ref.read(monitorSettingsProvider);
+    final settings = settingsAsync.asData?.value ?? MonitorSettings.defaults;
+
+    final message = MonitorSettingsMessage(
+      threshold: settings.noise.threshold,
+      minDurationMs: settings.noise.minDurationMs,
+      cooldownSeconds: settings.noise.cooldownSeconds,
+      audioInputGain: settings.audioInputGain,
+      autoStreamType: settings.autoStreamType.name,
+      autoStreamDurationSec: settings.autoStreamDurationSec,
+    );
+
+    _log(
+      'Broadcasting MONITOR_SETTINGS to all listeners: '
+      'threshold=${settings.noise.threshold} '
+      'cooldown=${settings.noise.cooldownSeconds}',
+    );
+    await broadcast(message);
+  }
+
   /// Handle listener settings update from UPDATE_LISTENER_SETTINGS message.
   /// Updates the subscription with the listener's customized preferences.
   Future<void> _handleListenerSettingsUpdate({

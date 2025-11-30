@@ -4,6 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../domain/models.dart';
 import '../../../state/app_state.dart';
 import '../../../theme.dart';
+import '../../shared/widgets/cc_info_box.dart';
+import '../../shared/widgets/cc_settings_tile.dart';
 
 /// Show the noise settings drawer.
 /// Noise sensitivity/cooldown now come from monitors; this drawer only controls
@@ -98,7 +100,7 @@ class NoiseSettingsDrawer extends ConsumerWidget {
         ),
         const SizedBox(height: 20),
 
-        _NoiseSettingRow(
+        CcSettingsTile(
           icon: Icons.notifications_active,
           title: 'When noise is detected',
           subtitle: defaultAction == ListenerDefaultAction.notify
@@ -130,33 +132,9 @@ class NoiseSettingsDrawer extends ConsumerWidget {
 
         const SizedBox(height: 20),
 
-        Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: AppColors.primary.withValues(alpha: 0.05),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppColors.primary.withValues(alpha: 0.1)),
-          ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(
-                Icons.info_outline,
-                size: 18,
-                color: AppColors.primary.withValues(alpha: 0.7),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  'Noise sensitivity and cooldown are provided per monitor. '
-                  'Open a monitor card and tap Settings to adjust overrides for that monitor.',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-                ),
-              ),
-            ],
-          ),
+        const CcInfoBox(
+          text: 'Noise sensitivity and cooldown are provided per monitor. '
+              'Open a monitor card and tap Settings to adjust overrides for that monitor.',
         ),
 
         const SizedBox(height: 16),
@@ -175,53 +153,3 @@ class NoiseSettingsDrawer extends ConsumerWidget {
   }
 }
 
-class _NoiseSettingRow extends StatelessWidget {
-  const _NoiseSettingRow({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    this.trailing,
-  });
-
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final Widget? trailing;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Row(
-        children: [
-          Icon(icon, size: 20, color: AppColors.primary),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
-                ),
-                Text(
-                  subtitle,
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-                ),
-              ],
-            ),
-          ),
-          if (trailing != null) trailing!,
-        ],
-      ),
-    );
-  }
-}

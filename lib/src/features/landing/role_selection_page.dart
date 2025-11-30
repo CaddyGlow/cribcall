@@ -11,6 +11,9 @@ import '../../theme.dart';
 import '../../util/format_utils.dart';
 import '../listener/listener_dashboard.dart';
 import '../monitor/monitor_dashboard.dart';
+import '../shared/widgets/cc_info_box.dart';
+import '../shared/widgets/cc_settings_slider.dart';
+import '../shared/widgets/cc_settings_tile.dart';
 
 const List<int> kMonitorMinDurationOptionsMs = [100, 200, 300, 500, 800];
 const List<int> kMonitorCooldownOptionsSec = [3, 5, 8, 10, 15, 30];
@@ -270,54 +273,41 @@ class _MonitorSettingsTab extends ConsumerWidget {
         controller: scrollController,
         padding: const EdgeInsets.all(16),
         children: [
-          _SettingsTile(
+          CcSettingsTile(
             icon: Icons.label,
             title: 'Device name',
             subtitle: displayName,
             onTap: () => _showNameDialog(context, ref, deviceName),
           ),
           const SizedBox(height: 12),
-          _SettingsTile(
-            icon: Icons.volume_up,
-            title: 'Noise threshold',
-            subtitle: '${settings.noise.threshold}%',
-            trailing: SizedBox(
-              width: 150,
-              child: Slider(
-                value: settings.noise.threshold.toDouble().clamp(10, 100),
-                min: 10,
-                max: 100,
-                divisions: 18,
-                onChanged: (value) {
-                  ref
-                      .read(monitorSettingsProvider.notifier)
-                      .setThreshold(value.round());
-                },
-              ),
-            ),
+          CcSettingsSlider(
+            label: 'Noise threshold',
+            value: settings.noise.threshold.toDouble(),
+            min: 10,
+            max: 100,
+            divisions: 18,
+            displayValue: '${settings.noise.threshold}%',
+            onChanged: (value) {
+              ref
+                  .read(monitorSettingsProvider.notifier)
+                  .setThreshold(value.round());
+            },
+          ),
+          CcSettingsSlider(
+            label: 'Input gain',
+            value: settings.audioInputGain.toDouble(),
+            min: 0,
+            max: 200,
+            divisions: 20,
+            displayValue: '${settings.audioInputGain}%',
+            onChanged: (value) {
+              ref
+                  .read(monitorSettingsProvider.notifier)
+                  .setAudioInputGain(value.round());
+            },
           ),
           const SizedBox(height: 12),
-          _SettingsTile(
-            icon: Icons.mic,
-            title: 'Input gain',
-            subtitle: '${settings.audioInputGain}%',
-            trailing: SizedBox(
-              width: 150,
-              child: Slider(
-                value: settings.audioInputGain.toDouble().clamp(0, 200),
-                min: 0,
-                max: 200,
-                divisions: 20,
-                onChanged: (value) {
-                  ref
-                      .read(monitorSettingsProvider.notifier)
-                      .setAudioInputGain(value.round());
-                },
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          _SettingsTile(
+          CcSettingsTile(
             icon: Icons.timer,
             title: 'Min duration',
             subtitle: '${settings.noise.minDurationMs}ms',
@@ -339,33 +329,9 @@ class _MonitorSettingsTab extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: 12),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: AppColors.primary.withValues(alpha: 0.05),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: AppColors.primary.withValues(alpha: 0.1),
-              ),
-            ),
-            child: Row(
-              children: [
-                Icon(
-                  Icons.info_outline,
-                  size: 18,
-                  color: AppColors.primary.withValues(alpha: 0.7),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    'Cooldown and auto-stream settings are configured by listeners.',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: AppColors.muted,
-                    ),
-                  ),
-                ),
-              ],
-            ),
+          const CcInfoBox(
+            text:
+                'Cooldown and auto-stream settings are configured by listeners.',
           ),
         ],
       ),
@@ -425,7 +391,7 @@ class _ListenerSettingsTab extends ConsumerWidget {
         controller: scrollController,
         padding: const EdgeInsets.all(16),
         children: [
-          _SettingsTile(
+          CcSettingsTile(
             icon: Icons.notifications,
             title: 'Notifications',
             subtitle: settings.notificationsEnabled ? 'Enabled' : 'Disabled',
@@ -439,7 +405,7 @@ class _ListenerSettingsTab extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: 12),
-          _SettingsTile(
+          CcSettingsTile(
             icon: Icons.touch_app,
             title: 'Default action on noise',
             subtitle: settings.defaultAction == ListenerDefaultAction.notify
@@ -468,7 +434,7 @@ class _ListenerSettingsTab extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: 12),
-          _SettingsTile(
+          CcSettingsTile(
             icon: Icons.volume_up,
             title: 'Playback volume',
             subtitle: '${settings.playbackVolume}%',
@@ -573,7 +539,7 @@ class _GeneralSettingsTab extends ConsumerWidget {
         identityAsync.when(
           data: (identity) => Column(
             children: [
-              _SettingsTile(
+              CcSettingsTile(
                 icon: Icons.perm_identity,
                 title: 'Device ID',
                 subtitle: identity.deviceId,
@@ -588,7 +554,7 @@ class _GeneralSettingsTab extends ConsumerWidget {
                 },
               ),
               const SizedBox(height: 12),
-              _SettingsTile(
+              CcSettingsTile(
                 icon: Icons.fingerprint,
                 title: 'Certificate Fingerprint',
                 subtitle: identity.certFingerprint,
@@ -605,7 +571,7 @@ class _GeneralSettingsTab extends ConsumerWidget {
                 },
               ),
               const SizedBox(height: 12),
-              _SettingsTile(
+              CcSettingsTile(
                 icon: Icons.refresh,
                 title: 'Regenerate Identity',
                 subtitle: 'Create new device ID and certificate',
@@ -631,13 +597,13 @@ class _GeneralSettingsTab extends ConsumerWidget {
           ),
         ),
         const SizedBox(height: 12),
-        const _SettingsTile(
+        const CcSettingsTile(
           icon: Icons.info,
           title: 'Version',
           subtitle: '1.0.0',
         ),
         const SizedBox(height: 12),
-        const _SettingsTile(
+        const CcSettingsTile(
           icon: Icons.security,
           title: 'Security',
           subtitle: 'LAN-only, mTLS, pinned certificates',
@@ -647,81 +613,3 @@ class _GeneralSettingsTab extends ConsumerWidget {
   }
 }
 
-/// Reusable settings tile widget.
-class _SettingsTile extends StatelessWidget {
-  const _SettingsTile({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    this.trailing,
-    this.onTap,
-  });
-
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final Widget? trailing;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: AppColors.surface,
-      borderRadius: BorderRadius.circular(12),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
-        child: Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: Colors.grey.shade200),
-          ),
-          child: Row(
-            children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: AppColors.primary.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Icon(icon, color: AppColors.primary, size: 18),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle,
-                      style: Theme.of(
-                        context,
-                      ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                ),
-              ),
-              if (trailing != null) ...[
-                const SizedBox(width: 8),
-                trailing!,
-              ] else if (onTap != null) ...[
-                const SizedBox(width: 8),
-                Icon(Icons.chevron_right, color: AppColors.muted, size: 20),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}

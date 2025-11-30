@@ -191,6 +191,9 @@ class MonitorSettingsController extends AsyncNotifier<MonitorSettings> {
     final updated = update(current);
     state = AsyncData(updated);
     await ref.read(monitorSettingsRepoProvider).save(updated);
+
+    // Broadcast updated settings to connected listeners
+    await ref.read(controlServerProvider.notifier).broadcastMonitorSettings();
   }
 }
 
