@@ -25,7 +25,6 @@ class NoiseEventHandler extends ConsumerStatefulWidget {
 
 class _NoiseEventHandlerState extends ConsumerState<NoiseEventHandler> {
   StreamSubscription<NoiseEventData>? _noiseSubscription;
-  Timer? _autoPlayTimer;
 
   @override
   void initState() {
@@ -78,8 +77,11 @@ class _NoiseEventHandlerState extends ConsumerState<NoiseEventHandler> {
       return;
     }
 
+    // Check if autoopen is paused globally
+    final autoOpenPaused = ref.read(autoOpenPausedProvider);
+
     // Check if auto-play on noise is enabled for this monitor
-    if (monitorSettings?.autoPlayOnNoise == true) {
+    if (monitorSettings?.autoPlayOnNoise == true && !autoOpenPaused) {
       _startAutoPlay(event, monitorSettings!.autoPlayDurationSec);
       return;
     }
@@ -89,7 +91,7 @@ class _NoiseEventHandlerState extends ConsumerState<NoiseEventHandler> {
     final defaultAction =
         listenerSettings?.defaultAction ?? ListenerDefaultAction.notify;
 
-    if (defaultAction == ListenerDefaultAction.autoOpenStream) {
+    if (defaultAction == ListenerDefaultAction.autoOpenStream && !autoOpenPaused) {
       _startAutoPlay(event, monitorSettings?.autoPlayDurationSec ?? 15);
     } else {
       _showNoiseNotification(event);
@@ -126,15 +128,17 @@ class _NoiseEventHandlerState extends ConsumerState<NoiseEventHandler> {
     // Request stream
     ref.read(streamingProvider.notifier).requestStream();
 
-    // Set up auto-stop timer
-    _autoPlayTimer?.cancel();
-    _autoPlayTimer = Timer(Duration(seconds: durationSec), () {
-      _log('Auto-play duration expired, stopping stream');
-      final currentState = ref.read(streamingProvider);
-      if (currentState.status == StreamingStatus.connected) {
-        ref.read(streamingProvider.notifier).endStream();
-      }
-    });
+    // Start auto-play session with timer via provider
+    ref.read(autoPlaySessionProvider.notifier).startSession(
+      monitorName: event.monitorName,
+      durationSeconds: durationSec,
+      onAutoStop: () {
+        final currentState = ref.read(streamingProvider);
+        if (currentState.status == StreamingStatus.connected) {
+          ref.read(streamingProvider.notifier).endStream();
+        }
+      },
+    );
 
     // Show notification about auto-play
     if (mounted) {
@@ -152,13 +156,12 @@ class _NoiseEventHandlerState extends ConsumerState<NoiseEventHandler> {
             ],
           ),
           action: SnackBarAction(
-            label: 'Stop',
+            label: 'Continue',
             onPressed: () {
-              _autoPlayTimer?.cancel();
-              ref.read(streamingProvider.notifier).endStream();
+              ref.read(autoPlaySessionProvider.notifier).continueStream();
             },
           ),
-          duration: const Duration(seconds: 3),
+          duration: const Duration(seconds: 4),
           behavior: SnackBarBehavior.floating,
         ),
       );
@@ -238,7 +241,6 @@ class _NoiseEventHandlerState extends ConsumerState<NoiseEventHandler> {
   @override
   void dispose() {
     _noiseSubscription?.cancel();
-    _autoPlayTimer?.cancel();
     super.dispose();
   }
 

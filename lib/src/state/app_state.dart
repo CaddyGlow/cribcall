@@ -309,6 +309,140 @@ final controlClientProvider =
       ControlClientController.new,
     );
 
+/// Controller for runtime autoopen paused state.
+/// When paused, noise events will only trigger notifications, not auto-play.
+/// This is not persisted and resets when the app restarts.
+class AutoOpenPausedController extends Notifier<bool> {
+  @override
+  bool build() => false;
+
+  void setPaused(bool paused) {
+    state = paused;
+  }
+
+  void toggle() {
+    state = !state;
+  }
+}
+
+/// Runtime-only state for pausing autoopen behavior.
+final autoOpenPausedProvider = NotifierProvider<AutoOpenPausedController, bool>(
+  AutoOpenPausedController.new,
+);
+
+/// State for an active auto-play session.
+class AutoPlaySessionState {
+  const AutoPlaySessionState({
+    this.isAutoPlay = false,
+    this.monitorName,
+    this.remainingSeconds,
+    this.totalDurationSeconds,
+  });
+
+  /// Whether the current stream was started by auto-play.
+  final bool isAutoPlay;
+
+  /// Name of the monitor being auto-played.
+  final String? monitorName;
+
+  /// Remaining seconds before auto-stop (null if continued/indefinite).
+  final int? remainingSeconds;
+
+  /// Total duration configured for auto-play.
+  final int? totalDurationSeconds;
+
+  /// Whether the stream will auto-stop (has a timer running).
+  bool get willAutoStop => remainingSeconds != null;
+
+  AutoPlaySessionState copyWith({
+    bool? isAutoPlay,
+    String? monitorName,
+    int? remainingSeconds,
+    int? totalDurationSeconds,
+    bool clearRemaining = false,
+  }) {
+    return AutoPlaySessionState(
+      isAutoPlay: isAutoPlay ?? this.isAutoPlay,
+      monitorName: monitorName ?? this.monitorName,
+      remainingSeconds: clearRemaining ? null : (remainingSeconds ?? this.remainingSeconds),
+      totalDurationSeconds: totalDurationSeconds ?? this.totalDurationSeconds,
+    );
+  }
+}
+
+/// Controller for auto-play session state.
+/// Tracks whether the current stream is an auto-play session and manages the auto-stop timer.
+class AutoPlaySessionController extends Notifier<AutoPlaySessionState> {
+  Timer? _autoStopTimer;
+  Timer? _countdownTimer;
+
+  @override
+  AutoPlaySessionState build() {
+    ref.onDispose(_cleanup);
+    return const AutoPlaySessionState();
+  }
+
+  /// Start an auto-play session with a timer.
+  void startSession({
+    required String monitorName,
+    required int durationSeconds,
+    required void Function() onAutoStop,
+  }) {
+    _cleanup();
+
+    state = AutoPlaySessionState(
+      isAutoPlay: true,
+      monitorName: monitorName,
+      remainingSeconds: durationSeconds,
+      totalDurationSeconds: durationSeconds,
+    );
+
+    // Set up countdown timer (updates every second)
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      final remaining = state.remainingSeconds;
+      if (remaining != null && remaining > 0) {
+        state = state.copyWith(remainingSeconds: remaining - 1);
+      }
+    });
+
+    // Set up auto-stop timer
+    _autoStopTimer = Timer(Duration(seconds: durationSeconds), () {
+      developer.log('Auto-play timer expired, stopping stream', name: 'auto_play');
+      onAutoStop();
+      endSession();
+    });
+  }
+
+  /// Continue the stream indefinitely (cancel the auto-stop timer).
+  void continueStream() {
+    _autoStopTimer?.cancel();
+    _autoStopTimer = null;
+    _countdownTimer?.cancel();
+    _countdownTimer = null;
+    state = state.copyWith(clearRemaining: true);
+    developer.log('Auto-play continued indefinitely', name: 'auto_play');
+  }
+
+  /// End the auto-play session (called when stream ends).
+  void endSession() {
+    _cleanup();
+    state = const AutoPlaySessionState();
+  }
+
+  void _cleanup() {
+    _autoStopTimer?.cancel();
+    _autoStopTimer = null;
+    _countdownTimer?.cancel();
+    _countdownTimer = null;
+  }
+}
+
+/// Provider for auto-play session state.
+final autoPlaySessionProvider =
+    NotifierProvider<AutoPlaySessionController, AutoPlaySessionState>(
+      AutoPlaySessionController.new,
+    );
+
 /// Derived provider that only emits when the trusted listener FINGERPRINTS change.
 /// This prevents server restarts when only metadata (like FCM tokens) are updated.
 final _trustedListenerFingerprintsProvider = Provider<Set<String>?>((ref) {
