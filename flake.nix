@@ -74,27 +74,27 @@
         rustcChannel = rustToolchain.toolchain.channel;
         hostTriple = pkgs.stdenv.hostPlatform.config;
 
-        libPath =
-          pkgs.lib.makeLibraryPath (
-            [
-              pkgs.glib
-              pkgs.gtk3
-              pkgs.libsecret
-            ]
-            ++ pkgs.lib.optionals isLinux [
-              pkgs.alsa-lib
-              pkgs.pulseaudio
-              pkgs.libGL
-              pkgs.libdrm
-              pkgs.libgbm
-            ]
-          );
+        libPath = pkgs.lib.makeLibraryPath (
+          [
+            pkgs.glib
+            pkgs.gtk3
+            pkgs.libsecret
+          ]
+          ++ pkgs.lib.optionals isLinux [
+            pkgs.alsa-lib
+            pkgs.pulseaudio
+            pkgs.libGL
+            pkgs.libdrm
+            pkgs.libgbm
+          ]
+        );
 
         bindgenIncludePath = [
           ''-I"${pkgs.llvmPackages_latest.libclang.lib}/lib/clang/${pkgs.llvmPackages_latest.libclang.version}/include"''
           ''-I"${pkgs.glib.dev}/include/glib-2.0"''
           ''-I${pkgs.glib.out}/lib/glib-2.0/include/''
-        ] ++ pkgs.lib.optionals isLinux [
+        ]
+        ++ pkgs.lib.optionals isLinux [
           ''-I"${pkgs.glibc.dev}/include"''
         ];
       in
@@ -119,10 +119,12 @@
             pkgs.rustup
             pkgs.lua54Packages.lua
             pkgs.google-cloud-sdk
-          ] ++ pkgs.lib.optionals (!isDarwin) [
+          ]
+          ++ pkgs.lib.optionals (!isDarwin) [
             pkgs.flutter
             pkgs.dart
-          ] ++ pkgs.lib.optionals isLinux [
+          ]
+          ++ pkgs.lib.optionals isLinux [
             pkgs.alsa-lib
             pkgs.sysprof
             pkgs.pulseaudio
@@ -155,6 +157,12 @@
             ${pkgs.lib.optionalString (!isDarwin) ''
               export FLUTTER_ROOT=${pkgs.flutter}
               export PATH="$FLUTTER_ROOT/bin:$FLUTTER_ROOT/bin/cache/dart-sdk/bin:$PATH"
+            ''}
+            ${pkgs.lib.optionalString isDarwin ''
+              export PATH=$(echo $PATH | sed "s,${pkgs.xcbuild.xcrun}/bin,,")
+              unset DEVELOPER_DIR
+              unset SDKROOT
+              unset MACOSX_DEPLOYMENT_TARGET 
             ''}
             export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
             export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/$RUSTC_VERSION-${hostTriple}/bin/
