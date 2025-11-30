@@ -99,7 +99,11 @@
         ];
       in
       {
-        devShells.default = pkgs.mkShell rec {
+        devShells.default = pkgs.mkShell (rec {
+          # Prevent Nix from setting iOS-incompatible environment variables
+          NIX_CFLAGS_COMPILE = "";
+          NIX_LDFLAGS = "";
+          
           nativeBuildInputs = [
             pkgs.pkg-config
             pkgs.cmake
@@ -123,6 +127,11 @@
           ++ pkgs.lib.optionals (!isDarwin) [
             pkgs.flutter
             pkgs.dart
+          ]
+          ++ pkgs.lib.optionals isDarwin [
+            # Use system Flutter on Darwin for iOS support
+            # pkgs.flutter  # Commented out to use system Flutter
+            pkgs.cocoapods
           ]
           ++ pkgs.lib.optionals isLinux [
             pkgs.alsa-lib
@@ -153,16 +162,36 @@
 
           LIBRARY_PATH = libPath;
 
+          # Note: DEVELOPER_DIR and SDKROOT will be fixed in shellHook
+
           shellHook = ''
             ${pkgs.lib.optionalString (!isDarwin) ''
               export FLUTTER_ROOT=${pkgs.flutter}
               export PATH="$FLUTTER_ROOT/bin:$FLUTTER_ROOT/bin/cache/dart-sdk/bin:$PATH"
             ''}
             ${pkgs.lib.optionalString isDarwin ''
-              export PATH=$(echo $PATH | sed "s,${pkgs.xcbuild.xcrun}/bin,,")
+              # Fix iOS development environment by overriding Nix-provided values
               unset DEVELOPER_DIR
-              unset SDKROOT
-              unset MACOSX_DEPLOYMENT_TARGET 
+              unset SDKROOT  
+              unset MACOSX_DEPLOYMENT_TARGET
+              export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+              # Use system Flutter for iOS support
+              # Ensure Flutter and Xcode are in PATH
+              export PATH="/Applications/Xcode.app/Contents/Developer/usr/bin:/opt/homebrew/bin:$PATH"
+              # Flutter iOS build requirements - preload iOS dependencies
+              flutter precache --ios 2>/dev/null || true
+              
+              # Create iOS build wrapper script
+              cat > ios-build.sh << 'EOF'
+#!/bin/bash
+echo "Building iOS with clean environment..."
+unset DEVELOPER_DIR SDKROOT MACOSX_DEPLOYMENT_TARGET
+export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+export PATH="/Applications/Xcode.app/Contents/Developer/usr/bin:/opt/homebrew/bin:$PATH"
+flutter build ios --no-codesign "$@"
+EOF
+              chmod +x ios-build.sh
+              echo "Created iOS build wrapper: ./ios-build.sh"
             ''}
             export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
             export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/$RUSTC_VERSION-${hostTriple}/bin/
@@ -172,8 +201,17 @@
             export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/28.2.13676358"
             export ANDROID_NDK_ROOT=$ANDROID_NDK_HOME
             echo "CribCall dev shell ready (Flutter, Dart, rustup-managed Rust, Android SDK)."
+            ${pkgs.lib.optionalString isDarwin ''
+              echo "iOS development: Xcode tools available for Flutter iOS builds"
+            ''}
+            ${pkgs.lib.optionalString (!isDarwin) ''
+              echo "Android development: Full Android SDK available"
+            ''}
           '';
-        };
+        } // pkgs.lib.optionalAttrs isDarwin {
+          # Override problematic Nix environment variables for iOS development
+          DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer";
+        });
 
         formatter = pkgs.alejandra;
       }
