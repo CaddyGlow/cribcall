@@ -214,41 +214,8 @@ class ListenerSettingsController extends AsyncNotifier<ListenerSettings> {
         playbackVolume: volume.clamp(0, 200).toInt(),
       ));
 
-  /// Set the global noise threshold preference.
-  Future<void> setNoiseThreshold(int threshold) => _updateAndPersist(
-        (current) => current.copyWith(
-          noisePreferences: current.noisePreferences.copyWith(
-            threshold: threshold.clamp(10, 100),
-          ),
-        ),
-      );
-
-  /// Set the global cooldown preference.
-  Future<void> setCooldownSeconds(int cooldownSeconds) => _updateAndPersist(
-        (current) => current.copyWith(
-          noisePreferences: current.noisePreferences.copyWith(
-            cooldownSeconds: cooldownSeconds.clamp(1, 120),
-          ),
-        ),
-      );
-
-  /// Set the global auto-stream type preference.
-  Future<void> setAutoStreamType(AutoStreamType type) => _updateAndPersist(
-        (current) => current.copyWith(
-          noisePreferences: current.noisePreferences.copyWith(
-            autoStreamType: type,
-          ),
-        ),
-      );
-
-  /// Set the global auto-stream duration preference.
-  Future<void> setAutoStreamDurationSec(int durationSec) => _updateAndPersist(
-        (current) => current.copyWith(
-          noisePreferences: current.noisePreferences.copyWith(
-            autoStreamDurationSec: durationSec.clamp(5, 120),
-          ),
-        ),
-      );
+  // Note: Noise preference methods removed - settings now come from monitors
+  // via ConnectedMonitorSettings and are customized per-monitor.
 
   Future<ListenerSettings> _ensureValue() async {
     final current = state.asData?.value;
@@ -896,6 +863,68 @@ class NoiseSubscriptionsController
       }
     }
     return minThreshold;
+  }
+
+  /// Update listener settings for a subscription identified by fingerprint.
+  /// Called when listener sends UPDATE_LISTENER_SETTINGS message.
+  Future<void> updateListenerSettings({
+    required String fingerprint,
+    int? threshold,
+    int? cooldownSeconds,
+    AutoStreamType? autoStreamType,
+    int? autoStreamDurationSec,
+  }) async {
+    final current = await _ensureValue();
+    final updated = <NoiseSubscription>[];
+    bool found = false;
+
+    for (final sub in current) {
+      if (sub.certFingerprint == fingerprint) {
+        found = true;
+        updated.add(sub.copyWith(
+          threshold: threshold,
+          cooldownSeconds: cooldownSeconds,
+          autoStreamType: autoStreamType,
+          autoStreamDurationSec: autoStreamDurationSec,
+        ));
+      } else {
+        updated.add(sub);
+      }
+    }
+
+    if (found) {
+      state = AsyncData(updated);
+      await _save(updated);
+      developer.log(
+        'Updated listener settings for fp=${shortFingerprint(fingerprint)} '
+        'threshold=$threshold cooldown=$cooldownSeconds',
+        name: 'noise_sub',
+      );
+    }
+  }
+
+  /// Update last noise event timestamp for a subscription (for per-listener cooldown).
+  Future<void> updateLastNoiseEvent({
+    required String subscriptionId,
+    required int timestampMs,
+  }) async {
+    final current = await _ensureValue();
+    final updated = <NoiseSubscription>[];
+    bool found = false;
+
+    for (final sub in current) {
+      if (sub.subscriptionId == subscriptionId) {
+        found = true;
+        updated.add(sub.copyWith(lastNoiseEventMs: timestampMs));
+      } else {
+        updated.add(sub);
+      }
+    }
+
+    if (found) {
+      state = AsyncData(updated);
+      await _save(updated);
+    }
   }
 
   Future<List<NoiseSubscription>> _ensureValue() async {

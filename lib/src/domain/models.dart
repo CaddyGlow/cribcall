@@ -201,34 +201,28 @@ class ListenerSettings {
     notificationsEnabled: true,
     defaultAction: ListenerDefaultAction.notify,
     playbackVolume: 100,
-    noisePreferences: NoisePreferences.defaults,
   );
 
   const ListenerSettings({
     required this.notificationsEnabled,
     required this.defaultAction,
     required this.playbackVolume,
-    required this.noisePreferences,
   });
 
   final bool notificationsEnabled;
   final ListenerDefaultAction defaultAction;
   /// Playback volume for listener audio (percent, 0-200).
   final int playbackVolume;
-  /// Global noise detection preferences sent to monitors.
-  final NoisePreferences noisePreferences;
 
   ListenerSettings copyWith({
     bool? notificationsEnabled,
     ListenerDefaultAction? defaultAction,
     int? playbackVolume,
-    NoisePreferences? noisePreferences,
   }) {
     return ListenerSettings(
       notificationsEnabled: notificationsEnabled ?? this.notificationsEnabled,
       defaultAction: defaultAction ?? this.defaultAction,
       playbackVolume: playbackVolume ?? this.playbackVolume,
-      noisePreferences: noisePreferences ?? this.noisePreferences,
     );
   }
 
@@ -236,21 +230,18 @@ class ListenerSettings {
     'notificationsEnabled': notificationsEnabled,
     'defaultAction': defaultAction.name,
     'playbackVolume': playbackVolume,
-    'noisePreferences': noisePreferences.toJson(),
   };
 
   factory ListenerSettings.fromJson(Map<String, dynamic> json) {
     final volume = (json['playbackVolume'] as int?) ?? 100;
-    final prefsJson = json['noisePreferences'] as Map<String, dynamic>?;
+    // Note: noisePreferences field is intentionally ignored for backward compatibility
+    // Settings now come from monitors via ConnectedMonitorSettings
     return ListenerSettings(
       notificationsEnabled: json['notificationsEnabled'] as bool,
       defaultAction: ListenerDefaultAction.values.byName(
         json['defaultAction'] as String,
       ),
       playbackVolume: volume.clamp(0, 200).toInt(),
-      noisePreferences: prefsJson != null
-          ? NoisePreferences.fromJson(prefsJson)
-          : NoisePreferences.defaults,
     );
   }
 }

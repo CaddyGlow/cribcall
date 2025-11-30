@@ -13,7 +13,10 @@ enum ControlMessageType {
   webrtcIce('WEBRTC_ICE'),
   ping('PING'),
   pong('PONG'),
-  fcmTokenUpdate('FCM_TOKEN_UPDATE');
+  fcmTokenUpdate('FCM_TOKEN_UPDATE'),
+  monitorSettings('MONITOR_SETTINGS'),
+  getMonitorSettings('GET_MONITOR_SETTINGS'),
+  updateListenerSettings('UPDATE_LISTENER_SETTINGS');
 
   const ControlMessageType(this.wireValue);
 
@@ -276,6 +279,102 @@ class FcmTokenUpdateMessage extends ControlMessage {
       };
 }
 
+/// Message sent by Monitor to Listener containing current audio settings.
+/// Sent on connection and in response to GetMonitorSettingsMessage.
+class MonitorSettingsMessage extends ControlMessage {
+  MonitorSettingsMessage({
+    required this.threshold,
+    required this.minDurationMs,
+    required this.cooldownSeconds,
+    required this.audioInputGain,
+    required this.autoStreamType,
+    required this.autoStreamDurationSec,
+  });
+
+  final int threshold;
+  final int minDurationMs;
+  final int cooldownSeconds;
+  final int audioInputGain;
+  final String autoStreamType; // "none" | "audio" | "audioVideo"
+  final int autoStreamDurationSec;
+
+  @override
+  ControlMessageType get type => ControlMessageType.monitorSettings;
+
+  factory MonitorSettingsMessage.fromJson(Map<String, dynamic> json) {
+    return MonitorSettingsMessage(
+      threshold: json['threshold'] as int,
+      minDurationMs: json['minDurationMs'] as int,
+      cooldownSeconds: json['cooldownSeconds'] as int,
+      audioInputGain: json['audioInputGain'] as int,
+      autoStreamType: json['autoStreamType'] as String,
+      autoStreamDurationSec: json['autoStreamDurationSec'] as int,
+    );
+  }
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'threshold': threshold,
+        'minDurationMs': minDurationMs,
+        'cooldownSeconds': cooldownSeconds,
+        'audioInputGain': audioInputGain,
+        'autoStreamType': autoStreamType,
+        'autoStreamDurationSec': autoStreamDurationSec,
+      };
+}
+
+/// Message sent by Listener to Monitor to request current settings.
+class GetMonitorSettingsMessage extends ControlMessage {
+  GetMonitorSettingsMessage();
+
+  @override
+  ControlMessageType get type => ControlMessageType.getMonitorSettings;
+
+  factory GetMonitorSettingsMessage.fromJson(Map<String, dynamic> json) {
+    return GetMonitorSettingsMessage();
+  }
+
+  @override
+  Map<String, dynamic> toJson() => {};
+}
+
+/// Message sent by Listener to Monitor to update per-listener settings.
+/// These settings override the monitor's defaults for this specific listener.
+class UpdateListenerSettingsMessage extends ControlMessage {
+  UpdateListenerSettingsMessage({
+    this.threshold,
+    this.cooldownSeconds,
+    this.autoStreamType,
+    this.autoStreamDurationSec,
+  });
+
+  final int? threshold;
+  final int? cooldownSeconds;
+  final String? autoStreamType; // "none" | "audio" | "audioVideo"
+  final int? autoStreamDurationSec;
+
+  @override
+  ControlMessageType get type => ControlMessageType.updateListenerSettings;
+
+  factory UpdateListenerSettingsMessage.fromJson(Map<String, dynamic> json) {
+    return UpdateListenerSettingsMessage(
+      threshold: json['threshold'] as int?,
+      cooldownSeconds: json['cooldownSeconds'] as int?,
+      autoStreamType: json['autoStreamType'] as String?,
+      autoStreamDurationSec: json['autoStreamDurationSec'] as int?,
+    );
+  }
+
+  @override
+  Map<String, dynamic> toJson() => {
+        if (threshold != null) 'threshold': threshold,
+        if (cooldownSeconds != null) 'cooldownSeconds': cooldownSeconds,
+        if (autoStreamType != null) 'autoStreamType': autoStreamType,
+        if (autoStreamDurationSec != null)
+          'autoStreamDurationSec': autoStreamDurationSec,
+      };
+}
+
 /// Factory to deserialize control messages from wire format
 class ControlMessageFactory {
   static ControlMessage fromWireJson(Map<String, dynamic> json) {
@@ -309,6 +408,12 @@ class ControlMessageFactory {
         return PongMessage.fromJson(body);
       case ControlMessageType.fcmTokenUpdate:
         return FcmTokenUpdateMessage.fromJson(body);
+      case ControlMessageType.monitorSettings:
+        return MonitorSettingsMessage.fromJson(body);
+      case ControlMessageType.getMonitorSettings:
+        return GetMonitorSettingsMessage.fromJson(body);
+      case ControlMessageType.updateListenerSettings:
+        return UpdateListenerSettingsMessage.fromJson(body);
     }
   }
 

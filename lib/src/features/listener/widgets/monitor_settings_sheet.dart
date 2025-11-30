@@ -3,7 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../domain/models.dart';
 import '../../../state/app_state.dart';
-import '../../../state/per_monitor_settings.dart';
+import '../../../state/connected_monitor_settings.dart';
 import '../../../theme.dart';
 
 /// Shows the per-monitor settings bottom sheet.
@@ -36,14 +36,15 @@ class MonitorSettingsSheet extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final settingsAsync = ref.watch(perMonitorSettingsProvider);
-    final settings = settingsAsync.asData?.value.getOrDefault(remoteDeviceId) ??
-        PerMonitorSettings.defaults(remoteDeviceId);
+    final settingsAsync = ref.watch(connectedMonitorSettingsProvider);
+    final settings =
+        settingsAsync.asData?.value.getOrDefault(remoteDeviceId) ??
+        ConnectedMonitorSettings.withDefaults(remoteDeviceId);
 
     return DraggableScrollableSheet(
       initialChildSize: 0.45,
       minChildSize: 0.3,
-      maxChildSize: 0.7,
+      maxChildSize: 0.8,
       expand: false,
       builder: (context, scrollController) {
         return SingleChildScrollView(
@@ -75,19 +76,23 @@ class MonitorSettingsSheet extends ConsumerWidget {
                       children: [
                         Text(
                           'Settings for "$monitorName"',
-                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.w800,
-                          ),
+                          style: Theme.of(context).textTheme.titleMedium
+                              ?.copyWith(fontWeight: FontWeight.w800),
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          'Customize notifications and auto-play',
-                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: AppColors.muted,
-                          ),
+                          'Monitor-provided defaults with your overrides',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(color: AppColors.muted),
                         ),
                       ],
                     ),
+                  ),
+                  TextButton(
+                    onPressed: () => ref
+                        .read(controlClientProvider.notifier)
+                        .requestMonitorSettings(),
+                    child: const Text('Refresh'),
                   ),
                 ],
               ),
@@ -102,7 +107,7 @@ class MonitorSettingsSheet extends ConsumerWidget {
                   value: settings.notificationsEnabled,
                   onChanged: (value) {
                     ref
-                        .read(perMonitorSettingsProvider.notifier)
+                        .read(connectedMonitorSettingsProvider.notifier)
                         .setNotificationsEnabled(remoteDeviceId, value);
                   },
                 ),
@@ -113,12 +118,13 @@ class MonitorSettingsSheet extends ConsumerWidget {
               // Auto-play toggle
               _SettingsCard(
                 title: 'Auto-play on noise',
-                subtitle: 'Automatically start streaming when noise is detected',
+                subtitle:
+                    'Automatically start streaming when noise is detected',
                 trailing: Switch(
                   value: settings.autoPlayOnNoise,
                   onChanged: (value) {
                     ref
-                        .read(perMonitorSettingsProvider.notifier)
+                        .read(connectedMonitorSettingsProvider.notifier)
                         .setAutoPlayOnNoise(remoteDeviceId, value);
                   },
                 ),
@@ -136,7 +142,7 @@ class MonitorSettingsSheet extends ConsumerWidget {
                     onChanged: (value) {
                       if (value != null) {
                         ref
-                            .read(perMonitorSettingsProvider.notifier)
+                            .read(connectedMonitorSettingsProvider.notifier)
                             .setAutoPlayDuration(remoteDeviceId, value);
                       }
                     },
@@ -155,16 +161,16 @@ class MonitorSettingsSheet extends ConsumerWidget {
               // Noise preferences header
               Text(
                 'Noise detection overrides',
-                style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                  fontWeight: FontWeight.w800,
-                ),
+                style: Theme.of(
+                  context,
+                ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800),
               ),
               const SizedBox(height: 4),
               Text(
-                'Override global settings for this monitor only',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: AppColors.muted,
-                ),
+                'Monitor defaults are shown; set overrides for this listener.',
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
               ),
               const SizedBox(height: 12),
 
@@ -174,22 +180,15 @@ class MonitorSettingsSheet extends ConsumerWidget {
                 ref,
                 title: 'Sensitivity',
                 subtitle: 'Noise threshold for this monitor',
-                currentOverride: settings.thresholdOverride,
-                globalDefault: ref
-                        .watch(listenerSettingsProvider)
-                        .asData
-                        ?.value
-                        .noisePreferences
-                        .threshold ??
-                    50,
-                options: [20, 30, 40, 50, 60, 70, 80, 90],
+                baseValue: settings.baseThreshold,
+                currentOverride: settings.customThreshold,
+                options: const [20, 30, 40, 50, 60, 70, 80, 90],
                 formatValue: (v) => '$v%',
-                onChanged: (value) {
-                  ref
-                      .read(perMonitorSettingsProvider.notifier)
-                      .setThresholdOverride(remoteDeviceId, value);
-                  // Refresh subscription with new preferences
-                  ref
+                onChanged: (value) async {
+                  await ref
+                      .read(connectedMonitorSettingsProvider.notifier)
+                      .setCustomThreshold(remoteDeviceId, value);
+                  await ref
                       .read(controlClientProvider.notifier)
                       .refreshNoiseSubscription();
                 },
@@ -203,22 +202,15 @@ class MonitorSettingsSheet extends ConsumerWidget {
                 ref,
                 title: 'Cooldown',
                 subtitle: 'Seconds between alerts',
-                currentOverride: settings.cooldownSecondsOverride,
-                globalDefault: ref
-                        .watch(listenerSettingsProvider)
-                        .asData
-                        ?.value
-                        .noisePreferences
-                        .cooldownSeconds ??
-                    8,
-                options: [3, 5, 8, 10, 15, 30],
+                baseValue: settings.baseCooldownSeconds,
+                currentOverride: settings.customCooldownSeconds,
+                options: const [3, 5, 8, 10, 15, 30],
                 formatValue: (v) => '${v}s',
-                onChanged: (value) {
-                  ref
-                      .read(perMonitorSettingsProvider.notifier)
-                      .setCooldownSecondsOverride(remoteDeviceId, value);
-                  // Refresh subscription with new preferences
-                  ref
+                onChanged: (value) async {
+                  await ref
+                      .read(connectedMonitorSettingsProvider.notifier)
+                      .setCustomCooldownSeconds(remoteDeviceId, value);
+                  await ref
                       .read(controlClientProvider.notifier)
                       .refreshNoiseSubscription();
                 },
@@ -256,10 +248,10 @@ class MonitorSettingsSheet extends ConsumerWidget {
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
-                        'These settings override global listener settings for this specific monitor.',
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: AppColors.muted,
-                        ),
+                        'Overrides are stored per monitor. If the monitor changes its defaults, refresh to sync and your overrides will be re-applied.',
+                        style: Theme.of(
+                          context,
+                        ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
                       ),
                     ),
                   ],
@@ -288,20 +280,20 @@ class MonitorSettingsSheet extends ConsumerWidget {
     WidgetRef ref, {
     required String title,
     required String subtitle,
+    required int baseValue,
     required int? currentOverride,
-    required int globalDefault,
     required List<int> options,
     required String Function(int) formatValue,
-    required void Function(int?) onChanged,
+    required Future<void> Function(int?) onChanged,
   }) {
     final hasOverride = currentOverride != null;
-    final displayValue = currentOverride ?? globalDefault;
+    final displayValue = currentOverride ?? baseValue;
 
     return _SettingsCard(
       title: title,
       subtitle: hasOverride
           ? '$subtitle (override: ${formatValue(displayValue)})'
-          : '$subtitle (global: ${formatValue(globalDefault)})',
+          : '$subtitle (monitor default: ${formatValue(baseValue)})',
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -312,7 +304,6 @@ class MonitorSettingsSheet extends ConsumerWidget {
               constraints: const BoxConstraints(),
               onPressed: () {
                 onChanged(null);
-                // Note: onChanged should call refreshNoiseSubscription
               },
               tooltip: 'Clear override',
             ),
@@ -322,14 +313,13 @@ class MonitorSettingsSheet extends ConsumerWidget {
             onChanged: (value) {
               if (value != null) {
                 onChanged(value);
-                // Note: onChanged should call refreshNoiseSubscription
               }
             },
             items: options
-                .map((v) => DropdownMenuItem(
-                      value: v,
-                      child: Text(formatValue(v)),
-                    ))
+                .map(
+                  (v) =>
+                      DropdownMenuItem(value: v, child: Text(formatValue(v))),
+                )
                 .toList(),
           ),
         ],
@@ -340,19 +330,12 @@ class MonitorSettingsSheet extends ConsumerWidget {
   Widget _buildAutoStreamTypeOverride(
     BuildContext context,
     WidgetRef ref, {
-    required PerMonitorSettings settings,
+    required ConnectedMonitorSettings settings,
     required String remoteDeviceId,
   }) {
-    final globalDefault = ref
-            .watch(listenerSettingsProvider)
-            .asData
-            ?.value
-            .noisePreferences
-            .autoStreamType ??
-        AutoStreamType.audio;
-
-    final hasOverride = settings.autoStreamTypeOverride != null;
-    final displayValue = settings.autoStreamTypeOverride ?? globalDefault;
+    final baseValue = settings.baseAutoStreamType;
+    final hasOverride = settings.customAutoStreamType != null;
+    final displayValue = settings.customAutoStreamType ?? baseValue;
 
     String formatType(AutoStreamType type) {
       switch (type) {
@@ -369,7 +352,7 @@ class MonitorSettingsSheet extends ConsumerWidget {
       title: 'Auto-stream on noise',
       subtitle: hasOverride
           ? 'Override: ${formatType(displayValue)}'
-          : 'Global: ${formatType(globalDefault)}',
+          : 'Monitor default: ${formatType(baseValue)}',
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -378,12 +361,11 @@ class MonitorSettingsSheet extends ConsumerWidget {
               icon: const Icon(Icons.close, size: 18),
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(),
-              onPressed: () {
-                ref
-                    .read(perMonitorSettingsProvider.notifier)
-                    .setAutoStreamTypeOverride(remoteDeviceId, null);
-                // Refresh subscription with new preferences
-                ref
+              onPressed: () async {
+                await ref
+                    .read(connectedMonitorSettingsProvider.notifier)
+                    .setCustomAutoStreamType(remoteDeviceId, null);
+                await ref
                     .read(controlClientProvider.notifier)
                     .refreshNoiseSubscription();
               },
@@ -392,22 +374,18 @@ class MonitorSettingsSheet extends ConsumerWidget {
           DropdownButton<AutoStreamType>(
             value: displayValue,
             underline: const SizedBox.shrink(),
-            onChanged: (value) {
+            onChanged: (value) async {
               if (value != null) {
-                ref
-                    .read(perMonitorSettingsProvider.notifier)
-                    .setAutoStreamTypeOverride(remoteDeviceId, value);
-                // Refresh subscription with new preferences
-                ref
+                await ref
+                    .read(connectedMonitorSettingsProvider.notifier)
+                    .setCustomAutoStreamType(remoteDeviceId, value);
+                await ref
                     .read(controlClientProvider.notifier)
                     .refreshNoiseSubscription();
               }
             },
             items: const [
-              DropdownMenuItem(
-                value: AutoStreamType.none,
-                child: Text('Off'),
-              ),
+              DropdownMenuItem(value: AutoStreamType.none, child: Text('Off')),
               DropdownMenuItem(
                 value: AutoStreamType.audio,
                 child: Text('Audio'),
@@ -452,16 +430,16 @@ class _SettingsCard extends StatelessWidget {
               children: [
                 Text(
                   title,
-                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   subtitle,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: AppColors.muted,
-                  ),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
                 ),
               ],
             ),

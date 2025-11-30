@@ -21,6 +21,7 @@ class NoiseSubscription {
     this.cooldownSeconds,
     this.autoStreamType,
     this.autoStreamDurationSec,
+    this.lastNoiseEventMs,
   });
 
   final String deviceId;
@@ -51,6 +52,10 @@ class NoiseSubscription {
   /// Listener's auto-stream duration preference. Null means use monitor default.
   final int? autoStreamDurationSec;
 
+  /// Timestamp of last noise event sent to this subscriber (for per-listener cooldown).
+  /// Persisted to disk to survive restarts.
+  final int? lastNoiseEventMs;
+
   /// Effective notification type with backward-compatible default.
   NotificationType get effectiveNotificationType =>
       notificationType ?? NotificationType.fcm;
@@ -63,21 +68,21 @@ class NoiseSubscription {
   bool get isWebsocketOnly =>
       isWebsocketOnlyNoiseToken(fcmToken) && !isWebhook;
 
-  /// Get effective threshold, with fallback to default.
+  /// Get effective threshold, with fallback to monitor default.
   int get effectiveThreshold =>
-      threshold ?? NoisePreferences.defaults.threshold;
+      threshold ?? MonitorSettings.defaults.noise.threshold;
 
-  /// Get effective cooldown, with fallback to default.
+  /// Get effective cooldown, with fallback to monitor default.
   int get effectiveCooldownSeconds =>
-      cooldownSeconds ?? NoisePreferences.defaults.cooldownSeconds;
+      cooldownSeconds ?? MonitorSettings.defaults.noise.cooldownSeconds;
 
-  /// Get effective auto-stream type, with fallback to default.
+  /// Get effective auto-stream type, with fallback to monitor default.
   AutoStreamType get effectiveAutoStreamType =>
-      autoStreamType ?? NoisePreferences.defaults.autoStreamType;
+      autoStreamType ?? MonitorSettings.defaults.autoStreamType;
 
-  /// Get effective auto-stream duration, with fallback to default.
+  /// Get effective auto-stream duration, with fallback to monitor default.
   int get effectiveAutoStreamDurationSec =>
-      autoStreamDurationSec ?? NoisePreferences.defaults.autoStreamDurationSec;
+      autoStreamDurationSec ?? MonitorSettings.defaults.autoStreamDurationSec;
 
   NoiseSubscription copyWith({
     String? fcmToken,
@@ -90,6 +95,7 @@ class NoiseSubscription {
     int? cooldownSeconds,
     AutoStreamType? autoStreamType,
     int? autoStreamDurationSec,
+    int? lastNoiseEventMs,
   }) {
     return NoiseSubscription(
       deviceId: deviceId,
@@ -106,6 +112,7 @@ class NoiseSubscription {
       autoStreamType: autoStreamType ?? this.autoStreamType,
       autoStreamDurationSec:
           autoStreamDurationSec ?? this.autoStreamDurationSec,
+      lastNoiseEventMs: lastNoiseEventMs ?? this.lastNoiseEventMs,
     );
   }
 
@@ -127,6 +134,7 @@ class NoiseSubscription {
     if (autoStreamType != null) 'autoStreamType': autoStreamType!.name,
     if (autoStreamDurationSec != null)
       'autoStreamDurationSec': autoStreamDurationSec,
+    if (lastNoiseEventMs != null) 'lastNoiseEventMs': lastNoiseEventMs,
   };
 
   factory NoiseSubscription.fromJson(Map<String, dynamic> json) {
@@ -150,6 +158,7 @@ class NoiseSubscription {
           ? AutoStreamType.values.byName(autoStreamTypeName)
           : null,
       autoStreamDurationSec: json['autoStreamDurationSec'] as int?,
+      lastNoiseEventMs: json['lastNoiseEventMs'] as int?,
     );
   }
 }

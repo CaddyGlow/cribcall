@@ -10,7 +10,7 @@ import '../../domain/models.dart';
 import '../../identity/device_identity.dart';
 import '../../sound/audio_playback.dart';
 import '../../state/app_state.dart';
-import '../../state/per_monitor_settings.dart';
+import '../../state/connected_monitor_settings.dart';
 import '../../theme.dart';
 import '../../util/format_utils.dart';
 import '../../webrtc/webrtc_controller.dart';
@@ -284,7 +284,9 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
 
     // Add offline pinned monitors
     for (final monitor in pinned) {
-      if (advertisements.any((ad) => ad.remoteDeviceId == monitor.remoteDeviceId)) {
+      if (advertisements.any(
+        (ad) => ad.remoteDeviceId == monitor.remoteDeviceId,
+      )) {
         continue;
       }
       final fallback = _fallbackAdvertisement(monitor);
@@ -309,7 +311,12 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
           isConnected: isThisConnected,
           isConnecting: isThisConnecting,
           onConnect: fallback != null
-              ? () => _handleConnect(monitor.remoteDeviceId, null, monitor, fallback)
+              ? () => _handleConnect(
+                  monitor.remoteDeviceId,
+                  null,
+                  monitor,
+                  fallback,
+                )
               : null,
           onDisconnect: isThisConnected ? _handleDisconnect : null,
           onListen: isThisConnected
@@ -388,7 +395,7 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
         .read(trustedMonitorsProvider.notifier)
         .removeMonitor(monitor.remoteDeviceId);
     await ref
-        .read(perMonitorSettingsProvider.notifier)
+        .read(connectedMonitorSettingsProvider.notifier)
         .removeSettings(monitor.remoteDeviceId);
 
     if (!mounted) return;
@@ -588,9 +595,8 @@ class _ListenerDashboardState extends ConsumerState<ListenerDashboard> {
                     children: [
                       Text(
                         'Discovered monitors',
-                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.w800,
-                        ),
+                        style: Theme.of(context).textTheme.titleMedium
+                            ?.copyWith(fontWeight: FontWeight.w800),
                       ),
                       Row(
                         mainAxisSize: MainAxisSize.min,

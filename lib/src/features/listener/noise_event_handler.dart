@@ -9,16 +9,13 @@ import '../../domain/models.dart';
 import '../../fcm/fcm_service.dart';
 import '../../notifications/notification_service.dart';
 import '../../state/app_state.dart';
-import '../../state/per_monitor_settings.dart';
+import '../../state/connected_monitor_settings.dart';
 import '../../webrtc/webrtc_controller.dart';
 
 /// Widget that listens for noise events and triggers auto-play or notifications.
 /// Wrap your main content with this to enable auto-open stream on noise.
 class NoiseEventHandler extends ConsumerStatefulWidget {
-  const NoiseEventHandler({
-    super.key,
-    required this.child,
-  });
+  const NoiseEventHandler({super.key, required this.child});
 
   final Widget child;
 
@@ -60,32 +57,40 @@ class _NoiseEventHandlerState extends ConsumerState<NoiseEventHandler> {
   }
 
   void _handleNoiseEvent(NoiseEventData event) {
-    _log('Noise event received: remoteDeviceId=${event.remoteDeviceId} peak=${event.peakLevel}');
+    _log(
+      'Noise event received: remoteDeviceId=${event.remoteDeviceId} peak=${event.peakLevel}',
+    );
 
     if (!mounted) return;
 
-    // Check per-monitor settings first
-    final perMonitorSettingsState = ref.read(perMonitorSettingsProvider).asData?.value;
-    final perMonitorSettings = perMonitorSettingsState?.getOrDefault(event.remoteDeviceId);
+    // Check per-monitor settings first (monitor defaults + listener overrides)
+    final connectedSettingsState = ref
+        .read(connectedMonitorSettingsProvider)
+        .asData
+        ?.value;
+    final monitorSettings = connectedSettingsState?.getOrDefault(
+      event.remoteDeviceId,
+    );
 
     // Check if notifications are enabled for this monitor
-    if (perMonitorSettings?.notificationsEnabled == false) {
+    if (monitorSettings?.notificationsEnabled == false) {
       _log('Notifications disabled for monitor ${event.remoteDeviceId}');
       return;
     }
 
     // Check if auto-play on noise is enabled for this monitor
-    if (perMonitorSettings?.autoPlayOnNoise == true) {
-      _startAutoPlay(event, perMonitorSettings!.autoPlayDurationSec);
+    if (monitorSettings?.autoPlayOnNoise == true) {
+      _startAutoPlay(event, monitorSettings!.autoPlayDurationSec);
       return;
     }
 
     // Fall back to global listener settings
     final listenerSettings = ref.read(listenerSettingsProvider).asData?.value;
-    final defaultAction = listenerSettings?.defaultAction ?? ListenerDefaultAction.notify;
+    final defaultAction =
+        listenerSettings?.defaultAction ?? ListenerDefaultAction.notify;
 
     if (defaultAction == ListenerDefaultAction.autoOpenStream) {
-      _startAutoPlay(event, perMonitorSettings?.autoPlayDurationSec ?? 15);
+      _startAutoPlay(event, monitorSettings?.autoPlayDurationSec ?? 15);
     } else {
       _showNoiseNotification(event);
     }
@@ -106,7 +111,9 @@ class _NoiseEventHandlerState extends ConsumerState<NoiseEventHandler> {
 
     // If not connected, try to connect first
     if (controlClientState.status != ControlClientStatus.connected) {
-      _log('Not connected, attempting to connect to monitor ${event.remoteDeviceId}');
+      _log(
+        'Not connected, attempting to connect to monitor ${event.remoteDeviceId}',
+      );
 
       final connected = await _connectToMonitor(event.remoteDeviceId);
       if (!connected) {
@@ -201,11 +208,13 @@ class _NoiseEventHandlerState extends ConsumerState<NoiseEventHandler> {
       }
 
       // Connect
-      final failure = await ref.read(controlClientProvider.notifier).connectToMonitor(
-        advertisement: ad,
-        monitor: monitor,
-        identity: identity,
-      );
+      final failure = await ref
+          .read(controlClientProvider.notifier)
+          .connectToMonitor(
+            advertisement: ad,
+            monitor: monitor,
+            identity: identity,
+          );
 
       if (failure != null) {
         _log('Connection failed: $failure');

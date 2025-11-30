@@ -16,7 +16,7 @@ import '../domain/noise_subscription.dart';
 import '../fcm/fcm_service.dart';
 import '../identity/device_identity.dart';
 import '../state/app_state.dart';
-import '../state/per_monitor_settings.dart';
+import '../state/connected_monitor_settings.dart';
 import '../util/format_utils.dart';
 import '../utils/logger.dart';
 import '../webhook/webhook_server.dart';
@@ -267,6 +267,23 @@ class ControlClientController extends Notifier<ControlClientState> {
         // Respond to ping with pong
         send(PongMessage(timestamp: timestamp));
 
+      case MonitorSettingsMessage(
+        :final threshold,
+        :final minDurationMs,
+        :final cooldownSeconds,
+        :final audioInputGain,
+        :final autoStreamType,
+        :final autoStreamDurationSec,
+      ):
+        _handleMonitorSettings(
+          threshold: threshold,
+          minDurationMs: minDurationMs,
+          cooldownSeconds: cooldownSeconds,
+          audioInputGain: audioInputGain,
+          autoStreamType: autoStreamType,
+          autoStreamDurationSec: autoStreamDurationSec,
+        );
+
       default:
         // Other message types handled as needed
         break;
@@ -309,9 +326,7 @@ class ControlClientController extends Notifier<ControlClientState> {
     // Check if already received via WebSocket
     final dedup = ref.read(noiseEventDeduplicationProvider.notifier);
     if (!dedup.processEvent(event)) {
-      _log(
-        'Duplicate noise event ignored (already received via WebSocket)',
-      );
+      _log('Duplicate noise event ignored (already received via WebSocket)');
       return;
     }
 
@@ -352,6 +367,93 @@ class ControlClientController extends Notifier<ControlClientState> {
     }
   }
 
+  /// Handle monitor settings received via MONITOR_SETTINGS message.
+  void _handleMonitorSettings({
+    required int threshold,
+    required int minDurationMs,
+    required int cooldownSeconds,
+    required int audioInputGain,
+    required String autoStreamType,
+    required int autoStreamDurationSec,
+  }) {
+    final remoteDeviceId = state.remoteDeviceId;
+    if (remoteDeviceId == null) {
+      _log('Cannot store monitor settings: no remoteDeviceId');
+      return;
+    }
+
+    _log(
+      'Received MONITOR_SETTINGS: threshold=$threshold '
+      'cooldown=$cooldownSeconds autoStream=$autoStreamType '
+      'gain=$audioInputGain',
+    );
+
+    AutoStreamType autoStreamTypeEnum;
+    try {
+      autoStreamTypeEnum = AutoStreamType.values.byName(autoStreamType);
+    } catch (_) {
+      _log('Invalid autoStreamType: $autoStreamType, defaulting to audio');
+      autoStreamTypeEnum = AutoStreamType.audio;
+    }
+
+    // Store in ConnectedMonitorSettings
+    ref
+        .read(connectedMonitorSettingsProvider.notifier)
+        .updateFromMonitor(
+          monitorDeviceId: remoteDeviceId,
+          threshold: threshold,
+          cooldownSeconds: cooldownSeconds,
+          autoStreamType: autoStreamTypeEnum,
+          autoStreamDurationSec: autoStreamDurationSec,
+          audioInputGain: audioInputGain,
+        );
+
+    // Refresh noise subscription with the latest monitor-provided defaults.
+    unawaited(_subscribeNoiseLease(force: true));
+  }
+
+  /// Request current settings from the connected monitor.
+  Future<void> requestMonitorSettings() async {
+    if (state.status != ControlClientStatus.connected) {
+      _log('Cannot request monitor settings: not connected');
+      return;
+    }
+
+    final message = GetMonitorSettingsMessage();
+    _log('Requesting monitor settings');
+    await send(message);
+  }
+
+  /// Send customized settings to the connected monitor.
+  /// These override the monitor's defaults for this listener.
+  Future<void> sendCustomizedSettings({
+    int? threshold,
+    int? cooldownSeconds,
+    AutoStreamType? autoStreamType,
+    int? autoStreamDurationSec,
+  }) async {
+    if (state.status != ControlClientStatus.connected) {
+      _log('Cannot send customized settings: not connected');
+      return;
+    }
+
+    final message = UpdateListenerSettingsMessage(
+      threshold: threshold,
+      cooldownSeconds: cooldownSeconds,
+      autoStreamType: autoStreamType?.name,
+      autoStreamDurationSec: autoStreamDurationSec,
+    );
+
+    _log(
+      'Sending UPDATE_LISTENER_SETTINGS: threshold=$threshold '
+      'cooldown=$cooldownSeconds autoStream=${autoStreamType?.name}',
+    );
+    await send(message);
+
+    // Also refresh the HTTP subscription to keep it in sync
+    unawaited(_subscribeNoiseLease(force: true));
+  }
+
   void _onTokenRefresh(String token) {
     if (_disposed) return;
     _log('FCM token refreshed, renewing noise subscription');
@@ -384,8 +486,9 @@ class ControlClientController extends Notifier<ControlClientState> {
       );
 
       // Subscribe to webhook events
-      _webhookEventSub =
-          _webhookServer!.events.listen(_handleWebhookNoiseEvent);
+      _webhookEventSub = _webhookServer!.events.listen(
+        _handleWebhookNoiseEvent,
+      );
 
       // Determine webhook URL from local IP (use monitor's IP as hint)
       final localIp = await _getLocalIpForMonitor(_currentHost);
@@ -520,30 +623,28 @@ class ControlClientController extends Notifier<ControlClientState> {
     }
 
     try {
-      // Get listener's noise preferences
-      final listenerSettings = await ref.read(listenerSettingsProvider.future);
-      final globalPrefs = listenerSettings.noisePreferences;
-
-      // Get per-monitor overrides if connected
+      // Get effective settings from ConnectedMonitorSettings
+      // These include monitor's base settings with listener's customizations
       final connectedDeviceId = state.remoteDeviceId;
-      int effectiveThreshold = globalPrefs.threshold;
-      int effectiveCooldown = globalPrefs.cooldownSeconds;
-      AutoStreamType effectiveAutoStreamType = globalPrefs.autoStreamType;
-      int effectiveAutoStreamDuration = globalPrefs.autoStreamDurationSec;
+      int effectiveThreshold = MonitorSettings.defaults.noise.threshold;
+      int effectiveCooldown = MonitorSettings.defaults.noise.cooldownSeconds;
+      AutoStreamType effectiveAutoStreamType =
+          MonitorSettings.defaults.autoStreamType;
+      int effectiveAutoStreamDuration =
+          MonitorSettings.defaults.autoStreamDurationSec;
 
       if (connectedDeviceId != null) {
-        final perMonitorData = await ref.read(
-          perMonitorSettingsProvider.future,
+        final settingsController = ref.read(
+          connectedMonitorSettingsProvider.notifier,
         );
-        final perMonitor = perMonitorData.getOrDefault(connectedDeviceId);
-        effectiveThreshold = perMonitor.thresholdOverride ?? effectiveThreshold;
-        effectiveCooldown =
-            perMonitor.cooldownSecondsOverride ?? effectiveCooldown;
-        effectiveAutoStreamType =
-            perMonitor.autoStreamTypeOverride ?? effectiveAutoStreamType;
+        final monitorSettings = settingsController.getOrDefault(
+          connectedDeviceId,
+        );
+        effectiveThreshold = monitorSettings.effectiveThreshold;
+        effectiveCooldown = monitorSettings.effectiveCooldownSeconds;
+        effectiveAutoStreamType = monitorSettings.effectiveAutoStreamType;
         effectiveAutoStreamDuration =
-            perMonitor.autoStreamDurationSecOverride ??
-            effectiveAutoStreamDuration;
+            monitorSettings.effectiveAutoStreamDurationSec;
       }
 
       final response = await _client!.subscribeNoise(

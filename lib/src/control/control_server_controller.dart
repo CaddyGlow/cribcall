@@ -151,9 +151,6 @@ class ControlServerController extends Notifier<ControlServerState> {
   /// Whether we're using a native server (Android or iOS).
   bool get _useNativeServer => Platform.isAndroid || Platform.isIOS;
 
-  /// Track last noise broadcast timestamp per subscription (for per-listener cooldown).
-  final Map<String, int> _lastBroadcastPerSubscription = {};
-
   @override
   ControlServerState build() {
     ref.onDispose(_shutdown);
@@ -351,6 +348,8 @@ class ControlServerController extends Notifier<ControlServerState> {
         );
         _nativeConnections[connectionId] = fingerprint;
         state = state.copyWithConnectionCount(_nativeConnections.length);
+        // Send monitor settings to newly connected listener
+        unawaited(_sendMonitorSettingsToConnection(connectionId));
 
       case IOSClientDisconnected(:final connectionId, :final reason):
         _log('iOS client disconnected: $connectionId reason=$reason');
@@ -392,6 +391,8 @@ class ControlServerController extends Notifier<ControlServerState> {
         _listenToConnection(connection);
         // Update connection count in state
         state = state.copyWithConnectionCount(_connections.length);
+        // Send monitor settings to newly connected listener
+        unawaited(_sendMonitorSettingsToConnection(connection.connectionId));
       case server.ClientDisconnected(:final connectionId, :final reason):
         _log('Client disconnected: $connectionId reason=$reason');
         _connections.remove(connectionId);
@@ -431,6 +432,8 @@ class ControlServerController extends Notifier<ControlServerState> {
         );
         _nativeConnections[connectionId] = fingerprint;
         state = state.copyWithConnectionCount(_nativeConnections.length);
+        // Send monitor settings to newly connected listener
+        unawaited(_sendMonitorSettingsToConnection(connectionId));
 
       case AndroidClientDisconnected(:final connectionId, :final reason):
         _log('Android client disconnected: $connectionId reason=$reason');
@@ -510,6 +513,23 @@ class ControlServerController extends Notifier<ControlServerState> {
 
       case EndStreamMessage(:final sessionId):
         _handleEndStream(sessionId);
+
+      case GetMonitorSettingsMessage():
+        unawaited(_sendMonitorSettingsToConnection(connectionId));
+
+      case UpdateListenerSettingsMessage(
+        :final threshold,
+        :final cooldownSeconds,
+        :final autoStreamType,
+        :final autoStreamDurationSec,
+      ):
+        unawaited(_handleListenerSettingsUpdate(
+          fingerprint: fingerprint,
+          threshold: threshold,
+          cooldownSeconds: cooldownSeconds,
+          autoStreamType: autoStreamType,
+          autoStreamDurationSec: autoStreamDurationSec,
+        ));
 
       default:
         // Other message types handled as needed
@@ -1168,6 +1188,23 @@ class ControlServerController extends Notifier<ControlServerState> {
       case EndStreamMessage(:final sessionId):
         _handleEndStream(sessionId);
 
+      case GetMonitorSettingsMessage():
+        unawaited(_sendMonitorSettingsToConnection(connection.connectionId));
+
+      case UpdateListenerSettingsMessage(
+        :final threshold,
+        :final cooldownSeconds,
+        :final autoStreamType,
+        :final autoStreamDurationSec,
+      ):
+        unawaited(_handleListenerSettingsUpdate(
+          fingerprint: connection.peerFingerprint,
+          threshold: threshold,
+          cooldownSeconds: cooldownSeconds,
+          autoStreamType: autoStreamType,
+          autoStreamDurationSec: autoStreamDurationSec,
+        ));
+
       default:
         // Other message types handled as needed
         break;
@@ -1204,6 +1241,76 @@ class ControlServerController extends Notifier<ControlServerState> {
     _log('End stream: session=$sessionId');
     final streaming = ref.read(monitorStreamingProvider.notifier);
     streaming.handleEndStream(sessionId: sessionId);
+  }
+
+  /// Send current monitor settings to a specific connection.
+  Future<void> _sendMonitorSettingsToConnection(String connectionId) async {
+    final settingsAsync = ref.read(monitorSettingsProvider);
+    final settings = settingsAsync.asData?.value ?? MonitorSettings.defaults;
+
+    final message = MonitorSettingsMessage(
+      threshold: settings.noise.threshold,
+      minDurationMs: settings.noise.minDurationMs,
+      cooldownSeconds: settings.noise.cooldownSeconds,
+      audioInputGain: settings.audioInputGain,
+      autoStreamType: settings.autoStreamType.name,
+      autoStreamDurationSec: settings.autoStreamDurationSec,
+    );
+
+    _log(
+      'Sending MONITOR_SETTINGS to $connectionId: '
+      'threshold=${settings.noise.threshold} '
+      'cooldown=${settings.noise.cooldownSeconds}',
+    );
+    await _sendToConnection(connectionId, message);
+  }
+
+  /// Handle listener settings update from UPDATE_LISTENER_SETTINGS message.
+  /// Updates the subscription with the listener's customized preferences.
+  Future<void> _handleListenerSettingsUpdate({
+    required String fingerprint,
+    int? threshold,
+    int? cooldownSeconds,
+    String? autoStreamType,
+    int? autoStreamDurationSec,
+  }) async {
+    final listeners = await ref.read(trustedListenersProvider.future);
+    final peer = listeners.firstWhereOrNull(
+      (p) => p.certFingerprint == fingerprint,
+    );
+    if (peer == null) {
+      _log(
+        'Listener settings update rejected: fingerprint not trusted '
+        'fp=${shortFingerprint(fingerprint)}',
+      );
+      return;
+    }
+
+    AutoStreamType? autoStreamTypeEnum;
+    if (autoStreamType != null) {
+      try {
+        autoStreamTypeEnum = AutoStreamType.values.byName(autoStreamType);
+      } catch (_) {
+        _log('Invalid autoStreamType: $autoStreamType');
+        return;
+      }
+    }
+
+    _log(
+      'Updating listener settings: device=${peer.remoteDeviceId} '
+      'threshold=$threshold cooldown=$cooldownSeconds '
+      'autoStream=$autoStreamType duration=$autoStreamDurationSec',
+    );
+
+    await ref
+        .read(noiseSubscriptionsProvider.notifier)
+        .updateListenerSettings(
+          fingerprint: fingerprint,
+          threshold: threshold,
+          cooldownSeconds: cooldownSeconds,
+          autoStreamType: autoStreamTypeEnum,
+          autoStreamDurationSec: autoStreamDurationSec,
+        );
   }
 
   /// Handle FCM token update from a listener.
@@ -1525,9 +1632,8 @@ class ControlServerController extends Notifier<ControlServerState> {
         continue;
       }
 
-      // Check cooldown
-      final lastBroadcast =
-          _lastBroadcastPerSubscription[sub.subscriptionId] ?? 0;
+      // Check cooldown using persisted lastNoiseEventMs
+      final lastBroadcast = sub.lastNoiseEventMs ?? 0;
       final cooldownMs = sub.effectiveCooldownSeconds * 1000;
       if (timestampMs - lastBroadcast < cooldownMs) {
         continue;
@@ -1535,7 +1641,14 @@ class ControlServerController extends Notifier<ControlServerState> {
 
       // Subscription is eligible
       eligibleSubs.add(sub);
-      _lastBroadcastPerSubscription[sub.subscriptionId] = timestampMs;
+    }
+
+    // Update lastNoiseEventMs for each eligible subscription (persisted)
+    for (final sub in eligibleSubs) {
+      unawaited(subsController.updateLastNoiseEvent(
+        subscriptionId: sub.subscriptionId,
+        timestampMs: timestampMs,
+      ));
     }
 
     if (eligibleSubs.isEmpty) {
