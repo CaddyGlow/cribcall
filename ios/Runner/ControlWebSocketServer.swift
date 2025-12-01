@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import CryptoKit
+import Security
 import os.log
 
 /// WebSocket server with HTTP endpoint support, running over mTLS.
@@ -318,26 +319,8 @@ class ControlWebSocketServer {
         // Access the security protocol metadata
         let secMetadata = tlsMetadata.securityProtocolMetadata
 
-        // Extract client certificate fingerprint from peer certificate chain
-        // Note: sec_protocol_metadata_access_peer_certificate_chain calls the handler synchronously
-        var fingerprint: String? = nil
-
-        sec_protocol_metadata_access_peer_certificate_chain(secMetadata) { certChain in
-            // Get the first certificate (client cert)
-            let certCount = sec_certificate_chain_get_count(certChain)
-            guard certCount > 0,
-                  let certRef = sec_certificate_chain_get_certificate(certChain, 0) else {
-                return
-            }
-
-            let cert = sec_certificate_copy_ref(certRef).takeRetainedValue()
-
-            if let certData = SecCertificateCopyData(cert) as Data? {
-                fingerprint = MonitorTlsManager.fingerprintHex(certData)
-            }
-        }
-
-        return fingerprint
+        // Fingerprint is cached during the TLS verify block
+        return tlsManager.fingerprint(for: secMetadata)
     }
 
     // MARK: - Request Routing

@@ -18,6 +18,8 @@ class MonitorTlsManager {
     // Trust store (fingerprint -> certificate)
     private var trustedCerts: [String: SecCertificate] = [:]
     private let trustedCertsLock = NSLock()
+    private var fingerprintCache: [ObjectIdentifier: String] = [:]
+    private let fingerprintCacheLock = NSLock()
 
     init(serverCertDer: Data, serverPrivateKey: Data, trustedPeerCerts: [Data]) throws {
         // Parse server certificate
@@ -92,7 +94,7 @@ class MonitorTlsManager {
         sec_protocol_options_set_verify_block(
             secOptions,
             { [weak self] (metadata, trust, complete) in
-                self?.verifyClientCertificate(trust: trust, complete: complete)
+                self?.verifyClientCertificate(metadata: metadata, trust: trust, complete: complete)
                     ?? complete(false)
             },
             DispatchQueue.global(qos: .userInitiated)
@@ -102,6 +104,7 @@ class MonitorTlsManager {
     }
 
     private func verifyClientCertificate(
+        metadata: sec_protocol_metadata_t,
         trust: sec_trust_t,
         complete: @escaping (Bool) -> Void
     ) {
@@ -123,6 +126,7 @@ class MonitorTlsManager {
         }
 
         let fingerprint = MonitorTlsManager.fingerprintHex(certData)
+        cacheFingerprint(fingerprint, metadata: metadata)
 
         // Check if fingerprint is trusted
         trustedCertsLock.lock()
@@ -210,14 +214,26 @@ class MonitorTlsManager {
     /// Validate a client certificate and return its fingerprint if trusted.
     func validateClientCert(_ connection: NWConnection) -> String? {
         // Get the security metadata from the connection
-        guard let metadata = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata,
-              let secTrust = metadata.securityProtocolMetadata.map({ sec_protocol_metadata_copy_peer_public_key($0) }) else {
-            return nil
-        }
+        guard connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata != nil else { return nil }
 
         // For now, we rely on the verify block set in createTlsOptions
         // This method can be used for additional validation if needed
         return nil
+    }
+
+    /// Retrieve cached fingerprint for a given TLS metadata object.
+    func fingerprint(for metadata: sec_protocol_metadata_t) -> String? {
+        let key = ObjectIdentifier(metadata)
+        fingerprintCacheLock.lock()
+        defer { fingerprintCacheLock.unlock() }
+        return fingerprintCache[key]
+    }
+
+    private func cacheFingerprint(_ fingerprint: String, metadata: sec_protocol_metadata_t) {
+        let key = ObjectIdentifier(metadata)
+        fingerprintCacheLock.lock()
+        fingerprintCache[key] = fingerprint
+        fingerprintCacheLock.unlock()
     }
 
     // MARK: - Static Helpers

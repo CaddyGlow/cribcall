@@ -13,6 +13,11 @@
 		3B3967161E833CAA004F5970 /* AppFrameworkInfo.plist in Resources */ = {isa = PBXBuildFile; fileRef = 3B3967151E833CAA004F5970 /* AppFrameworkInfo.plist */; };
 		5F8B343189FFA71912E077A3 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 7F7506D1B6A560FA0A015FB9 /* Pods_Runner.framework */; };
 		74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74858FAE1ED2DC5600515810 /* AppDelegate.swift */; };
+		A5B7C5F1298EAA2A00D0C1AA /* AudioCaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5B7C5F0298EAA2A00D0C1AA /* AudioCaptureService.swift */; };
+		A5B7C601298EAA2A00D0C1AA /* AudioSessionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5B7C600298EAA2A00D0C1AA /* AudioSessionManager.swift */; };
+		A5B7C611298EAA2A00D0C1AA /* ControlWebSocketServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5B7C610298EAA2A00D0C1AA /* ControlWebSocketServer.swift */; };
+		A5B7C621298EAA2A00D0C1AA /* MonitorService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5B7C620298EAA2A00D0C1AA /* MonitorService.swift */; };
+		A5B7C631298EAA2A00D0C1AA /* MonitorTlsManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5B7C630298EAA2A00D0C1AA /* MonitorTlsManager.swift */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
@@ -56,6 +61,11 @@
 		7AFA3C8E1D35360C0083082E /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Release.xcconfig; path = Flutter/Release.xcconfig; sourceTree = "<group>"; };
 		7F7506D1B6A560FA0A015FB9 /* Pods_Runner.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Runner.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		8A1EFD38BE740D8AA8612928 /* Pods-RunnerTests.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.profile.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.profile.xcconfig"; sourceTree = "<group>"; };
+		A5B7C5F0298EAA2A00D0C1AA /* AudioCaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioCaptureService.swift; sourceTree = "<group>"; };
+		A5B7C600298EAA2A00D0C1AA /* AudioSessionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSessionManager.swift; sourceTree = "<group>"; };
+		A5B7C610298EAA2A00D0C1AA /* ControlWebSocketServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlWebSocketServer.swift; sourceTree = "<group>"; };
+		A5B7C620298EAA2A00D0C1AA /* MonitorService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MonitorService.swift; sourceTree = "<group>"; };
+		A5B7C630298EAA2A00D0C1AA /* MonitorTlsManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MonitorTlsManager.swift; sourceTree = "<group>"; };
 		9740EEB21CF90195004384FC /* Debug.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Debug.xcconfig; path = Flutter/Debug.xcconfig; sourceTree = "<group>"; };
 		9740EEB31CF90195004384FC /* Generated.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Generated.xcconfig; path = Flutter/Generated.xcconfig; sourceTree = "<group>"; };
 		97C146EE1CF9000F007C117D /* Runner.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Runner.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -136,6 +146,11 @@
 				97C147021CF9000F007C117D /* Info.plist */,
 				1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */,
 				1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */,
+				A5B7C5F0298EAA2A00D0C1AA /* AudioCaptureService.swift */,
+				A5B7C600298EAA2A00D0C1AA /* AudioSessionManager.swift */,
+				A5B7C610298EAA2A00D0C1AA /* ControlWebSocketServer.swift */,
+				A5B7C620298EAA2A00D0C1AA /* MonitorService.swift */,
+				A5B7C630298EAA2A00D0C1AA /* MonitorTlsManager.swift */,
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 			);
@@ -152,7 +167,6 @@
 				F06F592897AA73F1D381DCD1 /* Pods-RunnerTests.release.xcconfig */,
 				8A1EFD38BE740D8AA8612928 /* Pods-RunnerTests.profile.xcconfig */,
 			);
-			name = Pods;
 			path = Pods;
 			sourceTree = "<group>";
 		};
@@ -397,6 +411,11 @@
 			files = (
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
+				A5B7C5F1298EAA2A00D0C1AA /* AudioCaptureService.swift in Sources */,
+				A5B7C601298EAA2A00D0C1AA /* AudioSessionManager.swift in Sources */,
+				A5B7C611298EAA2A00D0C1AA /* ControlWebSocketServer.swift in Sources */,
+				A5B7C621298EAA2A00D0C1AA /* MonitorService.swift in Sources */,
+				A5B7C631298EAA2A00D0C1AA /* MonitorTlsManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -459,6 +478,7 @@
 				CLANG_WARN_SUSPICIOUS_MOVE = YES;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "Apple Development: hca443@gmail.com (8HFPWFHU94)";
 				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer";
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
@@ -582,6 +602,7 @@
 				CLANG_WARN_SUSPICIOUS_MOVE = YES;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "Apple Development: hca443@gmail.com (8HFPWFHU94)";
 				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer";
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
@@ -639,7 +660,8 @@
 				CLANG_WARN_SUSPICIOUS_MOVE = YES;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
-				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer";
+				CODE_SIGN_IDENTITY = "Apple Development: hca443@gmail.com (8HFPWFHU94)";
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Development: hca443@gmail.com (8HFPWFHU94)";
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;

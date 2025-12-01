@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+ - Task: plan-macos-support — Added Flutter macOS target with unsandboxed entitlements, placeholder mDNS/device-info channels, and README notes for the preview desktop build.
  - Task: firebase-secret-cleanup — Removed the tracked Android `google-services.json`, added an ignore and example template, and require developers to supply local Firebase config to keep keys out of git.
  - Task: firebase-api-key-rotation-script — Added a script to clone/rotate GCP API keys with copied restrictions, handles async key creation to capture key strings, and guides keeping outputs local.
  - Task: android-fgs-mic-fallback — Guarded microphone foreground-service start on Android 15/SDK 36 with a dataSync fallback so monitoring doesn’t crash when MIC FGS permissions are denied at runtime.

@@ -267,6 +267,10 @@ final serviceIdentityProvider = Provider<ServiceIdentityBuilder>((ref) {
   );
 });
 final mdnsServiceProvider = Provider<MdnsService>((ref) {
+  // macOS preview uses a no-op mDNS service until native implementation lands.
+  if (!kIsWeb && Platform.isMacOS) {
+    return NoopMdnsService();
+  }
   if (!kIsWeb && Platform.isLinux) {
     return DesktopMdnsService();
   }

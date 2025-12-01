@@ -1,6 +1,6 @@
 # CribCall
 
-Local-only baby monitor using mTLS HTTP+WebSocket control channels and WebRTC for media. Supports Android and Linux with audio capture, sound detection, and push notifications. See `SPEC.md` for the full product and protocol specification.
+Local-only baby monitor using mTLS HTTP+WebSocket control channels and WebRTC for media. Supports Android and Linux with audio capture, sound detection, and push notifications, plus a macOS preview target (mDNS is stubbed while native code lands). See `SPEC.md` for the full product and protocol specification.
 
 ## Features
 
@@ -51,6 +51,11 @@ flutter test          # Run unit/widget tests
 flutter run -d linux  # Run on Linux desktop
 flutter run -d android  # Run on connected Android device
 ```
+
+### macOS (preview)
+- Requires Xcode + CocoaPods (`sudo xcode-select --install` then `sudo gem install cocoapods`).
+- Run `flutter run -d macos`; entitlements are unsandboxed for now while microphone/local network permissions and incoming connections are documented.
+- mDNS is currently a no-op on macOS; pair by entering QR JSON manually or using direct IPs until the native NetService implementation lands.
 
 ### Firebase Setup
 Copy and configure your Firebase project:
